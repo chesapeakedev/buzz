@@ -88,6 +88,10 @@ test-sync-upstream:
 test-fork-release-safety:
     ./scripts/test-fork-release-safety.sh
 
+# Verify ChesapeakeDev relay publication ownership, tags, and provenance
+test-chesapeakedev-release:
+    ./scripts/test-chesapeakedev-release-contract.sh
+
 # Wipe development state and recreate a clean environment. Installed Buzz is preserved.
 [confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
 reset:

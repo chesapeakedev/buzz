@@ -946,6 +946,7 @@ jobs:
       - name: Verify upstream publishing remains disabled in forks
         run: |
           scripts/test-fork-release-safety.sh
+          scripts/test-chesapeakedev-release-contract.sh
 
   server-cross-compile:
     name: Server Cross-Compile

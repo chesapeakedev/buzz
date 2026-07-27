@@ -16,6 +16,8 @@ require_text() {
 # These upstream lanes can build or validate in pull requests, but publication
 # must remain restricted to block/buzz until a ChesapeakeDev-owned lane replaces
 # each one deliberately.
+require_text .github/workflows/docker.yml \
+  "if: github.repository == 'block/buzz' && github.event_name != 'pull_request'"
 require_text .github/workflows/helm-chart.yml \
   "github.repository == 'block/buzz' &&"
 require_text .github/workflows/push-gateway-helm-chart.yml \
