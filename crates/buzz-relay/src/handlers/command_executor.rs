@@ -97,7 +97,7 @@ enum PersistResult {
 /// not strictly atomic: if a mutation succeeds but commit fails, the mutation
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (update_approval, upsert_workflow). All DM commands use
+/// operations such as workflow upserts. DM and approval commands use
 /// database-owned atomic command APIs below and are not part of this legacy path.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
@@ -1103,65 +1103,43 @@ async fn handle_approval_grant(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
-    if approval.status != ApprovalStatus::Pending {
-        return Err(IngestError::Rejected(format!(
-            "invalid: approval already {}",
-            approval.status
-        )));
-    }
-    if Utc::now() > approval.expires_at {
-        return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
-        ));
-    }
-
-    // 4. Validate caller is authorized approver
+    // 3. Validate caller is authorized approver. Pending/expiry checks happen
+    // in the atomic update so an exact command replay remains idempotent.
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist the command and conditional approval update atomically.
+    let note = if event.content.is_empty() {
+        None
+    } else {
+        Some(event.content.as_str())
+    };
+    match state
+        .db
+        .execute_approval_grant_command(tenant.community(), event, &token_hash, &self_bytes, note)
+        .await
+        .map_err(|e| match e {
+            DbError::Conflict(_) if approval.status != ApprovalStatus::Pending => {
+                IngestError::Rejected(format!("invalid: approval already {}", approval.status))
+            }
+            DbError::Conflict(_) if Utc::now() > approval.expires_at => {
+                IngestError::Rejected("invalid: approval token has expired".into())
+            }
+            DbError::Conflict(_) => {
+                IngestError::Rejected("invalid: approval already acted on (race)".into())
+            }
+            other => IngestError::Internal(format!("error: db execute approval grant: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
-
-    // 5. Execute: update approval status to granted
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
-        .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Granted,
-            Some(&self_bytes),
-            note,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
-        return Err(IngestError::Rejected(
-            "invalid: approval already acted on (race)".into(),
-        ));
+        CommandExecution::Applied(()) => {}
     }
 
-    // Commit: event + approval update succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Resume workflow execution (post-commit, async)
+    // 5. Resume workflow execution (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
     let workflow_id = approval.workflow_id;
@@ -1174,7 +1152,7 @@ async fn handle_approval_grant(
             .await;
     });
 
-    // 7. Return response
+    // 6. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
@@ -1214,65 +1192,43 @@ async fn handle_approval_deny(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
-    if approval.status != ApprovalStatus::Pending {
-        return Err(IngestError::Rejected(format!(
-            "invalid: approval already {}",
-            approval.status
-        )));
-    }
-    if Utc::now() > approval.expires_at {
-        return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
-        ));
-    }
-
-    // 4. Validate caller is authorized approver
+    // 3. Validate caller is authorized approver. Pending/expiry checks happen
+    // in the atomic update so an exact command replay remains idempotent.
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist the command and conditional approval update atomically.
+    let note = if event.content.is_empty() {
+        None
+    } else {
+        Some(event.content.as_str())
+    };
+    match state
+        .db
+        .execute_approval_deny_command(tenant.community(), event, &token_hash, &self_bytes, note)
+        .await
+        .map_err(|e| match e {
+            DbError::Conflict(_) if approval.status != ApprovalStatus::Pending => {
+                IngestError::Rejected(format!("invalid: approval already {}", approval.status))
+            }
+            DbError::Conflict(_) if Utc::now() > approval.expires_at => {
+                IngestError::Rejected("invalid: approval token has expired".into())
+            }
+            DbError::Conflict(_) => {
+                IngestError::Rejected("invalid: approval already acted on (race)".into())
+            }
+            other => IngestError::Internal(format!("error: db execute approval deny: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
-
-    // 5. Execute: update approval status to denied
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
-        .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Denied,
-            Some(&self_bytes),
-            note,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
-        return Err(IngestError::Rejected(
-            "invalid: approval already acted on (race)".into(),
-        ));
+        CommandExecution::Applied(()) => {}
     }
 
-    // Commit: event + approval denial succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Cancel the workflow run (post-commit, async)
+    // 5. Cancel the workflow run (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
     let pubkey_hex = self_hex.clone();
@@ -1314,7 +1270,7 @@ async fn handle_approval_deny(
         }
     });
 
-    // 7. Return response
+    // 6. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,

@@ -4357,6 +4357,96 @@ impl Db {
         .await
     }
 
+    /// Atomically persist an approval-grant command and resolve its gate.
+    pub async fn execute_approval_grant_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        token_hash: &[u8],
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<CommandExecution<()>> {
+        self.execute_approval_command(
+            community_id,
+            event,
+            buzz_core::kind::KIND_APPROVAL_GRANT,
+            token_hash,
+            workflow::ApprovalStatus::Granted,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Atomically persist an approval-deny command and resolve its gate.
+    pub async fn execute_approval_deny_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        token_hash: &[u8],
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<CommandExecution<()>> {
+        self.execute_approval_command(
+            community_id,
+            event,
+            buzz_core::kind::KIND_APPROVAL_DENY,
+            token_hash,
+            workflow::ApprovalStatus::Denied,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_approval_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        expected_kind: u32,
+        token_hash: &[u8],
+        status: workflow::ApprovalStatus,
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != expected_kind {
+            return Err(DbError::InvalidData(format!(
+                "expected approval command kind {expected_kind}, got {}",
+                event.kind.as_u16()
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let (_, inserted) =
+            event::insert_event_with_thread_metadata_tx(&mut tx, community_id, event, None, None)
+                .await?;
+
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        let updated = workflow::resolve_approval_command_tx(
+            &mut tx,
+            community_id,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await?;
+        if !updated {
+            tx.rollback().await?;
+            return Err(DbError::Conflict(
+                "approval already acted on or not found".to_string(),
+            ));
+        }
+
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(()))
+    }
+
     /// Ensures monthly partitions exist for the next N months.
     #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
@@ -6363,6 +6453,267 @@ mod tests {
                 .execute(&db.pool)
                 .await
                 .expect("clean DM add-member command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_commands_are_atomic_idempotent_and_tenant_scoped() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let db = setup_db().await;
+        let community_a_uuid = make_community(&db.pool).await;
+        let community_b_uuid = make_community(&db.pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let actor = Keys::generate();
+        let actor_bytes = actor.public_key().to_bytes();
+
+        for community in [community_a, community_b] {
+            db.ensure_user(community, actor_bytes.as_slice())
+                .await
+                .expect("insert approval actor");
+        }
+
+        let definition_hash = [0x42; 32];
+        let workflow_a = db
+            .create_workflow(
+                community_a,
+                None,
+                actor_bytes.as_slice(),
+                "approval-a",
+                "{}",
+                &definition_hash,
+            )
+            .await
+            .expect("create workflow A");
+        let workflow_b = db
+            .create_workflow(
+                community_b,
+                None,
+                actor_bytes.as_slice(),
+                "approval-b",
+                "{}",
+                &definition_hash,
+            )
+            .await
+            .expect("create workflow B");
+        let run_a = db
+            .create_workflow_run(community_a, workflow_a, None, None)
+            .await
+            .expect("create run A");
+        let run_b = db
+            .create_workflow_run(community_b, workflow_b, None, None)
+            .await
+            .expect("create run B");
+
+        let shared_token = "shared-command-approval-token";
+        let expires_at = Utc::now() + chrono::Duration::hours(1);
+        for (community_id, workflow_id, run_id) in [
+            (community_a, workflow_a, run_a),
+            (community_b, workflow_b, run_b),
+        ] {
+            db.create_approval(workflow::CreateApprovalParams {
+                community_id,
+                token: shared_token,
+                workflow_id,
+                run_id,
+                step_id: "gate",
+                step_index: 0,
+                approver_spec: "any",
+                expires_at,
+            })
+            .await
+            .expect("create shared approval");
+        }
+        let token_hash = db
+            .get_approval(community_a, shared_token)
+            .await
+            .expect("read approval A")
+            .token;
+
+        let grant_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_APPROVAL_GRANT as u16),
+            "ship it",
+        )
+        .sign_with_keys(&actor)
+        .expect("sign approval grant");
+        let outcome = db
+            .execute_approval_grant_command(
+                community_a,
+                &grant_event,
+                &token_hash,
+                actor_bytes.as_slice(),
+                Some("ship it"),
+            )
+            .await
+            .expect("execute approval grant");
+        assert_eq!(outcome, CommandExecution::Applied(()));
+        assert_eq!(
+            db.get_approval(community_a, shared_token)
+                .await
+                .expect("read granted approval")
+                .status,
+            workflow::ApprovalStatus::Granted
+        );
+        assert_eq!(
+            db.get_approval(community_b, shared_token)
+                .await
+                .expect("read other tenant approval")
+                .status,
+            workflow::ApprovalStatus::Pending,
+            "granting A's token must not resolve B's identical token"
+        );
+
+        let replay = db
+            .execute_approval_grant_command(
+                community_a,
+                &grant_event,
+                &token_hash,
+                actor_bytes.as_slice(),
+                Some("ship it"),
+            )
+            .await
+            .expect("replay approval grant");
+        assert_eq!(replay, CommandExecution::Duplicate);
+
+        let expired_token = "expired-command-approval-token";
+        db.create_approval(workflow::CreateApprovalParams {
+            community_id: community_a,
+            token: expired_token,
+            workflow_id: workflow_a,
+            run_id: run_a,
+            step_id: "expired-gate",
+            step_index: 1,
+            approver_spec: "any",
+            expires_at: Utc::now() - chrono::Duration::minutes(1),
+        })
+        .await
+        .expect("create expired approval");
+        let expired_hash = db
+            .get_approval(community_a, expired_token)
+            .await
+            .expect("read expired approval")
+            .token;
+        let expired_event =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_APPROVAL_DENY as u16), "")
+                .sign_with_keys(&actor)
+                .expect("sign expired approval denial");
+        let expired_result = db
+            .execute_approval_deny_command(
+                community_a,
+                &expired_event,
+                &expired_hash,
+                actor_bytes.as_slice(),
+                None,
+            )
+            .await;
+        assert!(matches!(expired_result, Err(DbError::Conflict(_))));
+        let expired_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_a_uuid)
+                .bind(expired_event.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count expired command event");
+        assert_eq!(
+            expired_event_count, 0,
+            "an expired decision must roll back its command event"
+        );
+
+        let race_token = "concurrent-command-approval-token";
+        db.create_approval(workflow::CreateApprovalParams {
+            community_id: community_a,
+            token: race_token,
+            workflow_id: workflow_a,
+            run_id: run_a,
+            step_id: "race-gate",
+            step_index: 2,
+            approver_spec: "any",
+            expires_at,
+        })
+        .await
+        .expect("create raced approval");
+        let race_hash = db
+            .get_approval(community_a, race_token)
+            .await
+            .expect("read raced approval")
+            .token;
+        let race_grant = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_APPROVAL_GRANT as u16),
+            "",
+        )
+        .sign_with_keys(&actor)
+        .expect("sign raced grant");
+        let race_deny =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_APPROVAL_DENY as u16), "")
+                .sign_with_keys(&actor)
+                .expect("sign raced denial");
+
+        let (grant_result, deny_result) = tokio::join!(
+            db.execute_approval_grant_command(
+                community_a,
+                &race_grant,
+                &race_hash,
+                actor_bytes.as_slice(),
+                None,
+            ),
+            db.execute_approval_deny_command(
+                community_a,
+                &race_deny,
+                &race_hash,
+                actor_bytes.as_slice(),
+                None,
+            )
+        );
+        let results = [grant_result, deny_result];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(CommandExecution::Applied(()))))
+                .count(),
+            1,
+            "exactly one concurrent decision must commit"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(DbError::Conflict(_))))
+                .count(),
+            1,
+            "the losing decision must report a conflict"
+        );
+
+        let persisted_race_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND (id = $2 OR id = $3)",
+        )
+        .bind(community_a_uuid)
+        .bind(race_grant.id.as_bytes().as_slice())
+        .bind(race_deny.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count raced command events");
+        assert_eq!(
+            persisted_race_events, 1,
+            "the losing decision must roll back its command event"
+        );
+
+        for community_uuid in [community_a_uuid, community_b_uuid] {
+            for statement in [
+                "DELETE FROM events WHERE community_id = $1",
+                "DELETE FROM workflow_approvals WHERE community_id = $1",
+                "DELETE FROM workflow_runs WHERE community_id = $1",
+                "DELETE FROM workflows WHERE community_id = $1",
+                "DELETE FROM users WHERE community_id = $1",
+                "DELETE FROM communities WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(community_uuid)
+                    .execute(&db.pool)
+                    .await
+                    .expect("clean approval command fixture");
+            }
         }
     }
 

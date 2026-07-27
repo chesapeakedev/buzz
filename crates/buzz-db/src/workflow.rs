@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -1136,6 +1136,72 @@ pub async fn update_approval_by_stored_hash(
     approver_pubkey: Option<&[u8]>,
     note: Option<&str>,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let updated = update_approval_by_stored_hash_tx(
+        &mut tx,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
+/// Update an approval by stored token hash inside a caller-owned transaction.
+pub(crate) async fn update_approval_by_stored_hash_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+) -> Result<bool> {
+    update_approval_by_stored_hash_tx_inner(
+        tx,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+        false,
+    )
+    .await
+}
+
+/// Resolve an unexpired pending approval inside a command transaction.
+pub(crate) async fn resolve_approval_command_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: &[u8],
+    note: Option<&str>,
+) -> Result<bool> {
+    update_approval_by_stored_hash_tx_inner(
+        tx,
+        community_id,
+        token_hash,
+        status,
+        Some(approver_pubkey),
+        note,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_approval_by_stored_hash_tx_inner(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+    require_unexpired: bool,
+) -> Result<bool> {
     let status_str = status.to_string();
     let affected = sqlx::query(
         r#"
@@ -1145,7 +1211,10 @@ pub async fn update_approval_by_stored_hash(
             note            = $3,
             granted_at      = CASE WHEN $4 = 'granted' THEN NOW() ELSE granted_at END,
             denied_at       = CASE WHEN $5 = 'denied'  THEN NOW() ELSE denied_at  END
-        WHERE community_id = $6 AND token = $7 AND status = 'pending'
+        WHERE community_id = $6
+          AND token = $7
+          AND status = 'pending'
+          AND ($8 = FALSE OR expires_at >= NOW())
         "#,
     )
     .bind(&status_str)
@@ -1155,7 +1224,8 @@ pub async fn update_approval_by_stored_hash(
     .bind(&status_str) // for denied_at CASE
     .bind(community_id.as_uuid())
     .bind(token_hash)
-    .execute(pool)
+    .bind(require_unexpired)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
