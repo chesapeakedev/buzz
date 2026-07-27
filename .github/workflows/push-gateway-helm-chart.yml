@@ -32,7 +32,7 @@ jobs:
       - run: deploy/charts/buzz-push-gateway/tests/render.sh
       - run: deploy/charts/buzz-push-gateway/tests/release-contract.sh
   publish:
-    if: github.event_name != 'pull_request'
+    if: github.repository == 'block/buzz' && github.event_name != 'pull_request'
     needs: validate
     runs-on: ubuntu-latest
     permissions:

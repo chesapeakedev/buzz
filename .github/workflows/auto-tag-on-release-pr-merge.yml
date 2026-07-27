@@ -41,6 +41,7 @@ jobs:
       checks: read
       statuses: read
     if: >
+      github.repository == 'block/buzz' &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest

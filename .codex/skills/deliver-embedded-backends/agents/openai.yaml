@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deliver Embedded Backends"
+  short_description: "Advance the embedded Buzz backend goal"
+  default_prompt: "Use $deliver-embedded-backends to continue the next PR-sized slice of the embedded backend plan."
