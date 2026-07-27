@@ -2828,6 +2828,49 @@ impl Db {
         .await
     }
 
+    /// Atomically persist a manual workflow-trigger command and create its run.
+    pub async fn execute_workflow_trigger_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        workflow_id: Uuid,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<CommandExecution<Uuid>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_TRIGGER {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow trigger kind {}, got {}",
+                buzz_core::kind::KIND_WORKFLOW_TRIGGER,
+                event.kind.as_u16()
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let (_, inserted) = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            Some(channel_id),
+            None,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        let run_id = workflow::create_workflow_run_tx(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(event.id.as_bytes()),
+            trigger_context,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(run_id))
+    }
+
     /// Fetch a single workflow run, scoped to its community.
     pub async fn get_workflow_run(
         &self,
@@ -4532,6 +4575,184 @@ mod tests {
                 .execute(&db.pool)
                 .await
                 .expect("clean DM add-member command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_trigger_command_is_atomic_idempotent_and_tenant_scoped() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let db = setup_db().await;
+        let community_a_uuid = make_community(&db.pool).await;
+        let community_b_uuid = make_community(&db.pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let actor = Keys::generate();
+        let actor_bytes = actor.public_key().to_bytes();
+
+        for community in [community_a, community_b] {
+            db.ensure_user(community, actor_bytes.as_slice())
+                .await
+                .expect("insert workflow owner");
+        }
+        let channel_a = db
+            .create_channel(
+                community_a,
+                "workflow-trigger-a",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                actor_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel A");
+        let channel_b = db
+            .create_channel(
+                community_b,
+                "workflow-trigger-b",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                actor_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel B");
+
+        let definition_hash = [0x51; 32];
+        let workflow_a = db
+            .create_workflow(
+                community_a,
+                Some(channel_a.id),
+                actor_bytes.as_slice(),
+                "manual-trigger-a",
+                "{}",
+                &definition_hash,
+            )
+            .await
+            .expect("create workflow A");
+        let trigger_context = serde_json::json!({
+            "channel_id": channel_a.id.to_string(),
+            "author": hex::encode(actor_bytes),
+        });
+        let trigger_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_TRIGGER as u16),
+            r#"{"release":"candidate"}"#,
+        )
+        .sign_with_keys(&actor)
+        .expect("sign workflow trigger");
+
+        let outcome = db
+            .execute_workflow_trigger_command(
+                community_a,
+                &trigger_event,
+                channel_a.id,
+                workflow_a,
+                Some(&trigger_context),
+            )
+            .await
+            .expect("execute workflow trigger");
+        let CommandExecution::Applied(run_id) = outcome else {
+            panic!("first workflow trigger must be applied");
+        };
+        let run = db
+            .get_workflow_run(community_a, run_id)
+            .await
+            .expect("read triggered run");
+        assert_eq!(run.workflow_id, workflow_a);
+        assert_eq!(
+            run.trigger_event_id.as_deref(),
+            Some(trigger_event.id.as_bytes().as_slice())
+        );
+        assert_eq!(run.trigger_context.as_ref(), Some(&trigger_context));
+
+        let replay = db
+            .execute_workflow_trigger_command(
+                community_a,
+                &trigger_event,
+                channel_a.id,
+                workflow_a,
+                Some(&trigger_context),
+            )
+            .await
+            .expect("replay workflow trigger");
+        assert_eq!(replay, CommandExecution::Duplicate);
+        let run_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflow_runs \
+             WHERE community_id = $1 AND trigger_event_id = $2",
+        )
+        .bind(community_a_uuid)
+        .bind(trigger_event.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count idempotent workflow runs");
+        assert_eq!(run_count, 1);
+
+        // Install the same workflow UUID only in tenant B. A trigger scoped to
+        // tenant A must not bind to it, and its preceding event insert must
+        // roll back when the composite workflow foreign key rejects the run.
+        let other_tenant_workflow = Uuid::new_v4();
+        db.upsert_workflow(
+            community_b,
+            other_tenant_workflow,
+            Some(channel_b.id),
+            actor_bytes.as_slice(),
+            "other-tenant-only",
+            "{}",
+            &definition_hash,
+        )
+        .await
+        .expect("create tenant-B workflow");
+        let failed_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_TRIGGER as u16),
+            "",
+        )
+        .sign_with_keys(&actor)
+        .expect("sign cross-tenant workflow trigger");
+        let failure = db
+            .execute_workflow_trigger_command(
+                community_a,
+                &failed_event,
+                channel_a.id,
+                other_tenant_workflow,
+                None,
+            )
+            .await;
+        assert!(matches!(failure, Err(DbError::Sqlx(_))));
+        let failed_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_a_uuid)
+                .bind(failed_event.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back trigger event");
+        assert_eq!(failed_event_count, 0);
+        let cross_tenant_run_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1")
+                .bind(other_tenant_workflow)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count cross-tenant workflow runs");
+        assert_eq!(cross_tenant_run_count, 0);
+
+        for community_uuid in [community_a_uuid, community_b_uuid] {
+            for statement in [
+                "DELETE FROM events WHERE community_id = $1",
+                "DELETE FROM workflow_runs WHERE community_id = $1",
+                "DELETE FROM workflows WHERE community_id = $1",
+                "DELETE FROM channel_members WHERE community_id = $1",
+                "DELETE FROM channels WHERE community_id = $1",
+                "DELETE FROM users WHERE community_id = $1",
+                "DELETE FROM communities WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(community_uuid)
+                    .execute(&db.pool)
+                    .await
+                    .expect("clean workflow trigger command fixture");
+            }
         }
     }
 
