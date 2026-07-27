@@ -200,6 +200,15 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
+/// Result of an atomic command event and domain mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandExecution<T> {
+    /// The event was already stored, so its mutation was not executed again.
+    Duplicate,
+    /// The event and domain mutation committed together.
+    Applied(T),
+}
+
 /// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
 ///
 /// The connection deliberately does not return to the main pool: session advisory
@@ -1925,6 +1934,82 @@ impl Db {
         dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
     }
 
+    /// Atomically persist a DM-open command event and open its conversation.
+    ///
+    /// A duplicate event returns [`CommandExecution::Duplicate`] without
+    /// executing the mutation. Any mutation failure rolls back the event
+    /// insert, allowing a corrected command to be persisted later.
+    pub async fn execute_dm_open_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<CommandExecution<(channel::ChannelRecord, bool)>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_OPEN {
+            return Err(DbError::InvalidData(format!(
+                "expected DM open command kind {}, got {}",
+                buzz_core::kind::KIND_DM_OPEN,
+                event.kind.as_u16()
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let (_, inserted) =
+            event::insert_event_with_thread_metadata_tx(&mut tx, community_id, event, None, None)
+                .await?;
+
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        let result = dm::open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(result))
+    }
+
+    /// Atomically persist a DM-add-member command and open the expanded DM.
+    ///
+    /// DM participant sets are immutable, so adding members opens or retrieves
+    /// the channel for the expanded set. The command event and that mutation
+    /// commit together.
+    pub async fn execute_dm_add_member_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        source_channel_id: Uuid,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<CommandExecution<(channel::ChannelRecord, bool)>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_ADD_MEMBER {
+            return Err(DbError::InvalidData(format!(
+                "expected DM add-member command kind {}, got {}",
+                buzz_core::kind::KIND_DM_ADD_MEMBER,
+                event.kind.as_u16()
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let (_, inserted) = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            Some(source_channel_id),
+            None,
+        )
+        .await?;
+
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        let result = dm::open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(result))
+    }
+
     /// Hide a DM channel for a specific user.
     ///
     /// The DM is not deleted — it can be restored by opening a new DM with
@@ -1936,6 +2021,46 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<()> {
         dm::hide_dm(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Atomically persist a DM-hide command event and hide the caller's DM.
+    ///
+    /// A duplicate event returns [`CommandExecution::Duplicate`] without
+    /// executing the mutation. Any mutation failure rolls back the event
+    /// insert, allowing a corrected retry to execute normally.
+    pub async fn execute_dm_hide_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_HIDE {
+            return Err(DbError::InvalidData(format!(
+                "expected DM hide command kind {}, got {}",
+                buzz_core::kind::KIND_DM_HIDE,
+                event.kind.as_u16()
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let (_, inserted) = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            Some(channel_id),
+            None,
+        )
+        .await?;
+
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        dm::hide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(()))
     }
 
     /// Unhide a DM channel for a specific user.
@@ -4014,6 +4139,310 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_hide_command_is_atomic_and_idempotent() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let db = setup_db().await;
+        let community_uuid = make_community(&db.pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let actor = Keys::generate();
+        let peer = Keys::generate();
+        let actor_bytes = actor.public_key().to_bytes();
+        let peer_bytes = peer.public_key().to_bytes();
+
+        db.ensure_user(community, actor_bytes.as_slice())
+            .await
+            .expect("insert actor");
+        db.ensure_user(community, peer_bytes.as_slice())
+            .await
+            .expect("insert peer");
+
+        let participants = [actor_bytes.as_slice(), peer_bytes.as_slice()];
+        let (channel, created) = db
+            .open_dm(community, &participants, actor_bytes.as_slice())
+            .await
+            .expect("create DM");
+        assert!(created);
+
+        let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_HIDE as u16), "")
+            .sign_with_keys(&actor)
+            .expect("sign DM hide command");
+
+        let outcome = db
+            .execute_dm_hide_command(community, &event, channel.id, actor_bytes.as_slice())
+            .await
+            .expect("execute DM hide command");
+        assert_eq!(outcome, CommandExecution::Applied(()));
+        assert_eq!(
+            db.list_hidden_dms(community, actor_bytes.as_slice())
+                .await
+                .expect("list hidden DMs"),
+            vec![channel.id]
+        );
+
+        db.unhide_dm(community, channel.id, actor_bytes.as_slice())
+            .await
+            .expect("unhide between duplicate attempts");
+        let outcome = db
+            .execute_dm_hide_command(community, &event, channel.id, actor_bytes.as_slice())
+            .await
+            .expect("replay DM hide command");
+        assert_eq!(outcome, CommandExecution::Duplicate);
+        assert!(
+            db.list_hidden_dms(community, actor_bytes.as_slice())
+                .await
+                .expect("list hidden DMs after replay")
+                .is_empty(),
+            "a duplicate command must not execute its mutation again"
+        );
+
+        let failed_event =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_HIDE as u16), "")
+                .sign_with_keys(&peer)
+                .expect("sign failing DM hide command");
+        let missing_channel = Uuid::new_v4();
+        let error = db
+            .execute_dm_hide_command(
+                community,
+                &failed_event,
+                missing_channel,
+                peer_bytes.as_slice(),
+            )
+            .await
+            .expect_err("missing membership must fail");
+        assert!(matches!(error, DbError::NotFound(_)));
+
+        let failed_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(failed_event.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(
+            failed_event_count, 0,
+            "a failed mutation must roll back its event insert"
+        );
+
+        for statement in [
+            "DELETE FROM events WHERE community_id = $1",
+            "DELETE FROM channel_members WHERE community_id = $1",
+            "DELETE FROM channels WHERE community_id = $1",
+            "DELETE FROM users WHERE community_id = $1",
+            "DELETE FROM communities WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(community_uuid)
+                .execute(&db.pool)
+                .await
+                .expect("clean DM hide command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_open_command_is_atomic_and_idempotent() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let db = setup_db().await;
+        let community_uuid = make_community(&db.pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let actor = Keys::generate();
+        let peer = Keys::generate();
+        let actor_bytes = actor.public_key().to_bytes();
+        let peer_bytes = peer.public_key().to_bytes();
+
+        db.ensure_user(community, actor_bytes.as_slice())
+            .await
+            .expect("insert actor");
+        db.ensure_user(community, peer_bytes.as_slice())
+            .await
+            .expect("insert peer");
+
+        let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_OPEN as u16), "")
+            .sign_with_keys(&actor)
+            .expect("sign DM open command");
+        let participants = [actor_bytes.as_slice(), peer_bytes.as_slice()];
+        let outcome = db
+            .execute_dm_open_command(community, &event, &participants, actor_bytes.as_slice())
+            .await
+            .expect("execute DM open command");
+        let (channel, created) = match outcome {
+            CommandExecution::Applied(result) => result,
+            CommandExecution::Duplicate => panic!("first command must be applied"),
+        };
+        assert!(created);
+
+        db.hide_dm(community, channel.id, actor_bytes.as_slice())
+            .await
+            .expect("hide DM between duplicate attempts");
+        let outcome = db
+            .execute_dm_open_command(community, &event, &participants, actor_bytes.as_slice())
+            .await
+            .expect("replay DM open command");
+        assert!(matches!(outcome, CommandExecution::Duplicate));
+        assert_eq!(
+            db.list_hidden_dms(community, actor_bytes.as_slice())
+                .await
+                .expect("list hidden DMs after replay"),
+            vec![channel.id],
+            "a duplicate command must not reopen the conversation"
+        );
+
+        let failed_event =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_OPEN as u16), "")
+                .sign_with_keys(&peer)
+                .expect("sign failing DM open command");
+        let error = db
+            .execute_dm_open_command(community, &failed_event, &[], peer_bytes.as_slice())
+            .await
+            .expect_err("a one-participant DM must fail");
+        assert!(matches!(error, DbError::InvalidData(_)));
+
+        let failed_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(failed_event.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(
+            failed_event_count, 0,
+            "a failed mutation must roll back its event insert"
+        );
+
+        for statement in [
+            "DELETE FROM events WHERE community_id = $1",
+            "DELETE FROM channel_members WHERE community_id = $1",
+            "DELETE FROM channels WHERE community_id = $1",
+            "DELETE FROM users WHERE community_id = $1",
+            "DELETE FROM communities WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(community_uuid)
+                .execute(&db.pool)
+                .await
+                .expect("clean DM open command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_add_member_command_is_atomic_and_idempotent() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let db = setup_db().await;
+        let community_uuid = make_community(&db.pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let actor = Keys::generate();
+        let peer = Keys::generate();
+        let added = Keys::generate();
+        let actor_bytes = actor.public_key().to_bytes();
+        let peer_bytes = peer.public_key().to_bytes();
+        let added_bytes = added.public_key().to_bytes();
+
+        for pubkey in [&actor_bytes, &peer_bytes, &added_bytes] {
+            db.ensure_user(community, pubkey.as_slice())
+                .await
+                .expect("insert participant");
+        }
+
+        let original_participants = [actor_bytes.as_slice(), peer_bytes.as_slice()];
+        let (source_channel, created) = db
+            .open_dm(community, &original_participants, actor_bytes.as_slice())
+            .await
+            .expect("create source DM");
+        assert!(created);
+
+        let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_ADD_MEMBER as u16), "")
+            .sign_with_keys(&actor)
+            .expect("sign DM add-member command");
+        let expanded = [
+            actor_bytes.as_slice(),
+            peer_bytes.as_slice(),
+            added_bytes.as_slice(),
+        ];
+        let outcome = db
+            .execute_dm_add_member_command(
+                community,
+                &event,
+                source_channel.id,
+                &expanded,
+                actor_bytes.as_slice(),
+            )
+            .await
+            .expect("execute DM add-member command");
+        let (expanded_channel, created) = match outcome {
+            CommandExecution::Applied(result) => result,
+            CommandExecution::Duplicate => panic!("first command must be applied"),
+        };
+        assert!(created);
+        assert_ne!(expanded_channel.id, source_channel.id);
+
+        db.hide_dm(community, expanded_channel.id, actor_bytes.as_slice())
+            .await
+            .expect("hide expanded DM between duplicate attempts");
+        let outcome = db
+            .execute_dm_add_member_command(
+                community,
+                &event,
+                source_channel.id,
+                &expanded,
+                actor_bytes.as_slice(),
+            )
+            .await
+            .expect("replay DM add-member command");
+        assert!(matches!(outcome, CommandExecution::Duplicate));
+        assert_eq!(
+            db.list_hidden_dms(community, actor_bytes.as_slice())
+                .await
+                .expect("list hidden DMs after replay"),
+            vec![expanded_channel.id],
+            "a duplicate command must not reopen the expanded conversation"
+        );
+
+        let failed_event =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_ADD_MEMBER as u16), "")
+                .sign_with_keys(&peer)
+                .expect("sign failing DM add-member command");
+        let error = db
+            .execute_dm_add_member_command(
+                community,
+                &failed_event,
+                source_channel.id,
+                &[],
+                peer_bytes.as_slice(),
+            )
+            .await
+            .expect_err("a one-participant expanded DM must fail");
+        assert!(matches!(error, DbError::InvalidData(_)));
+
+        let failed_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(failed_event.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(failed_event_count, 0);
+
+        for statement in [
+            "DELETE FROM events WHERE community_id = $1",
+            "DELETE FROM channel_members WHERE community_id = $1",
+            "DELETE FROM channels WHERE community_id = $1",
+            "DELETE FROM users WHERE community_id = $1",
+            "DELETE FROM communities WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(community_uuid)
+                .execute(&db.pool)
+                .await
+                .expect("clean DM add-member command fixture");
+        }
     }
 
     #[tokio::test]

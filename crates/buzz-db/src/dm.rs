@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
@@ -104,6 +104,19 @@ pub async fn create_dm(
     participants: &[&[u8]],
     created_by: &[u8],
 ) -> Result<ChannelRecord> {
+    let mut tx = pool.begin().await?;
+    let record = create_dm_tx(&mut tx, community_id, participants, created_by).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Create or retrieve a DM inside a caller-owned transaction.
+pub(crate) async fn create_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    participants: &[&[u8]],
+    created_by: &[u8],
+) -> Result<ChannelRecord> {
     if participants.len() < 2 {
         return Err(DbError::InvalidData(
             "DM requires at least 2 participants".to_string(),
@@ -125,8 +138,6 @@ pub async fn create_dm(
 
     let hash = compute_participant_hash(participants);
 
-    let mut tx = pool.begin().await?;
-
     // Idempotency check inside the transaction.
     let existing = sqlx::query(
         r#"
@@ -146,11 +157,10 @@ pub async fn create_dm(
     )
     .bind(community_id.as_uuid())
     .bind(hash.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if let Some(row) = existing {
-        tx.commit().await?;
         return row_to_channel_record(row);
     }
 
@@ -175,7 +185,7 @@ pub async fn create_dm(
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     // Add all participants as members with role='member'.
@@ -194,7 +204,7 @@ pub async fn create_dm(
         .bind(id)
         .bind(*pk)
         .bind(created_by)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -211,12 +221,10 @@ pub async fn create_dm(
     )
     .bind(community_id.as_uuid())
     .bind(id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
-    let record = row_to_channel_record(row)?;
-    tx.commit().await?;
-    Ok(record)
+    row_to_channel_record(row)
 }
 
 /// List all DM conversations for a given user, ordered by most recent activity.
@@ -359,6 +367,19 @@ pub async fn open_dm(
     pubkeys: &[&[u8]],
     created_by: &[u8],
 ) -> Result<(ChannelRecord, bool)> {
+    let mut tx = pool.begin().await?;
+    let result = open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Open or retrieve a DM inside a caller-owned transaction.
+pub(crate) async fn open_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+) -> Result<(ChannelRecord, bool)> {
     // Merge created_by into the participant set (dedup handled by compute_participant_hash).
     let mut all: Vec<&[u8]> = pubkeys.to_vec();
     if !all.contains(&created_by) {
@@ -374,15 +395,36 @@ pub async fn open_dm(
 
     let hash = compute_participant_hash(&all);
 
-    // Check for existing DM first (fast path, no transaction).
-    if let Some(existing) = find_dm_by_participants(pool, community_id, &hash).await? {
+    let existing = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at
+        FROM channels
+        WHERE community_id = $1
+          AND participant_hash = $2
+          AND channel_type = 'dm'
+          AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(hash.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(row) = existing {
+        let existing = row_to_channel_record(row)?;
         // Clear hidden_at for the caller so the DM reappears in their sidebar.
-        unhide_dm(pool, community_id, existing.id, created_by).await?;
+        unhide_dm_tx(tx, community_id, existing.id, created_by).await?;
         return Ok((existing, false));
     }
 
     // Create new DM.
-    let channel = create_dm(pool, community_id, &all, created_by).await?;
+    let channel = create_dm_tx(tx, community_id, &all, created_by).await?;
 
     Ok((channel, true))
 }
@@ -400,6 +442,19 @@ pub async fn hide_dm(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    hide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Hide a DM membership inside a caller-owned transaction.
+pub(crate) async fn hide_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     let result = sqlx::query(
         r#"
         UPDATE channel_members
@@ -410,7 +465,7 @@ pub async fn hide_dm(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     if result.rows_affected() == 0 {
@@ -432,6 +487,19 @@ pub async fn unhide_dm(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    unhide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Unhide a DM membership inside a caller-owned transaction.
+pub(crate) async fn unhide_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE channel_members
@@ -442,7 +510,7 @@ pub async fn unhide_dm(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
