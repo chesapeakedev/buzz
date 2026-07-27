@@ -21,7 +21,7 @@ use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
-use buzz_db::DbError;
+use buzz_db::{CommandExecution, DbError};
 use buzz_workflow::executor::TriggerContext;
 
 use crate::state::AppState;
@@ -92,12 +92,13 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
+/// NOTE: Remaining legacy domain mutations (upsert_workflow, etc.) execute on the
 /// connection pool, NOT inside this transaction. The pattern is idempotent but
 /// not strictly atomic: if a mutation succeeds but commit fails, the mutation
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// operations (update_approval, upsert_workflow). All DM commands use
+/// database-owned atomic command APIs below and are not part of this legacy path.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -405,30 +406,23 @@ async fn handle_dm_open(
         }
     }
 
-    // Persist the command event (idempotency) — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist and open the DM atomically behind the database facade.
+    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
+    let (channel, was_created) = match state
+        .db
+        .execute_dm_open_command(tenant.community(), event, &all_refs, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db open DM command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandExecution::Applied(result) => result,
     };
-
-    // 4. Execute: open_dm
-    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (channel, was_created) = state
-        .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
-
-    // Commit: event + mutation succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Side effects if newly created (post-commit, best-effort)
     if was_created {
@@ -566,30 +560,29 @@ async fn handle_dm_add_member(
         ));
     }
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 6. Persist the command and open the expanded immutable DM atomically.
+    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
+    let (new_channel, was_created) = match state
+        .db
+        .execute_dm_add_member_command(
+            tenant.community(),
+            event,
+            channel_id,
+            &all_refs,
+            &self_bytes,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db add DM member command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandExecution::Applied(result) => result,
     };
-
-    // 6. Execute: open_dm with expanded set (creates NEW DM — DM sets are immutable)
-    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (new_channel, was_created) = state
-        .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
-
-    // Commit: event + mutation succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 7. Cache invalidation + notifications for new DM (post-commit, best-effort)
     if was_created {
@@ -672,37 +665,31 @@ async fn handle_dm_hide(
         return Err(IngestError::Rejected("invalid: channel is not a DM".into()));
     }
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // Persist the command event and hide mutation in one database-owned
+    // transaction. Relay code never handles a concrete SQL transaction.
+    match state
+        .db
+        .execute_dm_hide_command(tenant.community(), event, channel_id, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db hide_dm command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
+        CommandExecution::Applied(()) => {}
+    }
 
-    // 4. Execute: hide_dm
-    state
-        .db
-        .hide_dm(tenant.community(), channel_id, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db hide_dm: {e}")))?;
-
-    // Commit: event + mutation succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 5. Side effect (post-commit, best-effort): refresh the caller's NIP-DV
+    // 4. Side effect (post-commit, best-effort): refresh the caller's NIP-DV
     // visibility snapshot so clients can filter this DM out of the sidebar.
     if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
         warn!("DM hide: visibility snapshot failed: {e}");
     }
 
-    // 6. Return response
+    // 5. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
