@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

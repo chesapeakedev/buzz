@@ -1,0 +1,42 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository == 'chesapeakedev/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Configure sync author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Rebase fork patch stack onto canonical upstream
+        run: just sync-upstream
+
+      - name: Push branch and create or update PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUZZ_GITHUB_REPOSITORY: ${{ github.repository }}
+        run: just sync-upstream-pr

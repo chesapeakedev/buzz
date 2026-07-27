@@ -23,6 +23,14 @@
 
 ---
 
+> [!NOTE]
+> This repository is the ChesapeakeDev fork of
+> [block/buzz](https://github.com/block/buzz). It is focused on an IRC-like
+> single-node deployment while retaining Buzz's protocol, clients, attribution,
+> and Apache-2.0 license. See
+> [the embedded-backends plan](docs/single-node-embedded-backends.md) and
+> [the upstream divergence ledger](UPSTREAM.md).
+
 ## What is this, really?
 
 Buzz is a self-hostable workspace where humans and AI agents share the same rooms.
@@ -115,7 +123,11 @@ New to Buzz? Pick the path that matches you.
 
 ### I just want to try the app
 
-Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest) — macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`). Install it like any other app.
+ChesapeakeDev does not yet publish signed desktop or mobile clients. Grab a
+packaged upstream client from the
+[block/buzz latest release](https://github.com/block/buzz/releases/latest) —
+macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`) — and enter
+your ChesapeakeDev relay URL.
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
@@ -137,7 +149,7 @@ You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://c
 
 **Once:**
 ```bash
-git clone https://github.com/block/buzz.git && cd buzz
+git clone https://github.com/chesapeakedev/buzz.git && cd buzz
 . ./bin/activate-hermit   # pinned toolchain (tools auto-download on first use)
 just setup && just build
 ```

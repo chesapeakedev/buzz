@@ -64,6 +64,30 @@ hooks:
     git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
+# Fetch fork and canonical upstream refs and report their divergence
+sync-upstream-status:
+    ./scripts/sync-upstream.sh status
+
+# Rebase the fork patch stack onto upstream without pushing it
+sync-upstream:
+    ./scripts/sync-upstream.sh sync
+
+# Lease-update the sync review branches and create or refresh their pull request
+sync-upstream-pr:
+    ./scripts/sync-upstream.sh pr
+
+# Apply an approved upstream-sync review to main with a guarded lease update
+sync-upstream-finalize:
+    ./scripts/sync-upstream.sh finalize
+
+# Exercise upstream-sync behavior against isolated local Git repositories
+test-sync-upstream:
+    ./scripts/test-sync-upstream.sh
+
+# Verify that fork CI cannot publish through upstream-owned release lanes
+test-fork-release-safety:
+    ./scripts/test-fork-release-safety.sh
+
 # Wipe development state and recreate a clean environment. Installed Buzz is preserved.
 [confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
 reset:
