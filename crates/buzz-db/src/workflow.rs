@@ -805,6 +805,26 @@ pub async fn create_workflow_run(
     trigger_event_id: Option<&[u8]>,
     trigger_context: Option<&serde_json::Value>,
 ) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let id = create_workflow_run_tx(
+        &mut tx,
+        community_id,
+        workflow_id,
+        trigger_event_id,
+        trigger_context,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(crate) async fn create_workflow_run_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_event_id: Option<&[u8]>,
+    trigger_context: Option<&serde_json::Value>,
+) -> Result<Uuid> {
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -819,7 +839,7 @@ pub async fn create_workflow_run(
     .bind(workflow_id)
     .bind(trigger_event_id)
     .bind(trigger_context)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(id)
