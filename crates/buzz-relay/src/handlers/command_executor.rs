@@ -933,20 +933,6 @@ async fn handle_workflow_trigger(
             IngestError::Rejected("forbidden: not authorized to trigger this workflow".into())
         })?;
 
-    // Persist the command event under the workflow channel even though the
-    // trigger event itself only carries the workflow UUID. Storing channel
-    // triggers as global events leaks workflow IDs to unrelated relay members.
-    let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
     // 4. Execute: create workflow run
     let mut trigger_ctx = TriggerContext {
         channel_id: workflow
@@ -969,22 +955,30 @@ async fn handle_workflow_trigger(
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
-    let event_id_bytes = event.id.as_bytes().to_vec();
-    let run_id = state
+    // Store the command under its workflow channel and create the run in one
+    // database-owned transaction. The trigger carries only a workflow UUID, so
+    // persisting it globally would leak that ID to unrelated relay members.
+    let run_id = match state
         .db
-        .create_workflow_run(
+        .execute_workflow_trigger_command(
             community_id,
+            event,
+            wf_channel_id,
             workflow_id,
-            Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
-
-    // Commit: event + run creation succeeded atomically.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+        .map_err(|e| IngestError::Internal(format!("error: db workflow trigger: {e}")))?
+    {
+        buzz_db::CommandExecution::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        buzz_db::CommandExecution::Applied(run_id) => run_id,
+    };
 
     // 5. Spawn workflow execution
     let engine = Arc::clone(&state.workflow_engine);
