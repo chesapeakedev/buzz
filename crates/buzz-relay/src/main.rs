@@ -14,7 +14,7 @@ use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::PubSubManager;
+use buzz_pubsub::RedisCoordination;
 use buzz_search::SearchService;
 
 use buzz_relay::config::Config;
@@ -359,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
     let pubsub = Arc::new(
-        PubSubManager::new(&config.redis_url, redis_pool)
+        RedisCoordination::new(&config.redis_url, redis_pool)
             .await
             .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
     );
@@ -835,7 +835,7 @@ async fn main() -> anyhow::Result<()> {
     // (published by other relay instances) and fan out to local WS subscribers.
     {
         let state_for_sub = Arc::clone(&state);
-        let mut rx = state_for_sub.pubsub.subscribe_local();
+        let mut rx = state_for_sub.pubsub.subscribe_events();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {

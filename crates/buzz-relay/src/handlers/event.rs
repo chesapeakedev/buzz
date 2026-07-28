@@ -1664,7 +1664,7 @@ mod tests {
         }
 
         fn spawn_pubsub_fanout_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
-            let mut rx = state.pubsub.subscribe_local();
+            let mut rx = state.pubsub.subscribe_events();
             tokio::spawn(async move {
                 while let Ok(channel_event) = rx.recv().await {
                     fan_out_pubsub_event(&state, channel_event).await;
@@ -1682,8 +1682,8 @@ mod tests {
             let origin = super::fanout_access::test_state_with_redis_url(&redis_url).await;
             let receiver = super::fanout_access::test_state_with_redis_url(&redis_url).await;
 
-            let origin_subscriber = tokio::spawn(origin.pubsub.clone().run_subscriber());
-            let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run_subscriber());
+            let origin_subscriber = tokio::spawn(origin.pubsub.clone().run_event_subscriber());
+            let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run_event_subscriber());
             let origin_fanout = spawn_pubsub_fanout_loop(origin.clone());
             let receiver_fanout = spawn_pubsub_fanout_loop(receiver.clone());
 

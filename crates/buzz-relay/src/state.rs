@@ -24,7 +24,7 @@ use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
-use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
+use buzz_pubsub::{Coordination, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -495,7 +495,7 @@ pub struct AppState {
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
-    pub pubsub: Arc<PubSubManager>,
+    pub pubsub: Arc<dyn Coordination>,
     /// Authentication service.
     pub auth: Arc<AuthService>,
     /// Full-text search service.
@@ -639,7 +639,7 @@ impl AppState {
         db: Db,
         redis_pool: deadpool_redis::Pool,
         audit: impl Into<Option<AuditService>>,
-        pubsub: Arc<PubSubManager>,
+        pubsub: Arc<dyn Coordination>,
         auth: AuthService,
         search: SearchService,
         workflow_engine: Arc<WorkflowEngine>,
