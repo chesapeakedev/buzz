@@ -353,14 +353,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let audit = if config.audit_enabled {
-        let audit_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .min_connections(1)
-            .connect(&config.database_url)
+        let audit = AuditService::connect_postgres(&config.database_url, 5, 1)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
         info!("Audit service ready");
-        Some(AuditService::new(audit_pool))
+        Some(audit)
     } else {
         info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
         None
@@ -409,11 +406,9 @@ async fn main() -> anyhow::Result<()> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(search_db_url)
+    let search = SearchService::connect_postgres(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
-    let search = SearchService::new(search_pool);
     info!(
         replica = config.read_database_url.is_some(),
         "Search service ready (Postgres FTS)"
