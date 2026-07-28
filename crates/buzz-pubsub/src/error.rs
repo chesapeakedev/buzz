@@ -26,6 +26,10 @@ pub enum PubSubError {
     /// A Redis channel key could not be parsed as a valid channel ID.
     #[error("Invalid channel key: {0}")]
     InvalidChannelKey(String),
+
+    /// A coordination backend received an invalid configuration.
+    #[error("Invalid coordination configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 impl From<tokio::sync::broadcast::error::RecvError> for PubSubError {

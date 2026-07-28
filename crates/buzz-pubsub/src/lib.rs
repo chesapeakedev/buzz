@@ -1,25 +1,20 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `buzz-pubsub` — Redis pub/sub fan-out, presence tracking, and typing indicators.
+//! `buzz-pubsub` — distributed and single-process relay coordination.
 //!
 //! # Architecture
 //!
 //! ```text
-//! buzz-relay process
-//!   │
-//!   ├── deadpool-redis pool → PUBLISH, SET, ZADD, etc.
-//!   │
-//!   └── dedicated redis::aio::PubSub connection (NOT from pool)
-//!         └── dynamic SUBSCRIBE buzz:{community}:channel:{id} / buzz:{community}:global
-//!               └── run_subscriber() → broadcast::channel(4096) → N WS receivers
+//! distributed: deadpool-redis + dedicated pub/sub connections
+//!              → broadcast channels → local WebSocket receivers
+//!
+//! local:       Tokio broadcast channels + bounded Moka presence
+//!              → local WebSocket receivers
 //! ```
 //!
-//! The subscriber reconnects automatically on Redis disconnect with exponential
-//! backoff (1s → 2s → 4s → … → 30s max).
-//!
-//! Dedicated pub/sub connection is stateful and cannot be shared.
-//! Pool connections handle all other commands.
-//! Lagged receivers get `RecvError::Lagged`.
+//! Redis subscribers reconnect automatically with exponential backoff. Local
+//! coordination never leaves the process. Both adapters preserve explicit
+//! community scope, and lagged broadcast receivers report `RecvError::Lagged`.
 
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
@@ -30,6 +25,9 @@ pub mod coordination;
 pub use coordination::Coordination;
 /// Error types for pub/sub operations.
 pub mod error;
+/// Single-process Tokio and Moka coordination backend.
+pub mod local;
+pub use local::{LocalCoordination, LocalCoordinationConfig};
 /// Redis-backed NIP-98 replay seen-set.
 pub mod nip98_replay;
 pub use nip98_replay::RedisNip98ReplayGuard;

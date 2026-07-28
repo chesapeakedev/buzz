@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Redis pub/sub fan-out, presence, and typing indicators for Buzz"
+description = "Distributed and single-process relay coordination for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 nostr = { workspace = true }
 futures-util = { workspace = true }
 async-trait = "0.1"
+moka = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

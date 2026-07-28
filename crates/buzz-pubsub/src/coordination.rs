@@ -211,4 +211,96 @@ mod tests {
         backend.retain_topic(&tenant, topic).await;
         backend.release_topic(&tenant, topic).await;
     }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn redis_adapter_satisfies_presence_contract() {
+        let pool = crate::test_util::make_test_pool();
+        let backend: Arc<dyn Coordination> = Arc::new(
+            crate::RedisCoordination::new("redis://127.0.0.1:6379", pool)
+                .await
+                .expect("construct Redis coordination"),
+        );
+        super::test_contract::assert_presence_contract(backend).await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_contract {
+    use super::*;
+    use buzz_core::{CommunityId, TenantContext};
+    use nostr::Keys;
+    use uuid::Uuid;
+
+    pub(crate) async fn assert_presence_contract(backend: Arc<dyn Coordination>) {
+        let tenant_a = TenantContext::resolved(
+            CommunityId::from_uuid(Uuid::from_u128(0xc0a1)),
+            "contract-a.example",
+        );
+        let tenant_b = TenantContext::resolved(
+            CommunityId::from_uuid(Uuid::from_u128(0xc0b2)),
+            "contract-b.example",
+        );
+        let present = Keys::generate().public_key();
+        let absent = Keys::generate().public_key();
+
+        backend
+            .set_presence(&tenant_a, &present, "online")
+            .await
+            .expect("set tenant A presence");
+        assert_eq!(
+            backend
+                .get_presence(&tenant_a, &present)
+                .await
+                .expect("get tenant A presence")
+                .as_deref(),
+            Some("online")
+        );
+        assert_eq!(
+            backend
+                .get_presence(&tenant_b, &present)
+                .await
+                .expect("get tenant B presence"),
+            None,
+            "the same pubkey must be isolated between communities"
+        );
+
+        backend
+            .set_presence(&tenant_b, &present, "away")
+            .await
+            .expect("set tenant B presence");
+        let bulk = backend
+            .get_presence_bulk(&tenant_a, &[present, absent])
+            .await
+            .expect("bulk presence");
+        assert_eq!(bulk.len(), 1);
+        assert_eq!(
+            bulk.get(&present.to_hex()).map(String::as_str),
+            Some("online")
+        );
+
+        backend
+            .clear_presence(&tenant_a, &present)
+            .await
+            .expect("clear tenant A presence");
+        assert_eq!(
+            backend
+                .get_presence(&tenant_a, &present)
+                .await
+                .expect("get cleared presence"),
+            None
+        );
+        assert_eq!(
+            backend
+                .get_presence(&tenant_b, &present)
+                .await
+                .expect("tenant B remains present")
+                .as_deref(),
+            Some("away")
+        );
+        backend
+            .clear_presence(&tenant_b, &present)
+            .await
+            .expect("clear tenant B presence");
+    }
 }
