@@ -145,15 +145,16 @@ impl Default for RateLimitConfig {
 
 /// Async rate-limiting interface.
 ///
-/// The Redis-backed production implementation lives in `buzz-relay` / `buzz-pubsub`.
-/// A no-op `AlwaysAllowRateLimiter` is provided for unit tests.
+/// Production implementations must use durable shared state. The distributed
+/// Redis adapter lives in `buzz-pubsub`; embedded mode persists the same
+/// counters in its relational backend. A no-op `AlwaysAllowRateLimiter` is
+/// provided for unit tests.
 ///
 /// ## Tenant scoping
 ///
-/// Pubkey-keyed limits ([`check_and_increment`]) take `&TenantContext` and the Redis
-/// key is community-prefixed (`buzz:{community}:ratelimit:{pubkey}:{suffix}`). The
-/// same pubkey active in two communities consumes two independent quotas — that is
-/// the correct behavior under multi-tenant isolation (S1 cross-community fence).
+/// Pubkey-keyed limits ([`check_and_increment`]) take `&TenantContext`, and
+/// implementations must include the community in their durable key. The same
+/// pubkey active in two communities consumes two independent quotas.
 ///
 /// IP-keyed limits ([`check_ip_connection`]) are **operator-global** by design. They
 /// gate connection acceptance at the network edge, before host→community resolution
@@ -165,32 +166,33 @@ impl Default for RateLimitConfig {
 /// ⚠️ The fixed-window algorithm used by the Redis implementation allows up to 2×
 /// burst at window boundaries. Upgrade to a sliding window or token bucket if strict
 /// per-second limiting is required.
+#[async_trait::async_trait]
 pub trait RateLimiter: Send + Sync {
     /// Increment the per-(community, pubkey) counter for `limit_type` and return
     /// whether the request is within `limit` for the given `window_secs`.
     ///
     /// `ctx` scopes the counter to the resolved community; the same pubkey in two
     /// communities is two independent quotas.
-    fn check_and_increment(
+    async fn check_and_increment(
         &self,
         ctx: &TenantContext,
         pubkey: &PublicKey,
         limit_type: LimitType,
         window_secs: u64,
         limit: u64,
-    ) -> impl std::future::Future<Output = Result<RateLimitResult, AuthError>> + Send;
+    ) -> Result<RateLimitResult, AuthError>;
 
     /// Increment the per-IP connection counter and return whether the connection
     /// is within `limit` for the given `window_secs`.
     ///
     /// Operator-global — see trait docs. This fence runs before / outside of host
     /// resolution and intentionally does not take a `TenantContext`.
-    fn check_ip_connection(
+    async fn check_ip_connection(
         &self,
         ip: &IpAddr,
         window_secs: u64,
         limit: u64,
-    ) -> impl std::future::Future<Output = Result<RateLimitResult, AuthError>> + Send;
+    ) -> Result<RateLimitResult, AuthError>;
 }
 
 /// Redis key for pubkey-based rate limit:
@@ -219,6 +221,7 @@ pub fn ip_rate_limit_key(ip: &IpAddr) -> String {
 pub struct AlwaysAllowRateLimiter;
 
 #[cfg(any(test, feature = "test-utils"))]
+#[async_trait::async_trait]
 impl RateLimiter for AlwaysAllowRateLimiter {
     async fn check_and_increment(
         &self,
@@ -313,8 +316,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn always_allow_limiter() {
-        let limiter = AlwaysAllowRateLimiter;
+    async fn rate_limiter_is_object_safe() {
+        let limiter: std::sync::Arc<dyn RateLimiter> = std::sync::Arc::new(AlwaysAllowRateLimiter);
         let ctx = fixture_ctx("relay-a.example");
         let keys = Keys::generate();
         let result = limiter
