@@ -193,9 +193,28 @@ async fn insert_mentions_in_transaction(
     Ok(())
 }
 
-/// Database handle. Clone is cheap (Arc-backed pool).
+/// Relational backend selected by [`Db`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBackendKind {
+    /// Distributed PostgreSQL storage.
+    Postgres,
+}
+#[derive(Debug)]
+struct PostgresStore {
+    pool: PgPool,
+    max_connections: u32,
+    read_pool: Option<PgPool>,
+    fence: std::sync::Arc<replica_fence::ReplicaFence>,
+}
+#[derive(Debug)]
+enum DatabaseBackend {
+    Postgres(PostgresStore),
+}
+
+/// Backend-dispatching database facade. Clone is cheap.
 #[derive(Clone, Debug)]
 pub struct Db {
+    backend: std::sync::Arc<DatabaseBackend>,
     pub(crate) pool: PgPool,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
@@ -674,6 +693,46 @@ pub struct TokenSummary {
 }
 
 impl Db {
+    fn postgres(&self) -> &PostgresStore {
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => store,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn postgres_pool(&self) -> &PgPool {
+        &self.postgres().pool
+    }
+    /// Return the selected relational backend.
+    pub fn backend_kind(&self) -> DatabaseBackendKind {
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(_) => DatabaseBackendKind::Postgres,
+        }
+    }
+    fn from_postgres_parts(
+        pool: PgPool,
+        max_connections: u32,
+        read_pool: Option<PgPool>,
+        read_max_connections: u32,
+        replica_read_max_age: Option<Duration>,
+        reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    ) -> Self {
+        let fence = std::sync::Arc::new(replica_fence::ReplicaFence::new());
+        Self {
+            backend: std::sync::Arc::new(DatabaseBackend::Postgres(PostgresStore {
+                pool: pool.clone(),
+                max_connections,
+                read_pool: read_pool.clone(),
+                fence: std::sync::Arc::clone(&fence),
+            })),
+            pool,
+            max_connections,
+            read_pool,
+            read_max_connections,
+            fence,
+            replica_read_max_age,
+            reader_aurora_identity,
+        }
+    }
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
     /// When `config.read_database_url` is set, a second pool with the same
@@ -693,15 +752,14 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
-        Ok(Self {
+        Ok(Self::from_postgres_parts(
             pool,
-            max_connections: config.max_connections,
+            config.max_connections,
             read_pool,
             read_max_connections,
-            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
-            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-        })
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        ))
     }
 
     /// Connect the writer pool with all session-level safety premises.
@@ -817,15 +875,15 @@ impl Db {
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
-        Self {
-            max_connections: pool.options().get_max_connections(),
-            read_max_connections: pool.options().get_max_connections(),
+        let max_connections = pool.options().get_max_connections();
+        Self::from_postgres_parts(
             pool,
-            read_pool: None,
-            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
-            replica_read_max_age: None,
-            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-        }
+            max_connections,
+            None,
+            max_connections,
+            None,
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        )
     }
 
     /// Creates a `Db` from distinct writer and read pools (useful in tests,
@@ -836,15 +894,16 @@ impl Db {
     /// [`replica_fence::ReplicaFence::force_open_for_tests`] (see
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
-        Self {
-            max_connections: pool.options().get_max_connections(),
-            read_max_connections: read_pool.options().get_max_connections(),
+        let max_connections = pool.options().get_max_connections();
+        let read_max_connections = read_pool.options().get_max_connections();
+        Self::from_postgres_parts(
             pool,
-            read_pool: Some(read_pool),
-            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
-            replica_read_max_age: None,
-            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-        }
+            max_connections,
+            Some(read_pool),
+            read_max_connections,
+            None,
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        )
     }
 
     /// Test hook: set the head-fetch routing budget (Predicate A), which
