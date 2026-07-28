@@ -25,6 +25,9 @@
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
 pub mod conn_control;
+/// Backend-neutral relay coordination interface.
+pub mod coordination;
+pub use coordination::Coordination;
 /// Error types for pub/sub operations.
 pub mod error;
 /// Redis-backed NIP-98 replay seen-set.
@@ -96,8 +99,8 @@ impl PubSubConfig {
     }
 }
 
-/// Central pub/sub manager for a Buzz relay instance.
-pub struct PubSubManager {
+/// Redis-backed coordination adapter for a Buzz relay instance.
+pub struct RedisCoordination {
     pool: deadpool_redis::Pool,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
@@ -112,7 +115,13 @@ pub struct PubSubManager {
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
 }
 
-impl PubSubManager {
+/// Historical name for the Redis coordination adapter.
+///
+/// New construction sites should use [`RedisCoordination`] so backend
+/// selection remains explicit.
+pub type PubSubManager = RedisCoordination;
+
+impl RedisCoordination {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
     pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
         Self::with_config(PubSubConfig::new(redis_url), pool).await
