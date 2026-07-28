@@ -26,7 +26,7 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
+use super::ingest::{IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
@@ -72,163 +72,6 @@ pub async fn handle_command(
         _ => Err(IngestError::Rejected(format!(
             "unknown command kind: {kind}"
         ))),
-    }
-}
-
-/// Result of persisting a command event: either a duplicate (already processed)
-/// or an open transaction that the handler must commit after executing mutations.
-enum PersistResult {
-    /// Event was already processed — return idempotent success.
-    Duplicate,
-    /// Event inserted — transaction is open, handler must commit after mutations.
-    Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
-}
-
-/// Persist a command event inside a transaction. Returns the OPEN transaction
-/// as an idempotency guard — if the event was already stored, `Duplicate` is
-/// returned and the handler skips execution.
-///
-/// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
-/// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
-///
-/// NOTE: Remaining legacy domain mutations (upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations such as workflow upserts. DM and approval commands use
-/// database-owned atomic command APIs below and are not part of this legacy path.
-async fn persist_command_event(
-    state: &Arc<AppState>,
-    tenant: &TenantContext,
-    event: &Event,
-    channel_id_override: Option<Uuid>,
-) -> Result<PersistResult, IngestError> {
-    let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
-
-    let mut tx = state
-        .db
-        .begin_transaction()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
-
-    // INSERT with ON CONFLICT DO NOTHING — idempotency guard.
-    let id_bytes = event.id.as_bytes();
-    let pubkey_bytes = event.pubkey.to_bytes();
-    let sig_bytes = event.sig.serialize();
-    let tags_json = serde_json::to_value(&event.tags)
-        .map_err(|e| IngestError::Internal(format!("error: serialize tags: {e}")))?;
-    let kind_i32 = event.kind.as_u16() as i32;
-    let created_at_secs = event.created_at.as_secs() as i64;
-    let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0).ok_or_else(|| {
-        IngestError::Rejected(format!("invalid: bad timestamp {created_at_secs}"))
-    })?;
-    let received_at = chrono::Utc::now();
-
-    // Extract d_tag for parameterized replaceable kinds (NIP-33).
-    let d_tag = buzz_db::event::extract_d_tag(event);
-    if let Some(ref d_tag) = d_tag {
-        if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
-            return Err(IngestError::Rejected(format!(
-                "invalid: d tag too long ({} bytes, max {})",
-                d_tag.len(),
-                buzz_db::event::D_TAG_MAX_LEN,
-            )));
-        }
-
-        // Command kinds normally use plain insert semantics, but workflow
-        // definitions are NIP-33 events. Serialize writers for the same
-        // coordinate and reject stale writes before executing the domain
-        // mutation, otherwise old updates can overwrite newer workflow state.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in tenant.community().as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
-
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(tenant.community().as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
-
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                return Ok(PersistResult::Duplicate);
-            }
-
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
-            )
-            .bind(tenant.community().as_uuid())
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
-        }
-    }
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(tenant.community().as_uuid())
-    .bind(id_bytes.as_slice())
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at)
-    .bind(kind_i32)
-    .bind(&tags_json)
-    .bind(&event.content)
-    .bind(sig_bytes.as_slice())
-    .bind(received_at)
-    .bind(channel_id)
-    .bind(d_tag.as_deref())
-    .execute(tx.as_mut())
-    .await
-    .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
-
-    if result.rows_affected() == 0 {
-        // Duplicate — rollback (implicit on drop) and signal idempotent success.
-        Ok(PersistResult::Duplicate)
-    } else {
-        Ok(PersistResult::Inserted(tx))
     }
 }
 
@@ -736,18 +579,6 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
     // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
     // row instead of creating another enabled workflow that would fan out on
     // every matching event. The workflow's community is the request's
@@ -766,12 +597,13 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
-    state
+    match state
         .db
-        .upsert_workflow(
+        .execute_workflow_definition_command(
             community_id,
+            event,
             workflow_id,
-            Some(channel_id),
+            channel_id,
             &self_bytes,
             &workflow_name,
             &definition_json_final,
@@ -782,19 +614,24 @@ async fn handle_workflow_def(
             DbError::AccessDenied(_) => IngestError::Rejected(
                 "forbidden: workflow belongs to a different owner or channel".into(),
             ),
-            other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
-        })?;
+            DbError::InvalidData(message) => IngestError::Rejected(format!("invalid: {message}")),
+            other => IngestError::Internal(format!("error: db workflow definition: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        CommandExecution::Applied(()) => {}
+    }
 
     // Drop the trigger-path cache entry so the new/updated definition fires on
     // the next matching event instead of after the cache TTL.
     state
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
-
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Return response
     let mut resp = serde_json::json!({

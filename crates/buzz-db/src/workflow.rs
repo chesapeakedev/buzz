@@ -320,6 +320,33 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    upsert_workflow_tx(
+        &mut tx,
+        community_id,
+        id,
+        channel_id,
+        owner_pubkey,
+        name,
+        definition_json,
+        definition_hash,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upsert_workflow_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()> {
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -342,7 +369,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if row.is_none() {
