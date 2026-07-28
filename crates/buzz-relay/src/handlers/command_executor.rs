@@ -27,7 +27,7 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
+use super::ingest::{IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
@@ -723,18 +723,6 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
     // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
     // row instead of creating another enabled workflow that would fan out on
     // every matching event. The workflow's community is the request's
@@ -753,12 +741,13 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
-    state
+    match state
         .db
-        .upsert_workflow(
+        .execute_workflow_definition_command(
             community_id,
+            event,
             workflow_id,
-            Some(channel_id),
+            channel_id,
             &self_bytes,
             &workflow_name,
             &definition_json_final,
@@ -769,19 +758,24 @@ async fn handle_workflow_def(
             DbError::AccessDenied(_) => IngestError::Rejected(
                 "forbidden: workflow belongs to a different owner or channel".into(),
             ),
-            other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
-        })?;
+            DbError::InvalidData(message) => IngestError::Rejected(format!("invalid: {message}")),
+            other => IngestError::Internal(format!("error: db workflow definition: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        CommandExecution::Applied(()) => {}
+    }
 
     // Drop the trigger-path cache entry so the new/updated definition fires on
     // the next matching event instead of after the cache TTL.
     state
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
-
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -1301,7 +1295,6 @@ async fn resume_workflow_after_approval(
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

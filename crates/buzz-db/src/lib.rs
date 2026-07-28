@@ -1182,7 +1182,6 @@ impl Db {
     pub fn deletion_store(&self) -> deletion::DeletionStore {
         deletion::DeletionStore::new(self.pool.clone())
     }
-
     /// Begin a database transaction for atomic multi-statement operations.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
@@ -1193,6 +1192,465 @@ impl Db {
         sqlx::Transaction::begin(connection, None)
             .await
             .map_err(Into::into)
+    }
+
+    /// Returns the community mapped to a normalized request host, if one exists.
+    ///
+    /// The caller owns host normalization and turns `None` into the fail-closed
+    /// request/connection error. buzz-db only reads the durable host map.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
+    pub async fn lookup_community_by_host(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, host
+            FROM communities
+            WHERE lower(host) = lower($1)
+              AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
+
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            })
+        })
+        .transpose()
+    }
+
+    /// Returns whether a community id still exists in the active lifecycle state.
+    #[datastore_span(name = "is_community_active", system = "postgresql")]
+    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
+    }
+
+    /// Returns a community by host regardless of lifecycle state. Operator-plane only.
+    #[datastore_span(
+        name = "lookup_community_by_host_for_management",
+        system = "postgresql"
+    )]
+    pub async fn lookup_community_by_host_for_management(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
+            .bind(normalized_host)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Lists communities where `owner_pubkey` currently holds the `owner` role.
+    ///
+    /// This is an operator-plane helper, not a tenant-scoped data-plane read:
+    /// callers must gate it on deployment-level operator auth before exposing it.
+    #[datastore_span(name = "list_communities_owned_by", system = "postgresql")]
+    pub async fn list_communities_owned_by(
+        &self,
+        owner_pubkey: &str,
+    ) -> Result<Vec<OwnedCommunityRecord>> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.host, c.created_at, c.archived_at
+            FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE rm.pubkey = $1
+              AND rm.role = 'owner'
+            ORDER BY c.created_at ASC, c.host ASC
+            "#,
+        )
+        .bind(owner_pubkey)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
+                let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                let archived_at: Option<DateTime<Utc>> = row.try_get("archived_at")?;
+                Ok(OwnedCommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                    created_at,
+                    archived_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Returns the normalized host mapped to a community id, if the community
+    /// exists.
+    ///
+    /// The reverse of [`lookup_community_by_host`]: used by side-effect
+    /// producers that already hold a server-resolved `CommunityId` (e.g. the
+    /// workflow action sink running a run owned by some community) and need a
+    /// fully-formed [`buzz_core::tenant::TenantContext`] — host included — to
+    /// fan out under *that* community rather than the deployment default. The
+    /// community is authoritative; the host is read back for labelling only and
+    /// is never used to re-derive the community.
+    #[datastore_span(name = "lookup_community_host", system = "postgresql")]
+    pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT host
+            FROM communities
+            WHERE id = $1
+              AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let host: String = row.try_get("host")?;
+            Ok(host)
+        })
+        .transpose()
+    }
+
+    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 command; the value is
+    /// validated and size-capped at that write path.
+    #[datastore_span(name = "get_community_icon", system = "postgresql")]
+    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT icon
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("icon"))
+            .transpose()?
+            .flatten()
+            .filter(|icon| !icon.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's workspace icon.
+    #[datastore_span(name = "set_community_icon", system = "postgresql")]
+    pub async fn set_community_icon(
+        &self,
+        community_id: CommunityId,
+        icon: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET icon = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(icon)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Ensure a configured community host exists and return its row.
+    ///
+    /// This is the startup/config seeding path for N=1 deployments. Migrations
+    /// create the schema only; deployment-specific hosts are not hardcoded into
+    /// schema history.
+    #[datastore_span(name = "ensure_configured_community", system = "postgresql")]
+    pub async fn ensure_configured_community(
+        &self,
+        normalized_host: &str,
+    ) -> Result<EnsuredCommunityRecord> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO communities (host)
+            VALUES ($1)
+            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            WHERE communities.deletion_state = 'active'
+              AND communities.deleted_at IS NULL
+            RETURNING id, host, (xmax = 0) AS created
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            DbError::AccessDenied(format!(
+                "community host {normalized_host:?} is permanently tombstoned"
+            ))
+        })?;
+
+        let id: Uuid = row.try_get("id")?;
+        let host: String = row.try_get("host")?;
+        let created: bool = row.try_get("created")?;
+
+        Ok(EnsuredCommunityRecord {
+            id: CommunityId::from_uuid(id),
+            host,
+            created,
+        })
+    }
+
+    /// Atomically creates a community and its initial owner.
+    ///
+    /// Holds a per-owner advisory lock while enforcing the ownership limit.
+    /// Identical create retries return the original record; host collisions and
+    /// limit failures remain distinguishable to the operator API.
+    #[datastore_span(name = "create_community_with_owner", system = "postgresql")]
+    pub async fn create_community_with_owner(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<CreateCommunityWithOwnerResult> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mut tx = self.pool.begin().await?;
+
+        // Serialize on the owner pubkey so concurrent creates to the same
+        // owner cannot both pass the ownership count check.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
+            .execute(&mut *tx)
+            .await?;
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO communities (host)
+            VALUES ($1)
+            ON CONFLICT (lower(host)) DO NOTHING
+            RETURNING id, host
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (id, host) = if let Some(row) = row {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
+
+            // Enforce the limit before inserting the new owner row.
+            let owned_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
+            )
+            .bind(&owner_pubkey)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if owned_count >= relay_members::max_communities_per_owner() {
+                tx.rollback().await?;
+                return Ok(CreateCommunityWithOwnerResult::LimitReached);
+            }
+
+            sqlx::query(
+                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+            )
+            .bind(id)
+            .bind(&owner_pubkey)
+            .execute(&mut *tx)
+            .await?;
+            (id, host)
+        } else {
+            let existing = sqlx::query(
+                r#"
+                SELECT c.id, c.host
+                FROM communities c
+                JOIN relay_members rm ON rm.community_id = c.id
+                WHERE lower(c.host) = lower($1)
+                  AND lower(rm.pubkey) = lower($2)
+                  AND rm.role = 'owner'
+                  AND c.archived_at IS NULL
+                  AND c.deletion_state = 'active'
+                  AND c.deleted_at IS NULL
+                "#,
+            )
+            .bind(normalized_host)
+            .bind(&owner_pubkey)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(existing) = existing else {
+                tx.rollback().await?;
+                return Ok(CreateCommunityWithOwnerResult::HostExists);
+            };
+            (existing.try_get("id")?, existing.try_get("host")?)
+        };
+
+        tx.commit().await?;
+        Ok(CreateCommunityWithOwnerResult::Created(
+            CreatedCommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            },
+        ))
+    }
+
+    /// Idempotently archives a community when the asserted pubkey is its current owner.
+    #[datastore_span(name = "archive_community_owned_by", system = "postgresql")]
+    pub async fn archive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+        protected_deployment_host: &str,
+    ) -> Result<Option<ArchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = COALESCE(c.archived_at, now())
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+                 AND lower(c.host) <> lower($3)
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
+               RETURNING c.id, c.host, c.archived_at"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .bind(protected_deployment_host)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ArchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+                archived_at: row.try_get("archived_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Idempotently restores a community when the asserted pubkey is its current owner.
+    #[datastore_span(name = "unarchive_community_owned_by", system = "postgresql")]
+    pub async fn unarchive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<UnarchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = NULL
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
+               RETURNING c.id, c.host"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(UnarchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Returns the community that owns a channel, if the channel exists.
+    ///
+    /// Internal relay producers use this to derive tenant context from the row
+    /// they are acting on, rather than falling back to an implicit default.
+    #[datastore_span(name = "community_of_channel", system = "postgresql")]
+    pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
+        let row = sqlx::query(
+            r#"
+            SELECT community_id
+            FROM channels
+            WHERE id = $1
+              AND deleted_at IS NULL
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let id: Uuid = row.try_get("community_id")?;
+            Ok(CommunityId::from_uuid(id))
+        })
+        .transpose()
+    }
+
+    /// Batched version of [`Self::community_of_channel`]: given a list of
+    /// channel UUIDs, returns a map from channel id → owning community
+    /// for every channel that exists (soft-deletes excluded).
+    ///
+    /// Used by the runtime conformance read-seam emitters in `buzz-relay`:
+    /// after a `query_events`/`get_events_by_ids` returns N rows, the
+    /// emitter collects distinct `channel_id`s, calls this once, then
+    /// projects each row's true community label independently of the
+    /// fetch query's WHERE clause. That independence is what makes the
+    /// `Inv_NonInterference` / `Inv_ReadConfinement` gate non-vacuous —
+    /// a mutation that dropped `community_id = $X` from the fetch query
+    /// would still let this helper return the row's true label, and the
+    /// checker would see the mismatch.
+    ///
+    /// Channels missing from the result map (deleted or never existed)
+    /// are intentionally not present rather than mapped to a default —
+    /// callers MUST treat "channel-id not in map" as a coverage breach,
+    /// never as "use the resolved community".
+    #[datastore_span(name = "communities_of_channels", system = "postgresql")]
+    pub async fn communities_of_channels(
+        &self,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id, community_id
+            FROM channels
+            WHERE id = ANY($1)
+              AND deleted_at IS NULL
+            "#,
+        )
+        .bind(channel_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let ch: Uuid = row.try_get("id")?;
+            let cm: Uuid = row.try_get("community_id")?;
+            out.insert(ch, CommunityId::from_uuid(cm));
+        }
+        Ok(out)
     }
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
@@ -3476,6 +3934,166 @@ impl Db {
         .await
     }
 
+    /// Atomically replace a NIP-33 workflow definition event and upsert its workflow.
+    ///
+    /// The PostgreSQL advisory lock serializes writers for the event coordinate.
+    /// Stale definitions and exact replays return [`CommandExecution::Duplicate`]
+    /// without changing either representation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_workflow_definition_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        workflow_id: Uuid,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_DEF {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow definition kind {}, got {}",
+                buzz_core::kind::KIND_WORKFLOW_DEF,
+                event.kind.as_u16()
+            )));
+        }
+        if event.pubkey.to_bytes().as_slice() != owner_pubkey {
+            return Err(DbError::InvalidData(
+                "workflow owner does not match event author".to_string(),
+            ));
+        }
+
+        let d_tag = event::extract_d_tag(event)
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing d tag".to_string()))?;
+        if d_tag.len() > event::D_TAG_MAX_LEN {
+            return Err(DbError::InvalidData(format!(
+                "workflow d tag exceeds {} bytes",
+                event::D_TAG_MAX_LEN
+            )));
+        }
+        let tagged_workflow_id = Uuid::parse_str(&d_tag)
+            .map_err(|_| DbError::InvalidData("workflow d tag is not a UUID".to_string()))?;
+        if tagged_workflow_id != workflow_id {
+            return Err(DbError::InvalidData(
+                "workflow id does not match event d tag".to_string(),
+            ));
+        }
+        let tagged_channel_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 2 && parts[0] == "h").then(|| parts[1].as_str())
+            })
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing h tag".to_string()))?
+            .parse::<Uuid>()
+            .map_err(|_| DbError::InvalidData("workflow h tag is not a UUID".to_string()))?;
+        if tagged_channel_id != channel_id {
+            return Err(DbError::InvalidData(
+                "workflow channel does not match event h tag".to_string(),
+            ));
+        }
+
+        let kind_i32 = buzz_core::kind::event_kind_i32(event);
+        let pubkey_bytes = event.pubkey.to_bytes();
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
+
+        let mut tx = self.pool.begin().await?;
+        self.deletion_store()
+            .guard_transaction(&mut tx, community_id)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+               AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(&d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let incoming_id = event.id.as_bytes().as_slice();
+        if existing.as_ref().is_some_and(|(accepted_at, accepted_id)| {
+            created_at < *accepted_at
+                || (created_at == *accepted_at && incoming_id >= accepted_id.as_slice())
+        }) {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        if existing.is_some() {
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+                   AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(&d_tag)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let sig_bytes = event.sig.serialize();
+        let inserted = sqlx::query(
+            "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+                  received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(incoming_id)
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(chrono::Utc::now())
+        .bind(channel_id)
+        .bind(&d_tag)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        workflow::upsert_workflow_tx(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(channel_id),
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(()))
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     #[datastore_span(name = "get_workflow", system = "postgresql")]
     pub async fn get_workflow(
@@ -5749,6 +6367,300 @@ mod tests {
                 .execute(&db.pool)
                 .await
                 .expect("clean DM add-member command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_definition_command_is_atomic_ordered_and_tenant_scoped() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        fn definition_event(
+            keys: &Keys,
+            workflow_id: Uuid,
+            channel_id: Uuid,
+            created_at: u64,
+            content: &str,
+        ) -> nostr::Event {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
+                content,
+            )
+            .tags([
+                Tag::parse(["d".to_string(), workflow_id.to_string()]).expect("workflow d tag"),
+                Tag::parse(["h".to_string(), channel_id.to_string()]).expect("workflow h tag"),
+            ])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign workflow definition")
+        }
+
+        let db = setup_db().await;
+        let community_a_uuid = make_community(&db.pool).await;
+        let community_b_uuid = make_community(&db.pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let owner = Keys::generate();
+        let attacker = Keys::generate();
+        let owner_bytes = owner.public_key().to_bytes();
+        let attacker_bytes = attacker.public_key().to_bytes();
+
+        for community in [community_a, community_b] {
+            db.ensure_user(community, owner_bytes.as_slice())
+                .await
+                .expect("insert workflow owner");
+        }
+        db.ensure_user(community_a, attacker_bytes.as_slice())
+            .await
+            .expect("insert workflow attacker");
+        let channel_a = db
+            .create_channel(
+                community_a,
+                "workflow-definition-a",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                owner_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create workflow channel A");
+        let channel_b = db
+            .create_channel(
+                community_b,
+                "workflow-definition-b",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                owner_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create workflow channel B");
+
+        let workflow_id = Uuid::new_v4();
+        let definition_hash_b = [0x62; 32];
+        db.upsert_workflow(
+            community_b,
+            workflow_id,
+            Some(channel_b.id),
+            owner_bytes.as_slice(),
+            "tenant-b",
+            r#"{"version":"b"}"#,
+            &definition_hash_b,
+        )
+        .await
+        .expect("create same-id workflow in tenant B");
+
+        let base = Timestamp::now().as_secs();
+        let initial = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base,
+            "initial definition",
+        );
+        let definition_hash_v1 = [0x11; 32];
+        let initial_outcome = db
+            .execute_workflow_definition_command(
+                community_a,
+                &initial,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "version-one",
+                r#"{"version":1}"#,
+                &definition_hash_v1,
+            )
+            .await
+            .expect("create workflow definition");
+        assert_eq!(initial_outcome, CommandExecution::Applied(()));
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read created workflow");
+        assert_eq!(workflow.name, "version-one");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 1}));
+
+        let replay = db
+            .execute_workflow_definition_command(
+                community_a,
+                &initial,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "must-not-replay",
+                r#"{"version":"replay"}"#,
+                &[0x99; 32],
+            )
+            .await
+            .expect("replay workflow definition");
+        assert_eq!(replay, CommandExecution::Duplicate);
+
+        let newer = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 2,
+            "newer definition",
+        );
+        let definition_hash_v2 = [0x22; 32];
+        assert_eq!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &newer,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "version-two",
+                r#"{"version":2}"#,
+                &definition_hash_v2,
+            )
+            .await
+            .expect("replace workflow definition"),
+            CommandExecution::Applied(())
+        );
+        let stale = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 1,
+            "stale definition",
+        );
+        assert_eq!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &stale,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "must-not-win",
+                r#"{"version":"stale"}"#,
+                &[0x33; 32],
+            )
+            .await
+            .expect("reject stale workflow definition"),
+            CommandExecution::Duplicate
+        );
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read replaced workflow");
+        assert_eq!(workflow.name, "version-two");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 2}));
+        let event_counts: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE deleted_at IS NULL) \
+             FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community_a_uuid)
+        .bind(buzz_core::kind::KIND_WORKFLOW_DEF as i32)
+        .bind(owner_bytes.as_slice())
+        .bind(workflow_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count workflow definition history");
+        assert_eq!(event_counts, (2, 1));
+
+        let unauthorized = definition_event(
+            &attacker,
+            workflow_id,
+            channel_a.id,
+            base + 3,
+            "unauthorized definition",
+        );
+        let unauthorized_result = db
+            .execute_workflow_definition_command(
+                community_a,
+                &unauthorized,
+                workflow_id,
+                channel_a.id,
+                attacker_bytes.as_slice(),
+                "attacker",
+                r#"{"version":"attacker"}"#,
+                &[0x44; 32],
+            )
+            .await;
+        assert!(matches!(unauthorized_result, Err(DbError::AccessDenied(_))));
+        let unauthorized_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_a_uuid)
+                .bind(unauthorized.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back unauthorized event");
+        assert_eq!(unauthorized_event_count, 0);
+
+        let tenant_b = db
+            .get_workflow(community_b, workflow_id)
+            .await
+            .expect("read tenant-B workflow");
+        assert_eq!(tenant_b.name, "tenant-b");
+        assert_eq!(tenant_b.definition, serde_json::json!({"version": "b"}));
+
+        let concurrent_old = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 4,
+            "concurrent old",
+        );
+        let concurrent_new = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 5,
+            "concurrent new",
+        );
+        let (old_result, new_result) = tokio::join!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &concurrent_old,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "concurrent-old",
+                r#"{"version":4}"#,
+                &[0x54; 32],
+            ),
+            db.execute_workflow_definition_command(
+                community_a,
+                &concurrent_new,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "concurrent-new",
+                r#"{"version":5}"#,
+                &[0x55; 32],
+            )
+        );
+        assert!(old_result.is_ok());
+        assert_eq!(
+            new_result.expect("execute newer concurrent definition"),
+            CommandExecution::Applied(())
+        );
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read concurrent winner");
+        assert_eq!(workflow.name, "concurrent-new");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 5}));
+
+        for community_uuid in [community_a_uuid, community_b_uuid] {
+            for statement in [
+                "DELETE FROM events WHERE community_id = $1",
+                "DELETE FROM workflow_runs WHERE community_id = $1",
+                "DELETE FROM workflows WHERE community_id = $1",
+                "DELETE FROM channel_members WHERE community_id = $1",
+                "DELETE FROM channels WHERE community_id = $1",
+                "DELETE FROM users WHERE community_id = $1",
+                "DELETE FROM communities WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(community_uuid)
+                    .execute(&db.pool)
+                    .await
+                    .expect("clean workflow definition command fixture");
+            }
         }
     }
 
