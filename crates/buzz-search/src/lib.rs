@@ -47,6 +47,14 @@ impl SearchService {
         Self { pool }
     }
 
+    /// Connect the PostgreSQL search adapter.
+    ///
+    /// Keeping pool construction inside the owning adapter lets relay startup
+    /// select this implementation without importing PostgreSQL driver types.
+    pub async fn connect_postgres(database_url: &str) -> Result<Self, SearchError> {
+        Ok(Self::new(PgPool::connect(database_url).await?))
+    }
+
     /// Execute a community-scoped FTS query.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
         query::search(&self.pool, query).await
