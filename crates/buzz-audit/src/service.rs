@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt as _;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Acquire, PgPool, Row};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
@@ -42,6 +43,23 @@ impl AuditService {
     /// Creates a new `AuditService` using the given connection pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Connect the PostgreSQL audit adapter with an independently bounded pool.
+    ///
+    /// Pool construction stays inside the adapter so relay startup does not
+    /// depend on PostgreSQL driver types when selecting an audit backend.
+    pub async fn connect_postgres(
+        database_url: &str,
+        max_connections: u32,
+        min_connections: u32,
+    ) -> Result<Self, AuditError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .connect(database_url)
+            .await?;
+        Ok(Self::new(pool))
     }
 
     /// Append a new entry to the calling community's chain.
