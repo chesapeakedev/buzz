@@ -14,7 +14,7 @@ pub(crate) enum AdmissionError {
     Unavailable,
 }
 
-pub(crate) async fn check_principal<L: RateLimiter>(
+pub(crate) async fn check_principal<L: RateLimiter + ?Sized>(
     limiter: &L,
     tenant: &TenantContext,
     pubkey: &PublicKey,
@@ -66,6 +66,7 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    #[async_trait::async_trait]
     impl RateLimiter for StubLimiter {
         async fn check_and_increment(
             &self,
