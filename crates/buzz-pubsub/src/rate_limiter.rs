@@ -96,6 +96,7 @@ impl RedisRateLimiter {
     }
 }
 
+#[async_trait::async_trait]
 impl RateLimiter for RedisRateLimiter {
     async fn check_and_increment(
         &self,
@@ -117,5 +118,72 @@ impl RateLimiter for RedisRateLimiter {
     ) -> Result<RateLimitResult, AuthError> {
         let key = buzz_auth::rate_limit::ip_rate_limit_key(ip);
         run_rate_limit(&self.pool, &key, window_secs, limit).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_core::{CommunityId, TenantContext};
+    use deadpool_redis::{Config, Runtime};
+    use nostr::Keys;
+    use std::net::Ipv6Addr;
+    use uuid::Uuid;
+
+    fn limiter() -> RedisRateLimiter {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let pool = Config::from_url(url)
+            .create_pool(Some(Runtime::Tokio1))
+            .expect("create Redis pool");
+        RedisRateLimiter::new(pool)
+    }
+
+    fn tenant(id: Uuid, host: &str) -> TenantContext {
+        TenantContext::resolved(CommunityId::from_uuid(id), host)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn principal_windows_are_atomic_and_community_scoped() {
+        let limiter: std::sync::Arc<dyn RateLimiter> = std::sync::Arc::new(limiter());
+        let tenant_a = tenant(Uuid::new_v4(), "rate-a.example");
+        let tenant_b = tenant(Uuid::new_v4(), "rate-b.example");
+        let pubkey = Keys::generate().public_key();
+
+        let first = limiter
+            .check_and_increment(&tenant_a, &pubkey, LimitType::Messages, 60, 1)
+            .await
+            .expect("first tenant A increment");
+        let second = limiter
+            .check_and_increment(&tenant_a, &pubkey, LimitType::Messages, 60, 1)
+            .await
+            .expect("second tenant A increment");
+        let other_tenant = limiter
+            .check_and_increment(&tenant_b, &pubkey, LimitType::Messages, 60, 1)
+            .await
+            .expect("first tenant B increment");
+
+        assert!(first.allowed);
+        assert!(!second.allowed);
+        assert!(other_tenant.allowed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn ip_windows_remain_operator_global() {
+        let limiter: std::sync::Arc<dyn RateLimiter> = std::sync::Arc::new(limiter());
+        let ip = IpAddr::V6(Ipv6Addr::from(Uuid::new_v4().as_u128()));
+
+        let first = limiter
+            .check_ip_connection(&ip, 60, 1)
+            .await
+            .expect("first IP increment");
+        let second = limiter
+            .check_ip_connection(&ip, 60, 1)
+            .await
+            .expect("second IP increment");
+
+        assert!(first.allowed);
+        assert!(!second.allowed);
     }
 }

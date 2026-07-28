@@ -16,14 +16,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
-use buzz_auth::{AuthService, Nip98ReplayGuard};
+use buzz_auth::{AuthService, Nip98ReplayGuard, RateLimiter};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
-use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{Coordination, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -722,8 +721,11 @@ pub struct AppState {
     /// replace this with process-local caching; replay freshness must survive
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
-    /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
-    pub admission_rate_limiter: Arc<RedisRateLimiter>,
+    /// Durable admission limits for ordinary HTTP and WebSocket work.
+    ///
+    /// Distributed startup supplies Redis; embedded startup supplies its
+    /// relational security-window adapter.
+    pub admission_rate_limiter: Arc<dyn RateLimiter>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
@@ -852,7 +854,9 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
+        let admission_rate_limiter: Arc<dyn RateLimiter> = Arc::new(
+            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool.clone()),
+        );
         let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
