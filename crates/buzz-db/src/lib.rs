@@ -1254,15 +1254,6 @@ impl Db {
     pub fn deletion_store(&self) -> deletion::DeletionStore {
         deletion::DeletionStore::new(self.pool.clone())
     }
-
-    /// Begin a database transaction for atomic multi-statement operations.
-    ///
-    /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
-    /// The transaction holds an owned pool handle, not a borrow.
-    pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        self.pool.begin().await.map_err(Into::into)
-    }
-
     /// Returns the community mapped to a normalized request host, if one exists.
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
@@ -4003,6 +3994,166 @@ impl Db {
         .await
     }
 
+    /// Atomically replace a NIP-33 workflow definition event and upsert its workflow.
+    ///
+    /// The PostgreSQL advisory lock serializes writers for the event coordinate.
+    /// Stale definitions and exact replays return [`CommandExecution::Duplicate`]
+    /// without changing either representation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_workflow_definition_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        workflow_id: Uuid,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_DEF {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow definition kind {}, got {}",
+                buzz_core::kind::KIND_WORKFLOW_DEF,
+                event.kind.as_u16()
+            )));
+        }
+        if event.pubkey.to_bytes().as_slice() != owner_pubkey {
+            return Err(DbError::InvalidData(
+                "workflow owner does not match event author".to_string(),
+            ));
+        }
+
+        let d_tag = event::extract_d_tag(event)
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing d tag".to_string()))?;
+        if d_tag.len() > event::D_TAG_MAX_LEN {
+            return Err(DbError::InvalidData(format!(
+                "workflow d tag exceeds {} bytes",
+                event::D_TAG_MAX_LEN
+            )));
+        }
+        let tagged_workflow_id = Uuid::parse_str(&d_tag)
+            .map_err(|_| DbError::InvalidData("workflow d tag is not a UUID".to_string()))?;
+        if tagged_workflow_id != workflow_id {
+            return Err(DbError::InvalidData(
+                "workflow id does not match event d tag".to_string(),
+            ));
+        }
+        let tagged_channel_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 2 && parts[0] == "h").then(|| parts[1].as_str())
+            })
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing h tag".to_string()))?
+            .parse::<Uuid>()
+            .map_err(|_| DbError::InvalidData("workflow h tag is not a UUID".to_string()))?;
+        if tagged_channel_id != channel_id {
+            return Err(DbError::InvalidData(
+                "workflow channel does not match event h tag".to_string(),
+            ));
+        }
+
+        let kind_i32 = buzz_core::kind::event_kind_i32(event);
+        let pubkey_bytes = event.pubkey.to_bytes();
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
+
+        let mut tx = self.pool.begin().await?;
+        self.deletion_store()
+            .guard_transaction(&mut tx, community_id)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+               AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(&d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let incoming_id = event.id.as_bytes().as_slice();
+        if existing.as_ref().is_some_and(|(accepted_at, accepted_id)| {
+            created_at < *accepted_at
+                || (created_at == *accepted_at && incoming_id >= accepted_id.as_slice())
+        }) {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        if existing.is_some() {
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+                   AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(&d_tag)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let sig_bytes = event.sig.serialize();
+        let inserted = sqlx::query(
+            "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+                  received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(incoming_id)
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(chrono::Utc::now())
+        .bind(channel_id)
+        .bind(&d_tag)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+
+        workflow::upsert_workflow_tx(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(channel_id),
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(CommandExecution::Applied(()))
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     #[datastore_span(name = "get_workflow", system = "postgresql")]
     pub async fn get_workflow(
@@ -6496,6 +6647,300 @@ mod tests {
                 .execute(&db.pool)
                 .await
                 .expect("clean DM add-member command fixture");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_definition_command_is_atomic_ordered_and_tenant_scoped() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        fn definition_event(
+            keys: &Keys,
+            workflow_id: Uuid,
+            channel_id: Uuid,
+            created_at: u64,
+            content: &str,
+        ) -> nostr::Event {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
+                content,
+            )
+            .tags([
+                Tag::parse(["d".to_string(), workflow_id.to_string()]).expect("workflow d tag"),
+                Tag::parse(["h".to_string(), channel_id.to_string()]).expect("workflow h tag"),
+            ])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign workflow definition")
+        }
+
+        let db = setup_db().await;
+        let community_a_uuid = make_community(&db.pool).await;
+        let community_b_uuid = make_community(&db.pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let owner = Keys::generate();
+        let attacker = Keys::generate();
+        let owner_bytes = owner.public_key().to_bytes();
+        let attacker_bytes = attacker.public_key().to_bytes();
+
+        for community in [community_a, community_b] {
+            db.ensure_user(community, owner_bytes.as_slice())
+                .await
+                .expect("insert workflow owner");
+        }
+        db.ensure_user(community_a, attacker_bytes.as_slice())
+            .await
+            .expect("insert workflow attacker");
+        let channel_a = db
+            .create_channel(
+                community_a,
+                "workflow-definition-a",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                owner_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create workflow channel A");
+        let channel_b = db
+            .create_channel(
+                community_b,
+                "workflow-definition-b",
+                channel::ChannelType::Stream,
+                channel::ChannelVisibility::Private,
+                None,
+                owner_bytes.as_slice(),
+                None,
+            )
+            .await
+            .expect("create workflow channel B");
+
+        let workflow_id = Uuid::new_v4();
+        let definition_hash_b = [0x62; 32];
+        db.upsert_workflow(
+            community_b,
+            workflow_id,
+            Some(channel_b.id),
+            owner_bytes.as_slice(),
+            "tenant-b",
+            r#"{"version":"b"}"#,
+            &definition_hash_b,
+        )
+        .await
+        .expect("create same-id workflow in tenant B");
+
+        let base = Timestamp::now().as_secs();
+        let initial = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base,
+            "initial definition",
+        );
+        let definition_hash_v1 = [0x11; 32];
+        let initial_outcome = db
+            .execute_workflow_definition_command(
+                community_a,
+                &initial,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "version-one",
+                r#"{"version":1}"#,
+                &definition_hash_v1,
+            )
+            .await
+            .expect("create workflow definition");
+        assert_eq!(initial_outcome, CommandExecution::Applied(()));
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read created workflow");
+        assert_eq!(workflow.name, "version-one");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 1}));
+
+        let replay = db
+            .execute_workflow_definition_command(
+                community_a,
+                &initial,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "must-not-replay",
+                r#"{"version":"replay"}"#,
+                &[0x99; 32],
+            )
+            .await
+            .expect("replay workflow definition");
+        assert_eq!(replay, CommandExecution::Duplicate);
+
+        let newer = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 2,
+            "newer definition",
+        );
+        let definition_hash_v2 = [0x22; 32];
+        assert_eq!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &newer,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "version-two",
+                r#"{"version":2}"#,
+                &definition_hash_v2,
+            )
+            .await
+            .expect("replace workflow definition"),
+            CommandExecution::Applied(())
+        );
+        let stale = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 1,
+            "stale definition",
+        );
+        assert_eq!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &stale,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "must-not-win",
+                r#"{"version":"stale"}"#,
+                &[0x33; 32],
+            )
+            .await
+            .expect("reject stale workflow definition"),
+            CommandExecution::Duplicate
+        );
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read replaced workflow");
+        assert_eq!(workflow.name, "version-two");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 2}));
+        let event_counts: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE deleted_at IS NULL) \
+             FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community_a_uuid)
+        .bind(buzz_core::kind::KIND_WORKFLOW_DEF as i32)
+        .bind(owner_bytes.as_slice())
+        .bind(workflow_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count workflow definition history");
+        assert_eq!(event_counts, (2, 1));
+
+        let unauthorized = definition_event(
+            &attacker,
+            workflow_id,
+            channel_a.id,
+            base + 3,
+            "unauthorized definition",
+        );
+        let unauthorized_result = db
+            .execute_workflow_definition_command(
+                community_a,
+                &unauthorized,
+                workflow_id,
+                channel_a.id,
+                attacker_bytes.as_slice(),
+                "attacker",
+                r#"{"version":"attacker"}"#,
+                &[0x44; 32],
+            )
+            .await;
+        assert!(matches!(unauthorized_result, Err(DbError::AccessDenied(_))));
+        let unauthorized_event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_a_uuid)
+                .bind(unauthorized.id.as_bytes().as_slice())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count rolled-back unauthorized event");
+        assert_eq!(unauthorized_event_count, 0);
+
+        let tenant_b = db
+            .get_workflow(community_b, workflow_id)
+            .await
+            .expect("read tenant-B workflow");
+        assert_eq!(tenant_b.name, "tenant-b");
+        assert_eq!(tenant_b.definition, serde_json::json!({"version": "b"}));
+
+        let concurrent_old = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 4,
+            "concurrent old",
+        );
+        let concurrent_new = definition_event(
+            &owner,
+            workflow_id,
+            channel_a.id,
+            base + 5,
+            "concurrent new",
+        );
+        let (old_result, new_result) = tokio::join!(
+            db.execute_workflow_definition_command(
+                community_a,
+                &concurrent_old,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "concurrent-old",
+                r#"{"version":4}"#,
+                &[0x54; 32],
+            ),
+            db.execute_workflow_definition_command(
+                community_a,
+                &concurrent_new,
+                workflow_id,
+                channel_a.id,
+                owner_bytes.as_slice(),
+                "concurrent-new",
+                r#"{"version":5}"#,
+                &[0x55; 32],
+            )
+        );
+        assert!(old_result.is_ok());
+        assert_eq!(
+            new_result.expect("execute newer concurrent definition"),
+            CommandExecution::Applied(())
+        );
+        let workflow = db
+            .get_workflow(community_a, workflow_id)
+            .await
+            .expect("read concurrent winner");
+        assert_eq!(workflow.name, "concurrent-new");
+        assert_eq!(workflow.definition, serde_json::json!({"version": 5}));
+
+        for community_uuid in [community_a_uuid, community_b_uuid] {
+            for statement in [
+                "DELETE FROM events WHERE community_id = $1",
+                "DELETE FROM workflow_runs WHERE community_id = $1",
+                "DELETE FROM workflows WHERE community_id = $1",
+                "DELETE FROM channel_members WHERE community_id = $1",
+                "DELETE FROM channels WHERE community_id = $1",
+                "DELETE FROM users WHERE community_id = $1",
+                "DELETE FROM communities WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(community_uuid)
+                    .execute(&db.pool)
+                    .await
+                    .expect("clean workflow definition command fixture");
+            }
         }
     }
 
