@@ -5,7 +5,9 @@ use nostr::Event;
 use sqlx::{QueryBuilder, Row as _};
 use uuid::Uuid;
 
-use buzz_core::kind::{event_kind_i32, is_ephemeral, KIND_AUTH};
+use buzz_core::kind::{
+    event_kind_i32, is_ephemeral, KIND_AUTH, KIND_BOOKMARK_SET, KIND_READ_STATE,
+};
 use buzz_core::{CommunityId, StoredEvent};
 
 use super::SqliteStore;
@@ -57,6 +59,46 @@ async fn insert_mentions(
         .await?;
     }
     Ok(())
+}
+
+fn is_nip_rs(event: &Event, d_tag: &str) -> bool {
+    let d_tag_count = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
+        .count();
+    let has_exact_d_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+    });
+    let read_state_tags = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            let parts = tag.as_slice();
+            parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+        })
+        .count();
+
+    event_kind_i32(event) == KIND_READ_STATE as i32
+        && d_tag_count == 1
+        && has_exact_d_tag
+        && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
+            slot.len() == 32
+                && slot
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        && read_state_tags == 1
+}
+
+fn is_buzz_mesh_status(event: &Event, d_tag: &str) -> bool {
+    event_kind_i32(event) == KIND_BOOKMARK_SET as i32
+        && d_tag.starts_with("buzz-mesh-member-status:")
+        && event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
+        })
 }
 
 fn row_to_stored_event(row: sqlx::sqlite::SqliteRow) -> Result<Option<StoredEvent>> {
@@ -275,6 +317,154 @@ impl SqliteStore {
         ))
     }
 
+    /// Atomically replace one global NIP-33 coordinate.
+    ///
+    /// Conforming NIP-RS and mesh-status coordinates remove superseded payloads;
+    /// NIP-RS additionally retains a compact durable watermark to reject replay.
+    pub async fn replace_parameterized_event(
+        &self,
+        community_id: CommunityId,
+        event: &Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let created_at = event_timestamp_micros(event)?;
+        let received_at = Utc::now();
+        let kind = event_kind_i32(event);
+        let pubkey = event.pubkey.to_bytes();
+        let nip_rs = is_nip_rs(event, d_tag);
+        let hard_delete = nip_rs || is_buzz_mesh_status(event, d_tag);
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+
+        let existing = sqlx::query(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+               AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .bind(d_tag)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let watermark = if nip_rs {
+            sqlx::query(
+                "SELECT created_at, event_id AS id FROM parameterized_event_watermarks \
+                 WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ?",
+            )
+            .bind(community_id.as_uuid().to_string())
+            .bind(kind)
+            .bind(pubkey.as_slice())
+            .bind(d_tag)
+            .fetch_optional(&mut *transaction)
+            .await?
+        } else {
+            None
+        };
+        for row in existing.iter().chain(watermark.iter()) {
+            let accepted_at: i64 = row.try_get("created_at")?;
+            let accepted_id: Vec<u8> = row.try_get("id")?;
+            if created_at < accepted_at
+                || (created_at == accepted_at
+                    && event.id.as_bytes().as_slice() >= accepted_id.as_slice())
+            {
+                transaction.rollback().await?;
+                return Ok((
+                    StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                    false,
+                ));
+            }
+        }
+
+        if existing.is_some() {
+            let statement = if hard_delete {
+                "DELETE FROM events \
+                 WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+                   AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = ? \
+                 WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+                   AND deleted_at IS NULL"
+            };
+            let mut query = sqlx::query(statement);
+            if !hard_delete {
+                query = query.bind(received_at.timestamp_micros());
+            }
+            query
+                .bind(community_id.as_uuid().to_string())
+                .bind(kind)
+                .bind(pubkey.as_slice())
+                .bind(d_tag)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        let result = sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+              received_at, channel_id, d_tag, not_before) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (community_id, id) DO NOTHING",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey.as_slice())
+        .bind(created_at)
+        .bind(kind)
+        .bind(serde_json::to_string(&event.tags)?)
+        .bind(&event.content)
+        .bind(event.sig.serialize().as_slice())
+        .bind(received_at.timestamp_micros())
+        .bind(channel_id.map(|id| id.to_string()))
+        .bind(d_tag)
+        .bind(extract_not_before(event))
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        if nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                 (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                   created_at = excluded.created_at, event_id = excluded.event_id",
+            )
+            .bind(community_id.as_uuid().to_string())
+            .bind(kind)
+            .bind(pubkey.as_slice())
+            .bind(d_tag)
+            .bind(created_at)
+            .bind(event.id.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        insert_mentions(
+            &mut transaction,
+            community_id,
+            event,
+            channel_id,
+            created_at,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+            true,
+        ))
+    }
+
     /// Query live events with the same filter and pagination semantics as PostgreSQL.
     pub async fn query_events(&self, query: &EventQuery) -> Result<Vec<StoredEvent>> {
         if query.before_id.is_some() && query.until.is_none() {
@@ -472,6 +662,30 @@ impl SqliteStore {
         self.get_event_by_id_inner(community_id, id, true).await
     }
 
+    /// Fetch the latest live global replaceable event for an author and kind.
+    pub async fn get_latest_global_replaceable(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        sqlx::query(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? \
+               AND channel_id IS NULL AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(kind)
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(row_to_stored_event)
+        .transpose()
+        .map(Option::flatten)
+    }
+
     async fn get_event_by_id_inner(
         &self,
         community_id: CommunityId,
@@ -498,15 +712,106 @@ impl SqliteStore {
     /// Idempotently soft-delete one tenant-scoped event.
     pub async fn soft_delete_event(&self, community_id: CommunityId, id: &[u8]) -> Result<bool> {
         let _writer = self.acquire_writer().await;
-        let result = sqlx::query(
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag \
+             FROM events WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let d_tag: Option<String> = row.try_get("d_tag")?;
+        let hard_delete = if let Some(d_tag) = d_tag {
+            let event = row_to_stored_event(row)?.ok_or_else(|| {
+                DbError::InvalidData("failed to reconstruct live event for deletion".to_owned())
+            })?;
+            is_nip_rs(&event.event, &d_tag)
+        } else {
+            false
+        };
+        let statement = if hard_delete {
+            "DELETE FROM events WHERE community_id = ? AND id = ?"
+        } else {
             "UPDATE events SET deleted_at = ? \
-             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL"
+        };
+        let mut query = sqlx::query(statement);
+        if !hard_delete {
+            query = query.bind(Utc::now().timestamp_micros());
+        }
+        let result = query
+            .bind(community_id.as_uuid().to_string())
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete one live NIP-33 coordinate while preserving NIP-RS replay state.
+    pub async fn soft_delete_by_coordinate(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+               AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(kind)
+        .bind(pubkey)
+        .bind(d_tag)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        for row in rows {
+            let Some(stored) = row_to_stored_event(row)? else {
+                transaction.rollback().await?;
+                return Err(DbError::InvalidData(
+                    "failed to reconstruct live coordinate event".to_owned(),
+                ));
+            };
+            if is_nip_rs(&stored.event, d_tag) {
+                sqlx::query("DELETE FROM events WHERE community_id = ? AND id = ?")
+                    .bind(community_id.as_uuid().to_string())
+                    .bind(stored.event.id.as_bytes().as_slice())
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+               AND deleted_at IS NULL",
         )
         .bind(Utc::now().timestamp_micros())
         .bind(community_id.as_uuid().to_string())
-        .bind(id)
-        .execute(&self.pool)
+        .bind(kind)
+        .bind(pubkey)
+        .bind(d_tag)
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() > 0)
+        transaction.commit().await?;
+        Ok(true)
     }
 }
