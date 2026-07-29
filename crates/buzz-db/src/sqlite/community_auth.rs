@@ -5,7 +5,7 @@ use sqlx::{Connection as _, Row as _};
 use uuid::Uuid;
 
 use super::SqliteStore;
-use crate::relay_members::{RelayMember, RemoveResult};
+use crate::relay_members::{RelayMember, RemoveResult, TransferResult};
 use crate::{
     CommunityId, CommunityRecord, CreateCommunityWithOwnerResult, CreatedCommunityRecord,
     EnsuredCommunityRecord, Result,
@@ -418,6 +418,146 @@ impl SqliteStore {
         transaction.commit().await?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// Ensure the configured owner is the sole owner of one community.
+    pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let community = community.as_uuid().to_string();
+        let timestamp = now_micros();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "INSERT INTO relay_members \
+             (community_id, pubkey, role, added_by, created_at, updated_at) \
+             VALUES (?, ?, 'owner', NULL, ?, ?) \
+             ON CONFLICT (community_id, pubkey) DO UPDATE \
+             SET role = 'owner', updated_at = excluded.updated_at",
+        )
+        .bind(&community)
+        .bind(&owner_pubkey)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE relay_members SET role = 'admin', updated_at = ? \
+             WHERE community_id = ? AND role = 'owner' AND pubkey <> ?",
+        )
+        .bind(timestamp)
+        .bind(&community)
+        .bind(&owner_pubkey)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically transfer community ownership after validating the expected owner.
+    pub async fn transfer_ownership(
+        &self,
+        community: CommunityId,
+        new_owner_pubkey: &str,
+        expected_owner_pubkey: &str,
+    ) -> Result<TransferResult> {
+        let new_owner = new_owner_pubkey.to_ascii_lowercase();
+        let expected_owner = expected_owner_pubkey.to_ascii_lowercase();
+        let community = community.as_uuid().to_string();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members \
+             WHERE community_id = ? AND role = 'owner' ORDER BY pubkey",
+        )
+        .bind(&community)
+        .fetch_all(&mut *transaction)
+        .await?;
+
+        if owners.is_empty() {
+            transaction.rollback().await?;
+            return Ok(TransferResult::NoOwner);
+        }
+        if !owners.iter().any(|owner| owner == &expected_owner) {
+            transaction.rollback().await?;
+            return Ok(TransferResult::OwnerConflict);
+        }
+        if owners.len() == 1 && owners[0] == new_owner {
+            transaction.rollback().await?;
+            return Ok(TransferResult::AlreadyOwner);
+        }
+        let previous_owner = if owners.len() == 1 {
+            Some(owners[0].clone())
+        } else {
+            owners.iter().find(|owner| **owner != new_owner).cloned()
+        };
+        let owned_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM relay_members WHERE pubkey = ? AND role = 'owner'",
+        )
+        .bind(&new_owner)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if owned_count >= crate::relay_members::max_communities_per_owner() {
+            transaction.rollback().await?;
+            return Ok(TransferResult::LimitReached);
+        }
+
+        let timestamp = now_micros();
+        sqlx::query(
+            "INSERT INTO relay_members \
+             (community_id, pubkey, role, added_by, created_at, updated_at) \
+             VALUES (?, ?, 'owner', NULL, ?, ?) \
+             ON CONFLICT (community_id, pubkey) DO UPDATE \
+             SET role = 'owner', updated_at = excluded.updated_at",
+        )
+        .bind(&community)
+        .bind(&new_owner)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE relay_members SET role = 'member', updated_at = ? \
+             WHERE community_id = ? AND role = 'owner' AND pubkey <> ?",
+        )
+        .bind(timestamp)
+        .bind(&community)
+        .bind(&new_owner)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(TransferResult::Transferred { previous_owner })
+    }
+
+    /// One-time conversion of a community's legacy allowlist to relay membership.
+    pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
+        let community = community.as_uuid().to_string();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let has_members: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_members WHERE community_id = ?)")
+                .bind(&community)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if has_members != 0 {
+            transaction.rollback().await?;
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            "INSERT INTO relay_members \
+             (community_id, pubkey, role, added_by, created_at, updated_at) \
+             SELECT ?, lower(hex(pubkey)), 'member', NULL, added_at, added_at \
+             FROM pubkey_allowlist WHERE community_id = ? \
+             ON CONFLICT (community_id, pubkey) DO NOTHING",
+        )
+        .bind(&community)
+        .bind(&community)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -647,5 +787,193 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rotates_only_the_selected_community_owner() {
+        let (_directory, store) = fixture().await;
+        let community_a = store
+            .ensure_configured_community("bootstrap-a.example.test")
+            .await
+            .expect("community A")
+            .id;
+        let community_b = store
+            .ensure_configured_community("bootstrap-b.example.test")
+            .await
+            .expect("community B")
+            .id;
+        let first_owner = "b1".repeat(32);
+        let second_owner = "b2".repeat(32);
+        store
+            .bootstrap_owner(community_a, &first_owner)
+            .await
+            .expect("first owner A");
+        store
+            .bootstrap_owner(community_b, &first_owner)
+            .await
+            .expect("owner B");
+        store
+            .bootstrap_owner(community_a, &second_owner)
+            .await
+            .expect("rotated owner A");
+
+        assert_eq!(
+            store
+                .get_relay_member(community_a, &first_owner)
+                .await
+                .expect("old owner A")
+                .expect("member")
+                .role,
+            "admin"
+        );
+        assert_eq!(
+            store
+                .get_relay_member(community_a, &second_owner)
+                .await
+                .expect("new owner A")
+                .expect("member")
+                .role,
+            "owner"
+        );
+        assert_eq!(
+            store
+                .get_relay_member(community_b, &first_owner)
+                .await
+                .expect("owner B")
+                .expect("member")
+                .role,
+            "owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_rejects_stale_owner_and_preserves_other_tenants() {
+        let (_directory, store) = fixture().await;
+        let original = "c1".repeat(32);
+        let replacement = "c2".repeat(32);
+        let community_a = match store
+            .create_community_with_owner("transfer-a.example.test", &original)
+            .await
+            .expect("community A")
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            result => panic!("unexpected create result: {result:?}"),
+        };
+        let community_b = match store
+            .create_community_with_owner("transfer-b.example.test", &original)
+            .await
+            .expect("community B")
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            result => panic!("unexpected create result: {result:?}"),
+        };
+
+        assert_eq!(
+            store
+                .transfer_ownership(community_a, &replacement, &original)
+                .await
+                .expect("transfer"),
+            TransferResult::Transferred {
+                previous_owner: Some(original.clone())
+            }
+        );
+        assert_eq!(
+            store
+                .transfer_ownership(community_a, &original, &original)
+                .await
+                .expect("stale transfer"),
+            TransferResult::OwnerConflict
+        );
+        assert_eq!(
+            store
+                .transfer_ownership(community_a, &replacement, &replacement)
+                .await
+                .expect("idempotent transfer"),
+            TransferResult::AlreadyOwner
+        );
+        assert_eq!(
+            store
+                .get_relay_member(community_a, &original)
+                .await
+                .expect("old owner A")
+                .expect("member")
+                .role,
+            "member"
+        );
+        assert_eq!(
+            store
+                .get_relay_member(community_b, &original)
+                .await
+                .expect("owner B")
+                .expect("member")
+                .role,
+            "owner"
+        );
+
+        let ownerless = store
+            .ensure_configured_community("ownerless.example.test")
+            .await
+            .expect("ownerless")
+            .id;
+        assert_eq!(
+            store
+                .transfer_ownership(ownerless, &replacement, &original)
+                .await
+                .expect("ownerless transfer"),
+            TransferResult::NoOwner
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlist_backfill_is_scoped_and_runs_only_before_membership_exists() {
+        let (_directory, store) = fixture().await;
+        let community_a = store
+            .ensure_configured_community("backfill-a.example.test")
+            .await
+            .expect("community A")
+            .id;
+        let community_b = store
+            .ensure_configured_community("backfill-b.example.test")
+            .await
+            .expect("community B")
+            .id;
+        let allowed_a = vec![0xd1; 32];
+        let allowed_b = vec![0xd2; 32];
+        let actor = vec![0xd3; 32];
+        store
+            .add_to_allowlist(community_a, &allowed_a, &actor, None)
+            .await
+            .expect("allow A");
+        store
+            .add_to_allowlist(community_b, &allowed_b, &actor, None)
+            .await
+            .expect("allow B");
+
+        assert_eq!(
+            store
+                .backfill_from_allowlist(community_a)
+                .await
+                .expect("backfill A"),
+            1
+        );
+        assert!(store
+            .is_relay_member(community_a, &hex::encode(&allowed_a))
+            .await
+            .expect("member A"));
+        assert!(!store
+            .is_relay_member(community_a, &hex::encode(&allowed_b))
+            .await
+            .expect("foreign member"));
+        assert_eq!(
+            store
+                .backfill_from_allowlist(community_a)
+                .await
+                .expect("repeat backfill"),
+            0
+        );
+        assert!(!store
+            .is_relay_member(community_b, &hex::encode(&allowed_b))
+            .await
+            .expect("B remains untouched"));
     }
 }
