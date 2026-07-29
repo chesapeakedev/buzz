@@ -23,6 +23,7 @@ trait EventLifecycleContract: Sync {
     ) -> Result<Option<StoredEvent>>;
     async fn soft_delete(&self, community: CommunityId, id: &[u8]) -> Result<bool>;
     async fn query(&self, query: &EventQuery) -> Result<Vec<StoredEvent>>;
+    async fn replace(&self, community: CommunityId, event: &Event) -> Result<(StoredEvent, bool)>;
 }
 
 macro_rules! impl_contract {
@@ -59,6 +60,14 @@ macro_rules! impl_contract {
 
             async fn query(&self, query: &EventQuery) -> Result<Vec<StoredEvent>> {
                 self.query_events(query).await
+            }
+
+            async fn replace(
+                &self,
+                community: CommunityId,
+                event: &Event,
+            ) -> Result<(StoredEvent, bool)> {
+                self.replace_addressable_event(community, event, None).await
             }
         }
     };
@@ -240,6 +249,89 @@ async fn run_contract(store: &impl EventLifecycleContract) {
         store.query(&invalid).await,
         Err(DbError::InvalidData(_))
     ));
+
+    let replacement_author = Keys::generate();
+    let old = EventBuilder::new(Kind::Custom(10_001), "old")
+        .custom_created_at(Timestamp::from(base + 10))
+        .sign_with_keys(&replacement_author)
+        .expect("old replacement");
+    let new = EventBuilder::new(Kind::Custom(10_001), "new")
+        .custom_created_at(Timestamp::from(base + 11))
+        .sign_with_keys(&replacement_author)
+        .expect("new replacement");
+    assert!(
+        store
+            .replace(community_a, &old)
+            .await
+            .expect("old replace")
+            .1
+    );
+    assert!(
+        store
+            .replace(community_b, &old)
+            .await
+            .expect("foreign old replace")
+            .1
+    );
+    assert!(
+        store
+            .replace(community_a, &new)
+            .await
+            .expect("new replace")
+            .1
+    );
+    assert!(
+        !store
+            .replace(community_a, &old)
+            .await
+            .expect("stale replace")
+            .1
+    );
+
+    let mut replacement_query = EventQuery::for_community(community_a);
+    replacement_query.kinds = Some(vec![10_001]);
+    replacement_query.pubkey = Some(replacement_author.public_key().to_bytes().to_vec());
+    let live = store
+        .query(&replacement_query)
+        .await
+        .expect("replacement query");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].event.id, new.id);
+    replacement_query.community_id = community_b;
+    assert_eq!(
+        store
+            .query(&replacement_query)
+            .await
+            .expect("foreign replacement query")[0]
+            .event
+            .id,
+        old.id
+    );
+
+    let tied_a = EventBuilder::new(Kind::Custom(10_002), "tie A")
+        .custom_created_at(Timestamp::from(base + 20))
+        .sign_with_keys(&replacement_author)
+        .expect("tied A");
+    let tied_b = EventBuilder::new(Kind::Custom(10_002), "tie B")
+        .custom_created_at(Timestamp::from(base + 20))
+        .sign_with_keys(&replacement_author)
+        .expect("tied B");
+    let expected_id = [tied_a.id, tied_b.id]
+        .into_iter()
+        .min()
+        .expect("two tied IDs");
+    let (left, right) = tokio::join!(
+        store.replace(community_a, &tied_a),
+        store.replace(community_a, &tied_b)
+    );
+    left.expect("left tied replace");
+    right.expect("right tied replace");
+    let mut tied_query = EventQuery::for_community(community_a);
+    tied_query.kinds = Some(vec![10_002]);
+    tied_query.pubkey = Some(replacement_author.public_key().to_bytes().to_vec());
+    let tied_live = store.query(&tied_query).await.expect("tied query");
+    assert_eq!(tied_live.len(), 1);
+    assert_eq!(tied_live[0].event.id, expected_id);
 }
 
 #[tokio::test]
