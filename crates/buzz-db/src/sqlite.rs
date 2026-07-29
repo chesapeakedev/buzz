@@ -12,6 +12,7 @@ use crate::{DbError, Result};
 
 mod api_tokens;
 mod community_auth;
+mod identity_admin;
 mod users;
 
 /// SQLite connection and concurrency settings.
