@@ -4,11 +4,12 @@
 //! multi-tenant rewrite owns a clean consolidated `0001`; legacy single-tenant
 //! cutover/backfill is a separate operator script, not startup migration state.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, SqlitePool};
 
 use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+static SQLITE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/sqlite");
 
 /// Run all pending Buzz database migrations.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -22,6 +23,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(pool).await?;
+    Ok(())
+}
+
+/// Run all pending fresh-install SQLite migrations.
+pub(crate) async fn run_sqlite_migrations(pool: &SqlitePool) -> Result<()> {
+    SQLITE_MIGRATOR.run(pool).await?;
     Ok(())
 }
 
