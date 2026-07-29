@@ -1,12 +1,14 @@
 //! Shared direct event-lifecycle contract for relational backends.
 
 use async_trait::async_trait;
-use nostr::{Event, EventBuilder, Keys, Kind};
+use chrono::{DateTime, Utc};
+use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
 use super::{SqliteConfig, SqliteStore};
+use crate::event::EventQuery;
 use crate::{Db, DbError, EnsuredCommunityRecord, Result};
 
 #[async_trait]
@@ -20,6 +22,7 @@ trait EventLifecycleContract: Sync {
         id: &[u8],
     ) -> Result<Option<StoredEvent>>;
     async fn soft_delete(&self, community: CommunityId, id: &[u8]) -> Result<bool>;
+    async fn query(&self, query: &EventQuery) -> Result<Vec<StoredEvent>>;
 }
 
 macro_rules! impl_contract {
@@ -52,6 +55,10 @@ macro_rules! impl_contract {
 
             async fn soft_delete(&self, community: CommunityId, id: &[u8]) -> Result<bool> {
                 self.soft_delete_event(community, id).await
+            }
+
+            async fn query(&self, query: &EventQuery) -> Result<Vec<StoredEvent>> {
+                self.query_events(query).await
             }
         }
     };
@@ -146,6 +153,93 @@ async fn run_contract(store: &impl EventLifecycleContract) {
     let inserted =
         usize::from(left.expect("left insert").1) + usize::from(right.expect("right insert").1);
     assert_eq!(inserted, 1);
+
+    let author = Keys::generate();
+    let mentioned = Keys::generate().public_key().to_hex();
+    let referenced = "ab".repeat(32);
+    let base = 1_800_000_000_u64;
+    let tagged = EventBuilder::new(Kind::TextNote, "tagged")
+        .tags([
+            Tag::parse(["p", mentioned.as_str()]).expect("p tag"),
+            Tag::parse(["e", referenced.as_str()]).expect("e tag"),
+        ])
+        .custom_created_at(Timestamp::from(base))
+        .sign_with_keys(&author)
+        .expect("tagged event");
+    let addressable = EventBuilder::new(Kind::Custom(30_023), "addressable")
+        .tag(Tag::parse(["d", "contract-coordinate"]).expect("d tag"))
+        .custom_created_at(Timestamp::from(base + 1))
+        .sign_with_keys(&author)
+        .expect("addressable event");
+    assert!(
+        store
+            .insert(community_a, &tagged)
+            .await
+            .expect("tagged insert")
+            .1
+    );
+    assert!(
+        store
+            .insert(community_a, &addressable)
+            .await
+            .expect("addressable insert")
+            .1
+    );
+
+    let mut filtered = EventQuery::for_community(community_a);
+    filtered.kinds = Some(vec![30_023]);
+    filtered.authors = Some(vec![author.public_key().to_bytes().to_vec()]);
+    filtered.d_tag = Some("contract-coordinate".to_owned());
+    let rows = store.query(&filtered).await.expect("kind/author/d query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.id, addressable.id);
+
+    let mut mentions = EventQuery::for_community(community_a);
+    mentions.p_tag_hex = Some(mentioned.to_ascii_uppercase());
+    assert_eq!(
+        store.query(&mentions).await.expect("p-tag query")[0]
+            .event
+            .id,
+        tagged.id
+    );
+
+    let mut references = EventQuery::for_community(community_a);
+    references.e_tags = Some(vec![referenced]);
+    references.ids = Some(vec![tagged.id.as_bytes().to_vec()]);
+    assert_eq!(
+        store.query(&references).await.expect("e-tag/id query")[0]
+            .event
+            .id,
+        tagged.id
+    );
+
+    let cursor_time =
+        DateTime::<Utc>::from_timestamp(base as i64 + 1, 0).expect("contract timestamp");
+    let mut cursor = EventQuery::for_community(community_a);
+    cursor.until = Some(cursor_time);
+    cursor.before_id = Some(addressable.id.as_bytes().to_vec());
+    cursor.limit = Some(1);
+    assert_eq!(
+        store.query(&cursor).await.expect("cursor query")[0]
+            .event
+            .id,
+        tagged.id
+    );
+
+    let mut foreign = EventQuery::for_community(community_b);
+    foreign.ids = Some(vec![tagged.id.as_bytes().to_vec()]);
+    assert!(store
+        .query(&foreign)
+        .await
+        .expect("foreign query")
+        .is_empty());
+
+    let mut invalid = EventQuery::for_community(community_a);
+    invalid.before_id = Some(tagged.id.as_bytes().to_vec());
+    assert!(matches!(
+        store.query(&invalid).await,
+        Err(DbError::InvalidData(_))
+    ));
 }
 
 #[tokio::test]
