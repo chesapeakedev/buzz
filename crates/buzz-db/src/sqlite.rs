@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use crate::{DbError, Result};
 
 mod community_auth;
+mod users;
 
 /// SQLite connection and concurrency settings.
 #[derive(Debug, Clone)]
