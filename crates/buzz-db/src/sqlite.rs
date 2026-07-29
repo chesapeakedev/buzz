@@ -10,6 +10,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{DbError, Result};
 
+mod community_auth;
+
 /// SQLite connection and concurrency settings.
 #[derive(Debug, Clone)]
 pub struct SqliteConfig {
