@@ -14,6 +14,8 @@ mod api_tokens;
 mod community_auth;
 #[cfg(test)]
 mod contracts;
+#[cfg(test)]
+mod contracts_identity;
 mod identity_admin;
 mod users;
 
