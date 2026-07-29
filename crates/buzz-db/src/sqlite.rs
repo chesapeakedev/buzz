@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{DbError, Result};
 
+mod api_tokens;
 mod community_auth;
 mod users;
 
