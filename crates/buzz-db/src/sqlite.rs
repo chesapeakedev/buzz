@@ -12,6 +12,8 @@ use crate::{DbError, Result};
 
 mod api_tokens;
 mod community_auth;
+#[cfg(test)]
+mod contracts;
 mod identity_admin;
 mod users;
 
