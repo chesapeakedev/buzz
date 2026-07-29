@@ -181,7 +181,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 3);
+        assert_eq!(applied, 4);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -192,10 +192,11 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 3);
+        assert_eq!(row.len(), 4);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
+        assert_eq!(row[3].get::<i64, _>("version"), 4);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -257,6 +258,7 @@ mod tests {
             "event_mentions".to_owned(),
             "events".to_owned(),
             "join_policy_acceptances".to_owned(),
+            "parameterized_event_watermarks".to_owned(),
             "pubkey_allowlist".to_owned(),
             "relay_members".to_owned(),
             "users".to_owned(),
