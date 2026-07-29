@@ -16,6 +16,49 @@ fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(value).ok_or(DbError::InvalidTimestamp(value))
 }
 
+fn event_timestamp_micros(event: &Event) -> Result<i64> {
+    let seconds = i64::try_from(event.created_at.as_secs())
+        .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
+    seconds
+        .checked_mul(1_000_000)
+        .ok_or(DbError::InvalidTimestamp(seconds))
+}
+
+async fn insert_mentions(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    created_at: i64,
+) -> Result<()> {
+    let valid_pubkeys = event.tags.iter().filter_map(|tag| {
+        let parts = tag.as_slice();
+        let pubkey = parts.get(1)?;
+        (parts.first().is_some_and(|kind| kind == "p")
+            && pubkey.len() == 64
+            && pubkey
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()))
+        .then(|| pubkey.to_ascii_lowercase())
+    });
+    for pubkey in valid_pubkeys {
+        sqlx::query(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(pubkey)
+        .bind(event.id.as_bytes().as_slice())
+        .bind(created_at)
+        .bind(channel_id.map(|id| id.to_string()))
+        .bind(event_kind_i32(event))
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 fn row_to_stored_event(row: sqlx::sqlite::SqliteRow) -> Result<Option<StoredEvent>> {
     let id: Vec<u8> = row.try_get("id")?;
     let pubkey: Vec<u8> = row.try_get("pubkey")?;
@@ -77,11 +120,7 @@ impl SqliteStore {
             return Err(DbError::EphemeralEventRejected(kind));
         }
 
-        let created_at_seconds = i64::try_from(event.created_at.as_secs())
-            .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
-        let created_at = created_at_seconds
-            .checked_mul(1_000_000)
-            .ok_or(DbError::InvalidTimestamp(created_at_seconds))?;
+        let created_at = event_timestamp_micros(event)?;
         let received_at = Utc::now();
         let tags = serde_json::to_string(&event.tags)?;
         let _writer = self.acquire_writer().await;
@@ -112,37 +151,127 @@ impl SqliteStore {
         let was_inserted = result.rows_affected() > 0;
 
         if was_inserted {
-            let valid_pubkeys = event.tags.iter().filter_map(|tag| {
-                let parts = tag.as_slice();
-                let pubkey = parts.get(1)?;
-                (parts.first().is_some_and(|kind| kind == "p")
-                    && pubkey.len() == 64
-                    && pubkey
-                        .chars()
-                        .all(|character| character.is_ascii_hexdigit()))
-                .then(|| pubkey.to_ascii_lowercase())
-            });
-            for pubkey in valid_pubkeys {
-                sqlx::query(
-                    "INSERT INTO event_mentions \
-                     (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
-                     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                )
-                .bind(community_id.as_uuid().to_string())
-                .bind(pubkey)
-                .bind(event.id.as_bytes().as_slice())
-                .bind(created_at)
-                .bind(channel_id.map(|id| id.to_string()))
-                .bind(event_kind_i32(event))
-                .execute(&mut *transaction)
-                .await?;
-            }
+            insert_mentions(
+                &mut transaction,
+                community_id,
+                event,
+                channel_id,
+                created_at,
+            )
+            .await?;
         }
         transaction.commit().await?;
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
             was_inserted,
+        ))
+    }
+
+    /// Atomically replace a NIP-16 or channel-scoped relay state event.
+    ///
+    /// The newest timestamp wins; same-second ties choose the lowest event ID.
+    pub async fn replace_addressable_event(
+        &self,
+        community_id: CommunityId,
+        event: &Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let created_at = event_timestamp_micros(event)?;
+        let received_at = Utc::now();
+        let kind = event_kind_i32(event);
+        let pubkey = event.pubkey.to_bytes();
+        let channel = channel_id.map(|id| id.to_string());
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+
+        let existing = sqlx::query(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? \
+               AND (channel_id = ? OR (channel_id IS NULL AND ? IS NULL)) \
+               AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .bind(channel.as_deref())
+        .bind(channel.as_deref())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let current_created_at: i64 = row.try_get("created_at")?;
+            let current_id: Vec<u8> = row.try_get("id")?;
+            if created_at < current_created_at
+                || (created_at == current_created_at
+                    && event.id.as_bytes().as_slice() >= current_id.as_slice())
+            {
+                transaction.rollback().await?;
+                return Ok((
+                    StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                    false,
+                ));
+            }
+        }
+
+        sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? \
+               AND (channel_id = ? OR (channel_id IS NULL AND ? IS NULL)) \
+               AND deleted_at IS NULL",
+        )
+        .bind(received_at.timestamp_micros())
+        .bind(community_id.as_uuid().to_string())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .bind(channel.as_deref())
+        .bind(channel.as_deref())
+        .execute(&mut *transaction)
+        .await?;
+
+        let result = sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+              received_at, channel_id, d_tag, not_before) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (community_id, id) DO NOTHING",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey.as_slice())
+        .bind(created_at)
+        .bind(kind)
+        .bind(serde_json::to_string(&event.tags)?)
+        .bind(&event.content)
+        .bind(event.sig.serialize().as_slice())
+        .bind(received_at.timestamp_micros())
+        .bind(channel)
+        .bind(extract_d_tag(event))
+        .bind(extract_not_before(event))
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+        insert_mentions(
+            &mut transaction,
+            community_id,
+            event,
+            channel_id,
+            created_at,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+            true,
         ))
     }
 
