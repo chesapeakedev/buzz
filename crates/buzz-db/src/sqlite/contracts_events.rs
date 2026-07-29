@@ -24,6 +24,19 @@ trait EventLifecycleContract: Sync {
     async fn soft_delete(&self, community: CommunityId, id: &[u8]) -> Result<bool>;
     async fn query(&self, query: &EventQuery) -> Result<Vec<StoredEvent>>;
     async fn replace(&self, community: CommunityId, event: &Event) -> Result<(StoredEvent, bool)>;
+    async fn replace_parameterized(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        d_tag: &str,
+    ) -> Result<(StoredEvent, bool)>;
+    async fn delete_coordinate(
+        &self,
+        community: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+    ) -> Result<bool>;
 }
 
 macro_rules! impl_contract {
@@ -68,6 +81,27 @@ macro_rules! impl_contract {
                 event: &Event,
             ) -> Result<(StoredEvent, bool)> {
                 self.replace_addressable_event(community, event, None).await
+            }
+
+            async fn replace_parameterized(
+                &self,
+                community: CommunityId,
+                event: &Event,
+                d_tag: &str,
+            ) -> Result<(StoredEvent, bool)> {
+                self.replace_parameterized_event(community, event, d_tag, None)
+                    .await
+            }
+
+            async fn delete_coordinate(
+                &self,
+                community: CommunityId,
+                kind: i32,
+                pubkey: &[u8],
+                d_tag: &str,
+            ) -> Result<bool> {
+                self.soft_delete_by_coordinate(community, kind, pubkey, d_tag)
+                    .await
             }
         }
     };
@@ -332,6 +366,197 @@ async fn run_contract(store: &impl EventLifecycleContract) {
     let tied_live = store.query(&tied_query).await.expect("tied query");
     assert_eq!(tied_live.len(), 1);
     assert_eq!(tied_live[0].event.id, expected_id);
+
+    let parameter_author = Keys::generate();
+    let coordinate = "contract-parameter";
+    let parameter_old = EventBuilder::new(Kind::Custom(30_023), "parameter old")
+        .tag(Tag::parse(["d", coordinate]).expect("parameter d tag"))
+        .custom_created_at(Timestamp::from(base + 30))
+        .sign_with_keys(&parameter_author)
+        .expect("parameter old");
+    let parameter_new = EventBuilder::new(Kind::Custom(30_023), "parameter new")
+        .tag(Tag::parse(["d", coordinate]).expect("parameter d tag"))
+        .custom_created_at(Timestamp::from(base + 31))
+        .sign_with_keys(&parameter_author)
+        .expect("parameter new");
+    assert!(
+        store
+            .replace_parameterized(community_a, &parameter_old, coordinate)
+            .await
+            .expect("parameter old replace")
+            .1
+    );
+    assert!(
+        store
+            .replace_parameterized(community_b, &parameter_old, coordinate)
+            .await
+            .expect("foreign parameter replace")
+            .1
+    );
+    assert!(
+        store
+            .replace_parameterized(community_a, &parameter_new, coordinate)
+            .await
+            .expect("parameter new replace")
+            .1
+    );
+    assert!(store
+        .get_including_deleted(community_a, parameter_old.id.as_bytes())
+        .await
+        .expect("parameter old history")
+        .is_some());
+    assert!(store
+        .delete_coordinate(
+            community_a,
+            30_023,
+            parameter_author.public_key().to_bytes().as_slice(),
+            coordinate,
+        )
+        .await
+        .expect("parameter coordinate delete"));
+    assert!(store
+        .get(community_a, parameter_new.id.as_bytes())
+        .await
+        .expect("parameter live after delete")
+        .is_none());
+    assert!(store
+        .get_including_deleted(community_a, parameter_new.id.as_bytes())
+        .await
+        .expect("parameter tombstone")
+        .is_some());
+    assert!(store
+        .get(community_b, parameter_old.id.as_bytes())
+        .await
+        .expect("foreign parameter remains")
+        .is_some());
+
+    let read_state_coordinate = format!("read-state:{}", "cd".repeat(16));
+    let read_state_old = EventBuilder::new(Kind::Custom(30_078), "private old")
+        .tags([
+            Tag::parse(["d", read_state_coordinate.as_str()]).expect("read-state d tag"),
+            Tag::parse(["t", "read-state"]).expect("read-state t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 40))
+        .sign_with_keys(&parameter_author)
+        .expect("read-state old");
+    let read_state_new = EventBuilder::new(Kind::Custom(30_078), "private new")
+        .tags([
+            Tag::parse(["d", read_state_coordinate.as_str()]).expect("read-state d tag"),
+            Tag::parse(["t", "read-state"]).expect("read-state t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 41))
+        .sign_with_keys(&parameter_author)
+        .expect("read-state new");
+    assert!(
+        store
+            .replace_parameterized(community_a, &read_state_old, &read_state_coordinate)
+            .await
+            .expect("read-state old replace")
+            .1
+    );
+    assert!(
+        store
+            .replace_parameterized(community_a, &read_state_new, &read_state_coordinate)
+            .await
+            .expect("read-state new replace")
+            .1
+    );
+    assert!(store
+        .get_including_deleted(community_a, read_state_old.id.as_bytes())
+        .await
+        .expect("read-state old payload")
+        .is_none());
+    assert!(store
+        .delete_coordinate(
+            community_a,
+            30_078,
+            parameter_author.public_key().to_bytes().as_slice(),
+            &read_state_coordinate,
+        )
+        .await
+        .expect("read-state coordinate delete"));
+    assert!(store
+        .get_including_deleted(community_a, read_state_new.id.as_bytes())
+        .await
+        .expect("read-state new payload")
+        .is_none());
+    assert!(
+        !store
+            .replace_parameterized(community_a, &read_state_old, &read_state_coordinate)
+            .await
+            .expect("read-state replay")
+            .1
+    );
+    let read_state_latest = EventBuilder::new(Kind::Custom(30_078), "private latest")
+        .tags([
+            Tag::parse(["d", read_state_coordinate.as_str()]).expect("read-state d tag"),
+            Tag::parse(["t", "read-state"]).expect("read-state t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 42))
+        .sign_with_keys(&parameter_author)
+        .expect("read-state latest");
+    assert!(
+        store
+            .replace_parameterized(community_a, &read_state_latest, &read_state_coordinate)
+            .await
+            .expect("read-state latest replace")
+            .1
+    );
+    assert!(store
+        .soft_delete(community_a, read_state_latest.id.as_bytes())
+        .await
+        .expect("read-state id delete"));
+    assert!(store
+        .get_including_deleted(community_a, read_state_latest.id.as_bytes())
+        .await
+        .expect("read-state latest payload")
+        .is_none());
+    assert!(
+        !store
+            .replace_parameterized(community_a, &read_state_new, &read_state_coordinate)
+            .await
+            .expect("read-state post-delete replay")
+            .1
+    );
+
+    let malformed_coordinate = format!("read-state:{}", "ef".repeat(16));
+    let malformed_old = EventBuilder::new(Kind::Custom(30_078), "malformed old")
+        .tags([
+            Tag::parse(["d", malformed_coordinate.as_str()]).expect("malformed d tag"),
+            Tag::parse(["d", "duplicate"]).expect("duplicate d tag"),
+            Tag::parse(["t", "read-state"]).expect("read-state t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 50))
+        .sign_with_keys(&parameter_author)
+        .expect("malformed old");
+    let malformed_new = EventBuilder::new(Kind::Custom(30_078), "malformed new")
+        .tags([
+            Tag::parse(["d", malformed_coordinate.as_str()]).expect("malformed d tag"),
+            Tag::parse(["d", "duplicate"]).expect("duplicate d tag"),
+            Tag::parse(["t", "read-state"]).expect("read-state t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 51))
+        .sign_with_keys(&parameter_author)
+        .expect("malformed new");
+    assert!(
+        store
+            .replace_parameterized(community_a, &malformed_old, &malformed_coordinate)
+            .await
+            .expect("malformed old replace")
+            .1
+    );
+    assert!(
+        store
+            .replace_parameterized(community_a, &malformed_new, &malformed_coordinate)
+            .await
+            .expect("malformed new replace")
+            .1
+    );
+    assert!(store
+        .get_including_deleted(community_a, malformed_old.id.as_bytes())
+        .await
+        .expect("malformed retained history")
+        .is_some());
 }
 
 #[tokio::test]
