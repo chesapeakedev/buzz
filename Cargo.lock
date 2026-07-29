@@ -947,6 +947,7 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "buzz-core",
  "chrono",
  "hex",
