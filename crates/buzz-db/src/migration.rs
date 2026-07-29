@@ -6,12 +6,13 @@
 
 use std::future::Future;
 
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool, SqlitePool};
 
 use crate::deletion::SCHEMA_DESTRUCTION_LOCK_KEY;
 use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+static SQLITE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/sqlite");
 
 /// Run all pending Buzz database migrations.
 ///
@@ -95,6 +96,12 @@ where
     let value = outcome?;
     unlock?;
     Ok(value)
+}
+
+/// Run all pending fresh-install SQLite migrations.
+pub(crate) async fn run_sqlite_migrations(pool: &SqlitePool) -> Result<()> {
+    SQLITE_MIGRATOR.run(pool).await?;
+    Ok(())
 }
 
 /// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
