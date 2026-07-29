@@ -15,7 +15,10 @@ mod community_auth;
 #[cfg(test)]
 mod contracts;
 #[cfg(test)]
+mod contracts_events;
+#[cfg(test)]
 mod contracts_identity;
+mod events;
 mod identity_admin;
 mod users;
 
