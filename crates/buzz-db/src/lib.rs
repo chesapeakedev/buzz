@@ -67,6 +67,8 @@ pub mod relay_members;
 pub mod replaceable;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+/// SQLite connection policy and backend resources.
+pub mod sqlite;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
