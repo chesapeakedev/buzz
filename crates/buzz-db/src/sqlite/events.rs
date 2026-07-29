@@ -2,14 +2,14 @@
 
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::Row as _;
+use sqlx::{QueryBuilder, Row as _};
 use uuid::Uuid;
 
 use buzz_core::kind::{event_kind_i32, is_ephemeral, KIND_AUTH};
 use buzz_core::{CommunityId, StoredEvent};
 
 use super::SqliteStore;
-use crate::event::{extract_d_tag, extract_not_before};
+use crate::event::{extract_d_tag, extract_not_before, EventQuery};
 use crate::{DbError, Result};
 
 fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
@@ -85,6 +85,9 @@ impl SqliteStore {
         let received_at = Utc::now();
         let tags = serde_json::to_string(&event.tags)?;
         let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO events \
              (community_id, id, pubkey, created_at, kind, tags, content, sig, \
@@ -104,13 +107,222 @@ impl SqliteStore {
         .bind(channel_id.map(|id| id.to_string()))
         .bind(extract_d_tag(event))
         .bind(extract_not_before(event))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        let was_inserted = result.rows_affected() > 0;
+
+        if was_inserted {
+            let valid_pubkeys = event.tags.iter().filter_map(|tag| {
+                let parts = tag.as_slice();
+                let pubkey = parts.get(1)?;
+                (parts.first().is_some_and(|kind| kind == "p")
+                    && pubkey.len() == 64
+                    && pubkey
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit()))
+                .then(|| pubkey.to_ascii_lowercase())
+            });
+            for pubkey in valid_pubkeys {
+                sqlx::query(
+                    "INSERT INTO event_mentions \
+                     (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+                     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                )
+                .bind(community_id.as_uuid().to_string())
+                .bind(pubkey)
+                .bind(event.id.as_bytes().as_slice())
+                .bind(created_at)
+                .bind(channel_id.map(|id| id.to_string()))
+                .bind(event_kind_i32(event))
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        transaction.commit().await?;
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            result.rows_affected() > 0,
+            was_inserted,
         ))
+    }
+
+    /// Query live events with the same filter and pagination semantics as PostgreSQL.
+    pub async fn query_events(&self, query: &EventQuery) -> Result<Vec<StoredEvent>> {
+        if query.before_id.is_some() && query.until.is_none() {
+            return Err(DbError::InvalidData(
+                "before_id requires until to be set".to_owned(),
+            ));
+        }
+        if query.global_only && query.channel_id.is_some() {
+            return Err(DbError::InvalidData(
+                "global_only and channel_id are mutually exclusive".to_owned(),
+            ));
+        }
+        if query.kinds.as_deref().is_some_and(<[i32]>::is_empty)
+            || query.authors.as_deref().is_some_and(<[Vec<u8>]>::is_empty)
+            || query.ids.as_deref().is_some_and(<[Vec<u8>]>::is_empty)
+            || query.e_tags.as_deref().is_some_and(<[String]>::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+
+        let community = query.community_id.as_uuid().to_string();
+        let mut builder: QueryBuilder<sqlx::Sqlite> = if let Some(pubkey) = &query.p_tag_hex {
+            let mut builder = QueryBuilder::new(
+                "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
+                 e.sig, e.received_at, e.channel_id \
+                 FROM events e INNER JOIN event_mentions m \
+                   ON e.community_id = m.community_id AND e.id = m.event_id \
+                 WHERE e.community_id = ",
+            );
+            builder.push_bind(community.clone());
+            builder.push(" AND m.community_id = ").push_bind(community);
+            builder
+                .push(" AND e.deleted_at IS NULL AND m.pubkey_hex = ")
+                .push_bind(pubkey.to_ascii_lowercase());
+            builder
+        } else {
+            let mut builder = QueryBuilder::new(
+                "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+                 FROM events WHERE community_id = ",
+            );
+            builder.push_bind(community);
+            builder.push(" AND deleted_at IS NULL");
+            builder
+        };
+        let prefix = if query.p_tag_hex.is_some() { "e." } else { "" };
+
+        if let Some(channel) = query.channel_id {
+            builder
+                .push(format!(" AND {prefix}channel_id = "))
+                .push_bind(channel.to_string());
+        } else if query.global_only {
+            builder.push(format!(" AND {prefix}channel_id IS NULL"));
+        }
+        if let Some(channels) = &query.channel_ids {
+            if channels.is_empty() {
+                builder.push(format!(" AND {prefix}channel_id IS NULL"));
+            } else {
+                builder.push(format!(
+                    " AND ({prefix}channel_id IS NULL OR {prefix}channel_id IN ("
+                ));
+                let mut separated = builder.separated(", ");
+                for channel in channels {
+                    separated.push_bind(channel.to_string());
+                }
+                builder.push("))");
+            }
+        }
+        if let Some(kinds) = query.kinds.as_deref().filter(|kinds| !kinds.is_empty()) {
+            builder.push(format!(" AND {prefix}kind IN ("));
+            let mut separated = builder.separated(", ");
+            for kind in kinds {
+                separated.push_bind(*kind);
+            }
+            builder.push(")");
+        }
+        if let Some(pubkey) = &query.pubkey {
+            builder
+                .push(format!(" AND {prefix}pubkey = "))
+                .push_bind(pubkey.clone());
+        }
+        if let Some(authors) = query
+            .authors
+            .as_deref()
+            .filter(|authors| !authors.is_empty())
+        {
+            builder.push(format!(" AND {prefix}pubkey IN ("));
+            let mut separated = builder.separated(", ");
+            for author in authors {
+                separated.push_bind(author.clone());
+            }
+            builder.push(")");
+        }
+        if let Some(ids) = query.ids.as_deref().filter(|ids| !ids.is_empty()) {
+            builder.push(format!(" AND {prefix}id IN ("));
+            let mut separated = builder.separated(", ");
+            for id in ids {
+                separated.push_bind(id.clone());
+            }
+            builder.push(")");
+        }
+        if let Some(event_ids) = query.e_tags.as_deref().filter(|ids| !ids.is_empty()) {
+            builder.push(format!(
+                " AND EXISTS (SELECT 1 FROM json_each({prefix}tags) AS tag \
+                 WHERE json_extract(tag.value, '$[0]') = 'e' \
+                   AND json_extract(tag.value, '$[1]') IN ("
+            ));
+            let mut separated = builder.separated(", ");
+            for id in event_ids {
+                separated.push_bind(id);
+            }
+            builder.push("))");
+        }
+        if let Some(since) = query.since {
+            builder
+                .push(format!(" AND {prefix}created_at >= "))
+                .push_bind(since.timestamp_micros());
+        }
+        if let Some(until) = query.until {
+            let until = until.timestamp_micros();
+            if let Some(before_id) = &query.before_id {
+                builder
+                    .push(format!(" AND ({prefix}created_at < "))
+                    .push_bind(until)
+                    .push(format!(" OR ({prefix}created_at = "))
+                    .push_bind(until)
+                    .push(format!(" AND {prefix}id > "))
+                    .push_bind(before_id.clone())
+                    .push("))");
+            } else {
+                builder
+                    .push(format!(" AND {prefix}created_at <= "))
+                    .push_bind(until);
+            }
+        }
+        if let Some(d_tag) = &query.d_tag {
+            builder
+                .push(format!(" AND {prefix}d_tag = "))
+                .push_bind(d_tag);
+        } else if let Some(d_tags) = query.d_tags.as_deref().filter(|tags| !tags.is_empty()) {
+            builder.push(format!(" AND {prefix}d_tag IN ("));
+            let mut separated = builder.separated(", ");
+            for tag in d_tags {
+                separated.push_bind(tag);
+            }
+            builder.push(")");
+        }
+        if let Some(reader) = &query.persona_reader {
+            builder
+                .push(format!(" AND ({prefix}kind != 30175 OR {prefix}pubkey = "))
+                .push_bind(reader.clone())
+                .push(format!(
+                    " OR EXISTS (SELECT 1 FROM json_each({prefix}tags) AS tag \
+                     WHERE json_extract(tag.value, '$[0]') = 'shared' \
+                       AND json_extract(tag.value, '$[1]') = 'true'))"
+                ));
+        }
+
+        let limit = query
+            .limit
+            .unwrap_or(100)
+            .min(query.max_limit.unwrap_or(1000));
+        builder.push(format!(
+            " ORDER BY {prefix}created_at DESC, {prefix}id ASC LIMIT "
+        ));
+        builder
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(query.offset.unwrap_or(0));
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(event) = row_to_stored_event(row)? {
+                events.push(event);
+            }
+        }
+        Ok(events)
     }
 
     /// Fetch one live event by its tenant-scoped raw identifier.
