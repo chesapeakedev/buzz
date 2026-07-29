@@ -178,7 +178,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 2);
+        assert_eq!(applied, 3);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -189,9 +189,10 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 2);
+        assert_eq!(row.len(), 3);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
+        assert_eq!(row[2].get::<i64, _>("version"), 3);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -244,12 +245,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn community_auth_schema_has_tenant_leading_primary_keys() {
+    async fn relational_schema_has_tenant_leading_primary_keys() {
         let (_directory, store) = migrated_store().await;
         let expected = BTreeSet::from([
             "api_tokens".to_owned(),
             "archived_identities".to_owned(),
             "communities".to_owned(),
+            "event_mentions".to_owned(),
+            "events".to_owned(),
             "join_policy_acceptances".to_owned(),
             "pubkey_allowlist".to_owned(),
             "relay_members".to_owned(),
@@ -287,6 +290,63 @@ mod tests {
                 "{table} primary key must lead with community_id"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn event_schema_rejects_cross_tenant_mentions_and_malformed_wire_values() {
+        let (_directory, store) = migrated_store().await;
+        let community_a = "10000000-0000-4000-8000-000000000001";
+        let community_b = "20000000-0000-4000-8000-000000000002";
+        for (id, host) in [
+            (community_a, "event-a.example.test"),
+            (community_b, "event-b.example.test"),
+        ] {
+            sqlx::query("INSERT INTO communities (id, host, created_at) VALUES (?, ?, 1)")
+                .bind(id)
+                .bind(host)
+                .execute(store.pool())
+                .await
+                .expect("community");
+        }
+
+        let event_id = vec![0x11; 32];
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+             VALUES (?, ?, ?, 1, 1, '[]', '', ?, 1)",
+        )
+        .bind(community_a)
+        .bind(&event_id)
+        .bind(vec![0x22; 32])
+        .bind(vec![0x33; 64])
+        .execute(store.pool())
+        .await
+        .expect("valid event");
+
+        let cross_tenant = sqlx::query(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at) \
+             VALUES (?, ?, ?, 1)",
+        )
+        .bind(community_b)
+        .bind("44".repeat(32))
+        .bind(&event_id)
+        .execute(store.pool())
+        .await;
+        assert!(cross_tenant.is_err());
+
+        let malformed = sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+             VALUES (?, ?, ?, 1, 1, 'not-json', '', ?, 1)",
+        )
+        .bind(community_a)
+        .bind(vec![0x55; 31])
+        .bind(vec![0x66; 32])
+        .bind(vec![0x77; 64])
+        .execute(store.pool())
+        .await;
+        assert!(malformed.is_err());
     }
 
     #[tokio::test]
