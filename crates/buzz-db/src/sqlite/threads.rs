@@ -9,7 +9,9 @@ use buzz_core::{CommunityId, StoredEvent};
 
 use super::{events, SqliteStore};
 use crate::event::ThreadMetadataParams;
-use crate::thread::{ThreadMetadataRecord, ThreadReply, ThreadSummary};
+use crate::thread::{
+    ChannelWindow, ChannelWindowRow, ThreadMetadataRecord, ThreadReply, ThreadSummary,
+};
 use crate::{DbError, Result};
 
 fn timestamp_micros(timestamp: DateTime<Utc>) -> i64 {
@@ -336,6 +338,167 @@ impl SqliteStore {
             last_reply_at,
             participants,
         }))
+    }
+
+    /// Fetch one top-level channel window with thread summaries and exhaustion evidence.
+    pub async fn get_channel_window(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        limit: u32,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+        kind_filter: Option<&[u32]>,
+    ) -> Result<ChannelWindow> {
+        let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+            "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
+             e.sig, e.received_at, e.channel_id, tm.reply_count, \
+             tm.descendant_count, tm.last_reply_at \
+             FROM events e LEFT JOIN thread_metadata tm \
+               ON tm.community_id = e.community_id \
+              AND tm.event_created_at = e.created_at \
+              AND tm.event_id = e.id \
+             WHERE e.community_id = ",
+        );
+        builder
+            .push_bind(community_id.as_uuid().to_string())
+            .push(" AND e.channel_id = ")
+            .push_bind(channel_id.to_string())
+            .push(
+                " AND e.deleted_at IS NULL AND ( \
+                    tm.depth IS NULL OR tm.depth = 0 \
+                    OR (tm.depth = 1 AND tm.broadcast = 1) \
+                  )",
+            );
+        if let Some((timestamp, event_id)) = &cursor {
+            let timestamp = timestamp.timestamp_micros();
+            builder
+                .push(" AND (e.created_at < ")
+                .push_bind(timestamp)
+                .push(" OR (e.created_at = ")
+                .push_bind(timestamp)
+                .push(" AND e.id > ")
+                .push_bind(event_id.clone())
+                .push("))");
+        }
+        if let Some(kinds) = kind_filter.filter(|kinds| !kinds.is_empty()) {
+            builder.push(" AND e.kind IN (");
+            let mut separated = builder.separated(", ");
+            for kind in kinds {
+                separated.push_bind(i64::from(*kind));
+            }
+            builder.push(")");
+        }
+        builder
+            .push(" ORDER BY e.created_at DESC, e.id ASC LIMIT ")
+            .push_bind(i64::from(limit) + 1);
+
+        let mut database_rows = builder.build().fetch_all(&self.pool).await?;
+        let has_more = database_rows.len() > limit as usize;
+        database_rows.truncate(limit as usize);
+        let next_cursor = if has_more {
+            match database_rows.last() {
+                Some(row) => Some((
+                    parse_timestamp(row.try_get("created_at")?)?,
+                    row.try_get("id")?,
+                )),
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let mut rows = Vec::with_capacity(database_rows.len());
+        for row in database_rows {
+            let reply_count = row
+                .try_get::<Option<i64>, _>("reply_count")?
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| DbError::InvalidData("reply count out of i32 range".to_owned()))?;
+            let descendant_count = row
+                .try_get::<Option<i64>, _>("descendant_count")?
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| {
+                    DbError::InvalidData("descendant count out of i32 range".to_owned())
+                })?;
+            let last_reply_at = row
+                .try_get::<Option<i64>, _>("last_reply_at")?
+                .map(parse_timestamp)
+                .transpose()?;
+            let Some(stored_event) = events::row_to_stored_event(row)? else {
+                continue;
+            };
+            let thread_summary =
+                reply_count
+                    .filter(|count| *count > 0)
+                    .map(|count| ThreadSummary {
+                        reply_count: count,
+                        descendant_count: descendant_count.unwrap_or(0),
+                        last_reply_at,
+                        participants: Vec::new(),
+                    });
+            rows.push(ChannelWindowRow {
+                stored_event,
+                thread_summary,
+            });
+        }
+
+        let roots: Vec<Vec<u8>> = rows
+            .iter()
+            .filter(|row| row.thread_summary.is_some())
+            .map(|row| row.stored_event.event.id.as_bytes().to_vec())
+            .collect();
+        if !roots.is_empty() {
+            let mut participants: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+                "SELECT root_event_id, pubkey FROM ( \
+                   SELECT tm.root_event_id, e.pubkey, MAX(e.created_at) AS last_seen, \
+                     ROW_NUMBER() OVER ( \
+                       PARTITION BY tm.root_event_id \
+                       ORDER BY MAX(e.created_at) DESC \
+                     ) AS row_number \
+                   FROM thread_metadata tm JOIN events e \
+                     ON e.community_id = tm.community_id \
+                    AND e.created_at = tm.event_created_at \
+                    AND e.id = tm.event_id \
+                   WHERE tm.community_id = ",
+            );
+            participants
+                .push_bind(community_id.as_uuid().to_string())
+                .push(" AND tm.root_event_id IN (");
+            let mut separated = participants.separated(", ");
+            for root in &roots {
+                separated.push_bind(root.clone());
+            }
+            participants.push(
+                ") AND e.deleted_at IS NULL \
+                 GROUP BY tm.root_event_id, e.pubkey \
+                 ) WHERE row_number <= 10 ORDER BY root_event_id, row_number",
+            );
+            let participant_rows = participants.build().fetch_all(&self.pool).await?;
+            let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
+                std::collections::HashMap::new();
+            for row in participant_rows {
+                by_root
+                    .entry(row.try_get("root_event_id")?)
+                    .or_default()
+                    .push(row.try_get("pubkey")?);
+            }
+            for row in &mut rows {
+                if let Some(summary) = &mut row.thread_summary {
+                    if let Some(root_participants) =
+                        by_root.remove(row.stored_event.event.id.as_bytes().as_slice())
+                    {
+                        summary.participants = root_participants;
+                    }
+                }
+            }
+        }
+
+        Ok(ChannelWindow {
+            rows,
+            has_more,
+            next_cursor,
+        })
     }
 
     /// Look up one tenant-scoped thread metadata row by event identifier.

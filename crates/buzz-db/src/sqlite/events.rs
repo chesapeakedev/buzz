@@ -665,6 +665,42 @@ impl SqliteStore {
         self.get_event_by_id_inner(community_id, id, true).await
     }
 
+    /// Batch-fetch live tenant-scoped events by raw identifier.
+    ///
+    /// Result order is intentionally unspecified, matching PostgreSQL.
+    pub async fn get_events_by_ids(
+        &self,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        debug_assert!(ids.len() <= 500, "batch fetch should be bounded by caller");
+
+        let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, \
+             received_at, channel_id FROM events WHERE community_id = ",
+        );
+        builder
+            .push_bind(community_id.as_uuid().to_string())
+            .push(" AND deleted_at IS NULL AND id IN (");
+        let mut separated = builder.separated(", ");
+        for id in ids {
+            separated.push_bind(id.to_vec());
+        }
+        builder.push(")");
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(event) = row_to_stored_event(row)? {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
     /// Fetch the latest live global replaceable event for an author and kind.
     pub async fn get_latest_global_replaceable(
         &self,
