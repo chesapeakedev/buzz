@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use crate::auth::verify_blossom_upload_auth;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
-use crate::storage::{BlobMeta, MediaStorage};
+use crate::storage::{BlobMeta, BlobStorage, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
@@ -43,7 +43,7 @@ use crate::validation::{
 /// existence implies referenced objects are readable, while a record failure
 /// cannot publish media without triggering moderation.
 struct BufferedUploadInput<'a> {
-    storage: &'a MediaStorage,
+    storage: &'a dyn BlobStorage,
     config: &'a MediaConfig,
     ctx: &'a TenantContext,
     auth_event: &'a nostr::Event,
@@ -205,7 +205,7 @@ struct MetadataInput {
 /// This is the image path — body is already fully buffered in RAM. Do NOT use
 /// this for video uploads; use [`process_video_upload`] instead.
 pub async fn process_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -243,7 +243,7 @@ pub async fn process_upload(
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
 pub async fn process_file_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -290,7 +290,7 @@ pub async fn process_file_upload(
 ///
 /// Returns a [`BlobDescriptor`] with the `duration` field populated.
 pub async fn process_video_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -511,7 +511,7 @@ pub async fn process_video_upload(
 /// Generate thumbnail and metadata without publishing the sidecar serve gate.
 /// Returns the completed [`BlobMeta`] on success.
 async fn prepare_image_metadata(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {

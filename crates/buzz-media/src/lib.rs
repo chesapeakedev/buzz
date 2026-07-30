@@ -19,7 +19,7 @@ pub use bucket_index::{
 };
 pub use config::MediaConfig;
 pub use error::MediaError;
-pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};
+pub use storage::{BlobHeadMeta, BlobMeta, BlobStorage, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
 pub use upload_record::{

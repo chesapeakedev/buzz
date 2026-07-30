@@ -20,7 +20,7 @@ use buzz_auth::{AuthService, Nip98ReplayGuard, RateLimiter};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
-use buzz_media::MediaStorage;
+use buzz_media::BlobStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::{Coordination, RedisNip98ReplayGuard};
@@ -552,9 +552,9 @@ pub struct AppState {
 
     /// Bounded channel for audit logging, absent when audit logging is disabled.
     pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
-    /// Media storage client (S3/MinIO).
-    pub media_storage: Arc<MediaStorage>,
-    /// Single-flight + cache state for the hourly S3 storage sweep. See
+    /// Backend-neutral media blob storage.
+    pub media_storage: Arc<dyn BlobStorage>,
+    /// Single-flight + cache state for the hourly object-storage sweep. See
     /// `storage_sweep` module docs; shared with the usage-metrics tick via
     /// `Arc` the same way other cross-tick poller state lives on `AppState`.
     pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,
@@ -646,7 +646,7 @@ impl AppState {
         search: SearchService,
         workflow_engine: Arc<WorkflowEngine>,
         relay_keypair: nostr::Keys,
-        media_storage: MediaStorage,
+        media_storage: impl BlobStorage + 'static,
     ) -> (Self, AuditShutdownHandle) {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
