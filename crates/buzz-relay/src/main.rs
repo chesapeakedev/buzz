@@ -467,15 +467,23 @@ async fn main() -> anyhow::Result<()> {
     // relay behaves byte-identically to a build without the mesh. When
     // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
     // operator who asked for the mesh gets it or gets told why not.
-    if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
-        &state.config,
-        state.redis_pool.clone(),
-        state.db.clone(),
-        &state.relay_keypair,
-        Arc::clone(&state.shutting_down),
-    )
-    .await?
-    {
+    let mesh_handle = if config.mesh.enabled {
+        let redis_pool = state
+            .redis_pool
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("BUZZ_MESH requires the distributed Redis backend"))?;
+        buzz_relay::mesh_boot::boot_mesh(
+            &state.config,
+            redis_pool,
+            state.db.clone(),
+            &state.relay_keypair,
+            Arc::clone(&state.shutting_down),
+        )
+        .await?
+    } else {
+        None
+    };
+    if let Some(handle) = mesh_handle {
         let runtime_id = handle.local_runtime_id;
         // Register the per-profile inbound consumers (huddle datagram fan-in,
         // HuddleControl accept loop, reliable-stream accept + optional
@@ -1040,11 +1048,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                let rs = pool_state.redis_pool.status();
-                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
-                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
-                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
-                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                if let Some(redis_pool) = pool_state.redis_pool.as_ref() {
+                    let rs = redis_pool.status();
+                    metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                    metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                    metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                    metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                }
 
                 let deletion_store = pool_state.db.deletion_store();
                 match deletion_store.reap_expired_serving_write_leases(1000).await {

@@ -371,7 +371,8 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
+/// Readiness probe — checks shutdown flag, the selected database, and Redis
+/// connectivity when the distributed backend is selected.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use std::time::Duration;
 
@@ -386,7 +387,12 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let check = async {
         let (pg_ok, redis_ok, deletion_catalog_ok) = tokio::join!(
             state.db.ping(),
-            async { state.redis_pool.get().await.is_ok() },
+            async {
+                match state.redis_pool.as_ref() {
+                    Some(pool) => pool.get().await.is_ok(),
+                    None => true,
+                }
+            },
             async { state.db.validate_deletion_serving_catalog().await.is_ok() },
         );
         (pg_ok, redis_ok, deletion_catalog_ok)
