@@ -6,12 +6,13 @@ use sqlx::{QueryBuilder, Row as _};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_i32, is_ephemeral, KIND_AUTH, KIND_BOOKMARK_SET, KIND_READ_STATE,
+    event_kind_i32, is_ephemeral, KIND_AUTH, KIND_BOOKMARK_SET, KIND_EVENT_REMINDER,
+    KIND_READ_STATE,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
 use super::SqliteStore;
-use crate::event::{extract_d_tag, extract_not_before, EventQuery};
+use crate::event::{extract_d_tag, extract_not_before, DueReminder, EventQuery};
 use crate::{DbError, Result};
 
 fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
@@ -852,5 +853,129 @@ impl SqliteStore {
         .await?;
         transaction.commit().await?;
         Ok(true)
+    }
+
+    /// Query latest-per-address reminders that are due and not yet claimed.
+    pub async fn query_due_reminders(
+        &self,
+        now_secs: i64,
+        batch_limit: i64,
+    ) -> Result<Vec<DueReminder>> {
+        let rows = sqlx::query(
+            "SELECT community_id, host, id, pubkey, created_at, kind, tags, \
+                    content, sig, channel_id \
+             FROM ( \
+                SELECT e.community_id, c.host, e.id, e.pubkey, e.created_at, \
+                       e.kind, e.tags, e.content, e.sig, e.channel_id, e.d_tag, \
+                       ROW_NUMBER() OVER ( \
+                           PARTITION BY e.community_id, e.pubkey, e.d_tag \
+                           ORDER BY e.created_at DESC, e.id ASC \
+                       ) AS address_rank \
+                FROM events e \
+                JOIN communities c ON c.id = e.community_id \
+                WHERE e.kind = ? AND e.not_before IS NOT NULL \
+                  AND e.not_before <= ? AND e.deleted_at IS NULL \
+                  AND e.delivered_at IS NULL AND c.archived_at IS NULL \
+             ) due \
+             WHERE address_rank = 1 \
+             ORDER BY community_id, pubkey, d_tag, created_at DESC, id ASC \
+             LIMIT ?",
+        )
+        .bind(KIND_EVENT_REMINDER as i32)
+        .bind(now_secs)
+        .bind(batch_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let community_id: String = row.try_get("community_id")?;
+                let community_id = Uuid::parse_str(&community_id).map_err(|error| {
+                    DbError::InvalidData(format!("invalid reminder community UUID: {error}"))
+                })?;
+                let channel_id = row
+                    .try_get::<Option<String>, _>("channel_id")?
+                    .map(|value| {
+                        Uuid::parse_str(&value).map_err(|error| {
+                            DbError::InvalidData(format!("invalid reminder channel UUID: {error}"))
+                        })
+                    })
+                    .transpose()?;
+                Ok(DueReminder {
+                    community_id: CommunityId::from_uuid(community_id),
+                    host: row.try_get("host")?,
+                    id: row.try_get("id")?,
+                    pubkey: row.try_get("pubkey")?,
+                    created_at: parse_timestamp(row.try_get("created_at")?)?,
+                    kind: row.try_get("kind")?,
+                    tags: serde_json::from_str(row.try_get::<String, _>("tags")?.as_str())?,
+                    content: row.try_get("content")?,
+                    sig: row.try_get("sig")?,
+                    channel_id,
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically claim a due reminder using the current Unix-second stamp.
+    pub async fn claim_due_reminder(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.claim_due_reminder_with_stamp(
+            community_id,
+            event_id,
+            event_created_at,
+            Utc::now().timestamp(),
+        )
+        .await
+    }
+
+    /// Atomically claim one tenant-scoped reminder with a caller-owned stamp.
+    pub async fn claim_due_reminder_with_stamp(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        delivery_stamp: i64,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE events SET delivered_at = ? \
+             WHERE community_id = ? AND created_at = ? AND id = ? \
+               AND delivered_at IS NULL",
+        )
+        .bind(delivery_stamp)
+        .bind(community_id.as_uuid().to_string())
+        .bind(event_created_at.timestamp_micros())
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Compare-and-clear a failed reminder delivery claim.
+    pub async fn release_due_reminder(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        delivery_stamp: i64,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE events SET delivered_at = NULL \
+             WHERE community_id = ? AND created_at = ? AND id = ? \
+               AND delivered_at = ?",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(event_created_at.timestamp_micros())
+        .bind(event_id)
+        .bind(delivery_stamp)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 }
