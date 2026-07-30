@@ -29,6 +29,112 @@ fn parse_profile(row: sqlx::sqlite::SqliteRow) -> Result<UserProfile> {
 }
 
 impl SqliteStore {
+    /// Atomically assign an agent owner when no owner is currently present.
+    pub async fn set_agent_owner(
+        &self,
+        community: CommunityId,
+        agent_pubkey: &[u8],
+        owner_pubkey: &[u8],
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE users SET agent_owner_pubkey = ?, updated_at = ? \
+             WHERE community_id = ? AND pubkey = ? AND agent_owner_pubkey IS NULL",
+        )
+        .bind(owner_pubkey)
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(agent_pubkey)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(true);
+        }
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM users WHERE community_id = ? AND pubkey = ?")
+                .bind(community.as_uuid().to_string())
+                .bind(agent_pubkey)
+                .fetch_optional(&self.pool)
+                .await?;
+        if exists.is_none() {
+            return Err(crate::DbError::NotFound(
+                "agent pubkey not found in users table".into(),
+            ));
+        }
+        Ok(false)
+    }
+
+    /// Return an agent's channel-add policy and owner, if the user exists.
+    pub async fn get_agent_channel_policy(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<(String, Option<Vec<u8>>)>> {
+        sqlx::query(
+            "SELECT channel_add_policy, agent_owner_pubkey FROM users \
+             WHERE community_id = ? AND pubkey = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| {
+            Ok((
+                row.try_get("channel_add_policy")?,
+                row.try_get("agent_owner_pubkey")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Check whether one user owns another agent in the same community.
+    pub async fn is_agent_owner(
+        &self,
+        community: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<bool> {
+        let owner: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT agent_owner_pubkey FROM users WHERE community_id = ? AND pubkey = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(target_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(owner.is_some_and(|owner| owner == actor_pubkey))
+    }
+
+    /// Set a validated channel-add policy for a user.
+    pub async fn set_channel_add_policy(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        policy: &str,
+    ) -> Result<()> {
+        if !matches!(policy, "anyone" | "owner_only" | "nobody") {
+            return Err(crate::DbError::InvalidData(format!(
+                "invalid channel_add_policy: {policy}"
+            )));
+        }
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE users SET channel_add_policy = ?, updated_at = ? \
+             WHERE community_id = ? AND pubkey = ?",
+        )
+        .bind(policy)
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(pubkey)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::DbError::NotFound(
+                "pubkey not found in users table".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Ensure a minimal user row exists within a community.
     pub async fn ensure_user(&self, community: CommunityId, pubkey: &[u8]) -> Result<bool> {
         let _writer = self.acquire_writer().await;
