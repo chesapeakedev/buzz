@@ -65,14 +65,24 @@ Make the fork history read as a linear, reviewable hill climb toward the plan:
    record the exact tests run. The diff and message together must give an
    upstream reviewer enough evidence to evaluate the patch without relying on
    fork-only context.
-5. Create every commit with DCO sign-off (`git commit -s`). Never bypass hooks.
-   Activate Hermit before Git operations as required by `AGENTS.md`.
+5. Follow `CONTRIBUTING.md`'s “Sign Your Commits” rule for every fork commit:
+   create it with DCO sign-off (`git commit -s`) so its message contains a
+   `Signed-off-by: Name <email>` trailer matching the contributor identity.
+   The repository uses “sign” here to mean DCO sign-off (`-s`), not
+   cryptographic Git signature (`-S`). Pass `-s` explicitly even when the
+   commit hook would add the trailer. Never bypass hooks, and activate Hermit
+   before Git operations as required by `AGENTS.md`.
 6. Keep feature history linear: add commits on top of the current slice, avoid
    feature merge commits, and do not disturb user-owned commits.
 7. Rebase the fork-owned patch stack onto new upstream bases when synchronizing
    the fork. Rewritten fork commit IDs are expected; release tags remain stable.
    Update remote branches only with explicit `--force-with-lease` protection
    after confirming the expected old tip.
+8. Before handoff or publication, audit every commit in the proposed range,
+   not only `HEAD`. Fail the slice if any commit lacks a valid sign-off or uses
+   an unexpected identity. Repair a private unsigned series with
+   `git rebase --signoff <base>` and re-run the audit; never claim DCO
+   compliance from the hook configuration alone.
 
 For every candidate upstream contribution:
 
@@ -160,6 +170,9 @@ fork-owned patches.
    in the plan. Never resolve conflicts wholesale with an ours/theirs strategy.
 4. Stage each resolution, continue the rebase, and confirm every replayed
    commit retains its DCO sign-off and defensible Conventional Commit message.
+   If a replayed or amended commit loses its trailer, add it with
+   `git rebase --signoff` or `git commit --amend -s`; do not add a blanket
+   trailer without verifying that the committer has the right to certify it.
 5. Run checks for every conflicted subsystem plus the sync contract test.
 6. Run `just sync-upstream-pr` to lease-update the review branches and create
    or refresh the PR. Never merge that review PR into `upstream-base`.
