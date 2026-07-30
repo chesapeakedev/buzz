@@ -37,6 +37,8 @@ mod contracts_push_leases;
 #[cfg(test)]
 mod contracts_push_matcher;
 #[cfg(test)]
+mod contracts_push_outbox;
+#[cfg(test)]
 mod contracts_reactions;
 #[cfg(test)]
 mod contracts_reminders;
@@ -230,7 +232,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 14);
+        assert_eq!(applied, 15);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -241,7 +243,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 14);
+        assert_eq!(row.len(), 15);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -256,6 +258,7 @@ mod tests {
         assert_eq!(row[11].get::<i64, _>("version"), 12);
         assert_eq!(row[12].get::<i64, _>("version"), 13);
         assert_eq!(row[13].get::<i64, _>("version"), 14);
+        assert_eq!(row[14].get::<i64, _>("version"), 15);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -328,6 +331,7 @@ mod tests {
             "product_feedback".to_owned(),
             "push_leases".to_owned(),
             "push_match_queue".to_owned(),
+            "push_wake_outbox".to_owned(),
             "relay_members".to_owned(),
             "reactions".to_owned(),
             "thread_metadata".to_owned(),
