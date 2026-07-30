@@ -489,8 +489,9 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Database connection pool.
     pub db: Db,
-    /// Redis pool for readiness health checks.
-    pub redis_pool: deadpool_redis::Pool,
+    /// Optional Redis pool for distributed readiness and mesh health checks.
+    /// Embedded mode deliberately has no Redis pool.
+    pub redis_pool: Option<deadpool_redis::Pool>,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
@@ -648,6 +649,56 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: impl BlobStorage + 'static,
     ) -> (Self, AuditShutdownHandle) {
+        let git_store: Arc<dyn crate::api::git::store::GitStorage> = Arc::new(
+            crate::api::git::store::GitStore::new(
+                &config.media.s3_endpoint,
+                &config.media.s3_access_key,
+                &config.media.s3_secret_key,
+                &config.media.s3_bucket,
+                &config.media.s3_region,
+            )
+            .expect("media storage was already constructed with this S3 config"),
+        );
+        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
+            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let admission_rate_limiter: Arc<dyn RateLimiter> = Arc::new(
+            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool.clone()),
+        );
+        Self::new_with_backends(
+            config,
+            db,
+            Some(redis_pool),
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            relay_keypair,
+            media_storage,
+            git_store,
+            nip98_replay,
+            admission_rate_limiter,
+        )
+    }
+
+    /// Constructs application state with explicitly selected distributed or
+    /// embedded backend services.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_backends(
+        config: Config,
+        db: Db,
+        redis_pool: Option<deadpool_redis::Pool>,
+        audit: impl Into<Option<AuditService>>,
+        pubsub: Arc<dyn Coordination>,
+        auth: AuthService,
+        search: SearchService,
+        workflow_engine: Arc<WorkflowEngine>,
+        relay_keypair: nostr::Keys,
+        media_storage: impl BlobStorage + 'static,
+        git_store: Arc<dyn crate::api::git::store::GitStorage>,
+        nip98_replay: Arc<dyn Nip98ReplayGuard>,
+        admission_rate_limiter: Arc<dyn RateLimiter>,
+    ) -> (Self, AuditShutdownHandle) {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -693,16 +744,6 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store: Arc<dyn crate::api::git::store::GitStorage> = Arc::new(
-            crate::api::git::store::GitStore::new(
-                &config.media.s3_endpoint,
-                &config.media.s3_access_key,
-                &config.media.s3_secret_key,
-                &config.media.s3_bucket,
-                &config.media.s3_region,
-            )
-            .expect("media storage was already constructed with this S3 config"),
-        );
         let git_pack_cache = Arc::new(
             crate::api::git::pack_cache::GitPackCache::new(
                 &config.git_pack_cache_path,
@@ -710,11 +751,6 @@ impl AppState {
                 config.git_pack_cache_max_concurrent_populations,
             )
             .expect("git pack cache path must be available"),
-        );
-        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
-            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let admission_rate_limiter: Arc<dyn RateLimiter> = Arc::new(
-            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool.clone()),
         );
         let audit_enabled = audit_arc.is_some();
         let state = Self {
