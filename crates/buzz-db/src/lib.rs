@@ -1193,6 +1193,9 @@ impl Db {
 
     /// Count events matching the given query (NIP-45 COUNT support).
     pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.count_events(q).await;
+        }
         event::count_events(&self.postgres().pool, q).await
     }
 

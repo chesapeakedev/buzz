@@ -648,6 +648,19 @@ impl SqliteStore {
         Ok(events)
     }
 
+    /// Count matching events using the same tenant and filter semantics as
+    /// [`Self::query_events`]. SQLite keeps this backend-neutral fallback
+    /// bounded by the caller's database workload rather than introducing a
+    /// second, independently maintained filter builder.
+    pub async fn count_events(&self, query: &EventQuery) -> Result<i64> {
+        let mut unbounded = query.clone();
+        unbounded.limit = Some(i64::MAX);
+        unbounded.max_limit = Some(i64::MAX);
+        let count = self.query_events(&unbounded).await?.len();
+        i64::try_from(count)
+            .map_err(|_| DbError::InvalidData("SQLite event count exceeds i64".to_owned()))
+    }
+
     /// Fetch one live event by its tenant-scoped raw identifier.
     pub async fn get_event_by_id(
         &self,
