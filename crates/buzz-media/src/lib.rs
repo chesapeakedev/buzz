@@ -23,8 +23,8 @@ pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
 pub use filesystem::{FilesystemBlobConfig, FilesystemBlobStorage};
 pub use storage::{
-    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome,
-    ByteStream, MediaStorage,
+    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobMetadata, BlobStorage,
+    BulkDeleteOutcome, ByteStream, MediaStorage,
 };
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};

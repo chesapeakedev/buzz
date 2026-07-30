@@ -1,0 +1,114 @@
+# Embedded Backends — Remaining Work
+
+Progress tracker for the ChesapeakeDev single-node embedded backends effort
+(`docs/single-node-embedded-backends.md`). Each PR in the **Pull Request
+Sequence** must keep the PostgreSQL/Redis/S3 path green and deployable.
+
+## Status snapshot
+
+Completed (on `upstream-sync`, ahead of `main`):
+
+- PR 1 — Fork hygiene, upstream policy, non-publishing CI
+- PR 2 — ChesapeakeDev relay image publishing and release guardrails
+- PR 3 — Database facade and transaction leakage removal
+- PR 4 — Coordination trait plus unchanged Redis adapter
+- PR 5 — Local event bus, cache invalidation, connection control
+- PR 6 — Moka presence/TTL adapter (folded into PR 5 single-process backend)
+- PR 7 — Durable security-window abstraction
+- PR 8 — SQLite connection, migration runner, test fixture
+- PR 9 — SQLite community/auth slice
+- PR 10 — SQLite event/channel/thread slice
+- PR 11 — SQLite search/feed slice
+- PR 12 — SQLite moderation/audit slice
+- PR 13 — SQLite workflow/reminder/push slice
+- PR 14 — SQLite git/usage/security slice
+- PR 15 — Blob/CAS interfaces plus unchanged S3 adapters
+- PR 17 — Filesystem media backend
+- PR 18 — Filesystem git backend
+- Facade wiring — SQLite `Db` facade dispatch + selected-backend service injection
+  (unnumbered integration step completing Epic 3's exit gate)
+- PR 19 (partial) — `EmbeddedLayout` data directory layout + `instance.lock`
+  exclusive lock (`crates/buzz-relay/src/deployment.rs`)
+
+Remaining:
+
+## PR 16 — SQLite blob metadata tables replacing sidecar JSON
+
+The filesystem media/git backends (PR 17/18) currently persist blob metadata as
+sidecar JSON via `BlobStorage::{get_sidecar, put_sidecar}`. PR 16 moves that
+metadata into SQLite so a single metadata row is the atomic publication gate
+for a blob write. The distributed S3 path keeps its existing sidecar JSON.
+
+- [x] 16.1 — Add SQLite migration `0018_blob_metadata.sql` defining
+      `media_objects` and `git_pointers` (community-scoped, `community_id`-led
+      keys; MIME/size/upload timestamp/uploader pubkey + CAS fields). Done in
+      `migrations/sqlite/0018_blob_metadata.sql`; updated the SQLite migration
+      count and tenant-leading-PK lint in `crates/buzz-db/src/sqlite.rs`.
+      Verified: `cargo test -p buzz-db --lib sqlite::`, `cargo test -p
+      buzz-audit --lib`, `cargo test -p buzz-search --test backend_contract`,
+      `cargo fmt -p buzz-db -- --check`, `cargo clippy -p buzz-db --lib`.
+- [x] 16.2 — Add a backend-neutral `BlobMetadata` trait alongside the existing
+      blob/CAS interfaces (`buzz-media` for media, `buzz-relay/src/api/git/store`
+      for git), keeping S3 sidecar JSON as the distributed adapter. Done in
+      `crates/buzz-media/src/storage.rs`: new `BlobMetadata` trait (community-
+      scoped `get_metadata`/`put_metadata`/`read_mime`) with the S3
+      `MediaStorage` adapter implementing it via the existing sidecar JSON path
+      (404 → `None` on get). Additive — existing `BlobStorage` sidecar methods
+      and callers are untouched (no behavior change). Git's pointer CAS seam is
+      already backend-neutral via the existing `GitStorage` trait (delivered
+      with PR 15/18); the `git_pointers` metadata adapter is built in 16.3 and
+      wired into the filesystem `GitStorage` impl in 16.5. Verified: `cargo
+      test -p buzz-media --lib` (104 passed), `cargo fmt -p buzz-media
+      -- --check`, `cargo clippy -p buzz-media --lib`, `cargo check -p
+      buzz-relay` (library compiles; relay test binaries need system
+      `libssl-dev`, a pre-existing environment limitation).
+- [ ] 16.3 — Implement the SQLite blob metadata adapter: `media_objects`
+      upsert/get/delete and `git_pointers` put/get/CAS-swap, with the metadata
+      row as the atomic publication gate (write row before publishing the
+      serve-gate, delete row with the blob).
+- [ ] 16.4 — Wire the filesystem media backend to use SQLite metadata instead
+      of `_meta/{community}/{sha256}.json` sidecars; update `upload.rs` serve
+      gate to the SQLite row.
+- [ ] 16.5 — Wire the filesystem git backend to use SQLite `git_pointers`
+      metadata for the CAS pointer swap instead of sidecar/pointer-only writes.
+- [ ] 16.6 — Add S3/filesystem shared behavior tests and key-format
+      compatibility tests; verify the distributed S3 path is unchanged.
+
+## PR 19 — Embedded config, data layout, locking, and recovery (finish)
+
+Data layout + `instance.lock` already exist; the rest of the Epic 5 runtime UX
+remains.
+
+- [ ] 19.1 — `buzz.toml` reader with environment-over-TOML-over-default
+      precedence and unknown-field rejection (`unknown TOML fields are startup
+      errors`).
+- [ ] 19.2 — Durable relay signing key generation/persistence under
+      `/data/secrets/relay.key` (owner-only, never written to TOML or logs).
+- [ ] 19.3 — Automatic first run + access bootstrap policy: loopback may start
+      open with no owner; non-loopback requires owner + closed membership unless
+      `access = "open"`; print actionable first-run instructions.
+- [ ] 19.4 — Startup recovery sequence: create missing dirs idempotently,
+      validate ownership/writability, acquire lock, open SQLite, run migrations,
+      recover abandoned temp files, then report readiness.
+- [ ] 19.5 — Backend-neutral readiness/health output reporting selected
+      database, coordination, and object-store kinds; drop Postgres/Redis
+      readiness requirements in embedded mode.
+
+## PR 20 — Relay-only container, Compose/Caddy example, operational docs
+
+- [ ] 20.1 — Relay-only container image + entrypoint defaulting to
+      `0.0.0.0:3000` with `/data` volume.
+- [ ] 20.2 — Minimal Compose + Caddy TLS example; keep a separate distributed
+      Compose with PostgreSQL/Redis/MinIO.
+- [ ] 20.3 — Backup/restore (stop-and-copy `/data`), upgrade, troubleshooting,
+      and security documentation.
+- [ ] 20.4 — End-to-end "empty VPS to connected client" runbook.
+
+## PR 21 — Embedded release candidate, benchmarks, soak, stable release
+
+- [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
+- [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
+- [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
+      size, write/search latency, restart time) and overnight soak with restarts.
+- [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
+- [ ] 21.5 — Daily upstream-sync workflow and first successful sync PR.
