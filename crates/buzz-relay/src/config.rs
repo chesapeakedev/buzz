@@ -67,6 +67,9 @@ impl DeploymentMode {
 pub struct Config {
     /// Selected relational/coordination/object-storage deployment profile.
     pub deployment_mode: DeploymentMode,
+    /// Whether Git hosting is enabled. Embedded mode defaults to disabled;
+    /// distributed mode defaults to enabled for backwards compatibility.
+    pub git_enabled: bool,
     /// Durable root for the embedded profile (`/data` in the container).
     pub data_dir: std::path::PathBuf,
     /// Address the relay HTTP/WebSocket server binds to.
@@ -461,6 +464,10 @@ impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let deployment_mode = deployment_mode_from_env()?;
+        let git_enabled = parse_bool(
+            "BUZZ_GIT_ENABLED",
+            deployment_mode == DeploymentMode::Distributed,
+        )?;
         let data_dir = std::env::var("BUZZ_DATA_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("/data"));
@@ -938,6 +945,7 @@ impl Config {
 
         Ok(Self {
             deployment_mode,
+            git_enabled,
             data_dir,
             bind_addr,
             database_url,

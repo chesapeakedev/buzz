@@ -14,10 +14,11 @@ use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::RedisCoordination;
+use buzz_pubsub::{LocalCoordination, RedisCoordination};
 use buzz_search::SearchService;
 
-use buzz_relay::config::Config;
+use buzz_relay::config::{Config, DeploymentMode};
+use buzz_relay::deployment::EmbeddedLayout;
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
@@ -83,6 +84,19 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+/// Backend services selected at startup based on the deployment profile.
+///
+/// The embedded (single-node) profile wires SQLite-backed filesystem
+/// implementations together; the distributed profile wires S3 + Redis-backed
+/// ones. Both branches produce the same set of trait objects the rest of the
+/// relay consumes.
+type SelectedBackends = (
+    Arc<dyn buzz_media::BlobStorage>,
+    Arc<dyn buzz_relay::api::git::store::GitStorage>,
+    Arc<dyn buzz_auth::Nip98ReplayGuard>,
+    Arc<dyn buzz_auth::RateLimiter>,
+);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install the ring CryptoProvider for rustls. Required before any rustls
@@ -144,6 +158,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("Configuration error: {e}")
     })?;
     info!(
+        deployment_mode = ?config.deployment_mode,
+        data_dir = %config.data_dir.display(),
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
         health_port = config.health_port,
@@ -152,6 +168,26 @@ async fn main() -> anyhow::Result<()> {
         audit_enabled = config.audit_enabled,
         "Config loaded"
     );
+
+    let (embedded_layout, _embedded_lock) = if config.deployment_mode == DeploymentMode::Embedded {
+        if config.read_database_url.is_some()
+            || std::env::var_os("REDIS_URL").is_some()
+            || std::env::var_os("BUZZ_S3_ENDPOINT").is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "embedded mode cannot be combined with read-replica, Redis, or S3 settings"
+            ));
+        }
+        let layout = EmbeddedLayout::prepare(&config.data_dir).map_err(|error| {
+            anyhow::anyhow!("failed to prepare embedded data directory: {error}")
+        })?;
+        let lock = layout
+            .lock()
+            .map_err(|error| anyhow::anyhow!("failed to lock embedded data directory: {error}"))?;
+        (Some(layout), Some(lock))
+    } else {
+        (None, None)
+    };
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
@@ -169,11 +205,25 @@ async fn main() -> anyhow::Result<()> {
         max_connections: config.db_pool_size,
         ..DbConfig::default()
     };
-    let db = Db::new(&db_config).await.map_err(|e| {
-        error!("Failed to connect to Postgres: {e}");
-        anyhow::anyhow!("DB connection failed: {e}")
-    })?;
-    if db.has_read_pool() {
+    let db = if let Some(layout) = embedded_layout.as_ref() {
+        Db::new_sqlite(
+            &layout.database,
+            &buzz_db::sqlite::SqliteConfig {
+                max_connections: config.db_pool_size.max(1),
+                ..buzz_db::sqlite::SqliteConfig::default()
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("SQLite connection failed: {e}"))?
+    } else {
+        Db::new(&db_config).await.map_err(|e| {
+            error!("Failed to connect to Postgres: {e}");
+            anyhow::anyhow!("DB connection failed: {e}")
+        })?
+    };
+    if embedded_layout.is_some() {
+        info!("SQLite connected (embedded profile)");
+    } else if db.has_read_pool() {
         info!("Postgres connected (writer + read replica)");
     } else {
         info!("Postgres connected");
@@ -181,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
-    if auto_migrate {
+    if embedded_layout.is_some() || auto_migrate {
         db.migrate().await.map_err(|e| {
             error!("Failed to run database migrations: {e}");
             anyhow::anyhow!("Database migration failed: {e}")
@@ -341,9 +391,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let audit = if config.audit_enabled {
-        let audit = AuditService::connect_postgres(&config.database_url, 5, 1)
-            .await
-            .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+        let audit = if let Some(store) = db.sqlite_store() {
+            AuditService::new_sqlite(store.adapter_pool(), store.adapter_writer_gate())
+        } else {
+            AuditService::connect_postgres(&config.database_url, 5, 1)
+                .await
+                .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?
+        };
         info!("Audit service ready");
         Some(audit)
     } else {
@@ -351,37 +405,33 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let redis_pool = {
+    let (redis_pool, pubsub): (
+        Option<deadpool_redis::Pool>,
+        Arc<dyn buzz_pubsub::Coordination>,
+    ) = if embedded_layout.is_some() {
+        info!("Local coordination selected (embedded profile)");
+        (None, Arc::new(LocalCoordination::new()))
+    } else {
         let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
         cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
+        let redis_pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?;
+        let redis = Arc::new(
+            RedisCoordination::new(&config.redis_url, redis_pool.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+        );
+        info!("Redis pub/sub connected");
+
+        let pubsub_for_sub = Arc::clone(&redis);
+        tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
+        let pubsub_for_cache = Arc::clone(&redis);
+        tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
+        let pubsub_for_conn_ctrl = Arc::clone(&redis);
+        tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+        (Some(redis_pool), redis)
     };
-    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
-    let pubsub = Arc::new(
-        RedisCoordination::new(&config.redis_url, redis_pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
-    );
-    info!("Redis pub/sub connected");
-
-    // Spawn Redis pub/sub subscriber for multi-node fan-out.
-    // Events published by other relay instances are received here and
-    // fanned out to local WebSocket subscribers.
-    let pubsub_for_sub = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -390,16 +440,21 @@ async fn main() -> anyhow::Result<()> {
     // no external collection to provision — the search service just queries the
     // same Postgres over its own pool. Search is lag-tolerant, so it prefers
     // the read replica when one is configured.
-    let search_db_url = config
-        .read_database_url
-        .as_deref()
-        .unwrap_or(&config.database_url);
-    let search = SearchService::connect_postgres(search_db_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search = if let Some(store) = db.sqlite_store() {
+        SearchService::new_sqlite(store.adapter_pool())
+    } else {
+        let search_db_url = config
+            .read_database_url
+            .as_deref()
+            .unwrap_or(&config.database_url);
+        SearchService::connect_postgres(search_db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?
+    };
     info!(
+        embedded = embedded_layout.is_some(),
         replica = config.read_database_url.is_some(),
-        "Search service ready (Postgres FTS)"
+        "Search service ready"
     );
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
@@ -432,14 +487,76 @@ async fn main() -> anyhow::Result<()> {
         .media
         .validate()
         .map_err(|e| anyhow::anyhow!("invalid media config: {e}"))?;
-    let media_storage = buzz_media::MediaStorage::new(&config.media)
-        .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
-    info!("Media storage connected");
+    let sqlite_store = db.sqlite_store();
+    let backends: SelectedBackends = if let Some(layout) = embedded_layout.as_ref() {
+        let media = buzz_media::FilesystemBlobStorage::open(buzz_media::FilesystemBlobConfig {
+            root: layout.media_objects.clone(),
+            quota_bytes: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to initialize filesystem media storage: {e}"))?;
+        let git: Arc<dyn buzz_relay::api::git::store::GitStorage> = if config.git_enabled {
+            Arc::new(
+                buzz_relay::api::git::filesystem::FilesystemGitStorage::open(
+                    buzz_relay::api::git::filesystem::FilesystemGitConfig {
+                        root: layout.git_objects.clone(),
+                        quota_bytes: Some(config.git_max_repo_bytes),
+                    },
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to initialize filesystem Git storage: {e}"))?,
+            )
+        } else {
+            info!("Embedded Git hosting disabled (set BUZZ_GIT_ENABLED=true to opt in)");
+            Arc::new(buzz_relay::api::git::store::DisabledGitStorage)
+        };
+        let store = sqlite_store
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("embedded profile did not create SQLite resources"))?;
+        let security = buzz_pubsub::SqliteSecurityStore::new(store);
+        info!(
+            git_enabled = config.git_enabled,
+            "Filesystem media storage ready"
+        );
+        (
+            Arc::new(media),
+            git,
+            Arc::new(security.clone()),
+            Arc::new(security),
+        )
+    } else {
+        let media = buzz_media::MediaStorage::new(&config.media)
+            .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
+        let git: Arc<dyn buzz_relay::api::git::store::GitStorage> = if config.git_enabled {
+            Arc::new(
+                buzz_relay::api::git::store::GitStore::new(
+                    &config.media.s3_endpoint,
+                    &config.media.s3_access_key,
+                    &config.media.s3_secret_key,
+                    &config.media.s3_bucket,
+                    &config.media.s3_region,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to initialize Git storage: {e}"))?,
+            )
+        } else {
+            Arc::new(buzz_relay::api::git::store::DisabledGitStorage)
+        };
+        let redis_pool = redis_pool
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("distributed profile did not create Redis resources"))?;
+        (
+            Arc::new(media),
+            git,
+            Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis_pool.clone())),
+            Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool)),
+        )
+    };
+    let (media_storage, git_store, nip98_replay, admission_rate_limiter) = backends;
 
-    let (app_state, audit_shutdown) = AppState::new(
+    let (app_state, audit_shutdown) = AppState::new_with_backends(
         config.clone(),
         db,
-        redis_health_pool,
+        redis_pool,
         audit,
         pubsub,
         auth,
@@ -447,6 +564,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&workflow_engine),
         relay_keypair,
         media_storage,
+        git_store,
+        nip98_replay,
+        admission_rate_limiter,
     );
     let state = Arc::new(app_state);
 

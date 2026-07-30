@@ -221,6 +221,49 @@ pub trait GitStorage: Send + Sync {
     async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError>;
 }
 
+/// Sentinel backend used when embedded deployments opt out of Git hosting.
+/// Keeping the trait available lets the relay start without allocating a Git
+/// object store while requests fail with a clear configuration error.
+#[derive(Debug, Default)]
+pub struct DisabledGitStorage;
+
+impl DisabledGitStorage {
+    fn disabled() -> StoreError {
+        StoreError::Config("Git hosting is disabled in this deployment".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl GitStorage for DisabledGitStorage {
+    async fn put_pack(&self, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_idx(&self, _: &str, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_idx(&self, _: &str, _: u64) -> Result<Option<Bytes>, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_manifest(&self, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_verified(&self, _: &str, _: &str) -> Result<Bytes, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_verified_limited(&self, _: &str, _: &str, _: u64) -> Result<Bytes, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_pointer(&self, _: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_pointer(&self, _: &str, _: &[u8], _: Precond) -> Result<CasOutcome, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn run_conformance_probe(&self, _: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        Err(Self::disabled())
+    }
+}
+
 impl GitStore {
     /// Build a client against an S3-compatible endpoint (e.g. MinIO).
     ///
