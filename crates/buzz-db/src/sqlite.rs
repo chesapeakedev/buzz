@@ -18,9 +18,12 @@ mod contracts;
 #[cfg(test)]
 mod contracts_channels;
 #[cfg(test)]
+mod contracts_dms;
+#[cfg(test)]
 mod contracts_events;
 #[cfg(test)]
 mod contracts_identity;
+mod dms;
 mod events;
 mod identity_admin;
 mod users;
