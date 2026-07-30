@@ -21,7 +21,7 @@ fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_thread_metadata_transaction(
+pub(super) async fn insert_thread_metadata_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     community_id: CommunityId,
     event_id: &[u8],
