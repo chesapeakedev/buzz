@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "deepinfra/zai-org/GLM-5.2",
+  "permission": {
+    "edit": {
+      "": "deny",
+      "/tmp/": "allow",
+      "plans//.plan.md": "allow",
+      "plans/.plan.md": "allow",
+      "**/.plan.md": "allow"
+    },
+    "bash": {
+      "*": "allow"
+    },
+    "external_directory": "allow"
+  }
+}
