@@ -35,6 +35,8 @@ mod contracts_moderation;
 #[cfg(test)]
 mod contracts_push_leases;
 #[cfg(test)]
+mod contracts_push_matcher;
+#[cfg(test)]
 mod contracts_reactions;
 #[cfg(test)]
 mod contracts_reminders;
