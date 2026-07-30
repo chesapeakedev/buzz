@@ -364,7 +364,7 @@ pub async fn upload_blob(
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
                 buzz_media::process_video_upload(
-                    &state.media_storage,
+                    state.media_storage.as_ref(),
                     &state.config.media,
                     &auth.tenant,
                     &auth.auth_event,
@@ -396,7 +396,7 @@ pub async fn upload_blob(
 
                 if is_image {
                     buzz_media::process_upload(
-                        &state.media_storage,
+                        state.media_storage.as_ref(),
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
@@ -411,7 +411,7 @@ pub async fn upload_blob(
                     return Err(MediaError::DisallowedContentType(mime));
                 } else {
                     buzz_media::process_file_upload(
-                        &state.media_storage,
+                        state.media_storage.as_ref(),
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
@@ -694,7 +694,7 @@ pub(crate) async fn serve_blob_for_tenant(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
+    let key = resolve_blob_key(state.media_storage.as_ref(), tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -862,7 +862,7 @@ pub async fn head_blob(
         sidecar_mime
     };
 
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let key = resolve_blob_key(state.media_storage.as_ref(), &tenant, &sha256_ext).await?;
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -881,15 +881,15 @@ pub async fn head_blob(
     }
 }
 
-/// Resolve the S3 key from a URL path segment.
+/// Resolve the backend object key from a URL path segment.
 ///
 /// - `sha256.ext`       → used as-is (already validated by `validate_media_path`)
 /// - `sha256` (no dot)  → read sidecar to get extension, return `sha256.ext`
 ///
 /// Sidecar-derived extensions are validated as safe tokens to prevent
 /// object-key confusion if sidecar data is ever tampered with.
-async fn resolve_s3_key(
-    storage: &buzz_media::MediaStorage,
+async fn resolve_blob_key(
+    storage: &dyn buzz_media::BlobStorage,
     tenant: &TenantContext,
     sha256_ext: &str,
 ) -> Result<String, MediaError> {

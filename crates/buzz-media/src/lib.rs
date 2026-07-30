@@ -20,7 +20,9 @@ pub use bucket_index::{
 };
 pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
-pub use storage::{BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage};
+pub use storage::{
+    BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome, ByteStream, MediaStorage,
+};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
 pub use upload_record::{

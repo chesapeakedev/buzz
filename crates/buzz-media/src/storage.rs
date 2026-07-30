@@ -15,6 +15,59 @@ use serde::{Deserialize, Serialize};
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
+/// Backend-neutral media blob operations used by upload, download, and sweep paths.
+///
+/// Implementations must preserve object keys and existing not-found semantics,
+/// and keep community sidecars as the read-authorization boundary for shared
+/// content-addressed bytes.
+#[async_trait::async_trait]
+pub trait BlobStorage: Send + Sync {
+    /// Store an object from memory.
+    async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError>;
+
+    /// Store an object by streaming a local file.
+    async fn put_file(&self, key: &str, path: &Path, content_type: &str) -> Result<(), MediaError>;
+
+    /// Retrieve a complete object.
+    async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError>;
+
+    /// Retrieve an inclusive byte range.
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError>;
+
+    /// Stream an object without buffering the complete body.
+    async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError>;
+
+    /// Return whether an object exists.
+    async fn head(&self, key: &str) -> Result<bool, MediaError>;
+
+    /// Delete an object.
+    async fn delete(&self, key: &str) -> Result<(), MediaError>;
+
+    /// Read object metadata without retrieving its body.
+    async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError>;
+
+    /// Read one tenant-scoped metadata sidecar.
+    async fn get_sidecar(&self, ctx: &TenantContext, sha256: &str) -> Result<BlobMeta, MediaError>;
+
+    /// Write one tenant-scoped metadata sidecar.
+    async fn put_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError>;
+
+    /// Read a tenant-scoped MIME type, hiding missing and failed sidecars.
+    async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String>;
+
+    /// List one bounded page for storage accounting.
+    async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError>;
+}
+
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
@@ -369,6 +422,66 @@ fn fold_bulk_delete_result(result: s3::serde_types::DeleteObjectsResult) -> Bulk
         }
     }
     outcome
+}
+
+#[async_trait::async_trait]
+impl BlobStorage for MediaStorage {
+    async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
+        MediaStorage::put(self, key, bytes, content_type).await
+    }
+
+    async fn put_file(&self, key: &str, path: &Path, content_type: &str) -> Result<(), MediaError> {
+        MediaStorage::put_file(self, key, path, content_type).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError> {
+        MediaStorage::get(self, key).await
+    }
+
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError> {
+        MediaStorage::get_range(self, key, start, end).await
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError> {
+        MediaStorage::get_stream(self, key).await
+    }
+
+    async fn head(&self, key: &str) -> Result<bool, MediaError> {
+        MediaStorage::head(self, key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), MediaError> {
+        MediaStorage::delete(self, key).await
+    }
+
+    async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError> {
+        MediaStorage::head_with_metadata(self, key).await
+    }
+
+    async fn get_sidecar(&self, ctx: &TenantContext, sha256: &str) -> Result<BlobMeta, MediaError> {
+        MediaStorage::get_sidecar(self, ctx, sha256).await
+    }
+
+    async fn put_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        MediaStorage::put_sidecar(self, ctx, sha256, meta).await
+    }
+
+    async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        MediaStorage::read_sidecar_mime(self, ctx, sha256_ext).await
+    }
+
+    async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError> {
+        MediaStorage::list_page(self, continuation_token, max_keys).await
+    }
 }
 
 #[cfg(test)]
