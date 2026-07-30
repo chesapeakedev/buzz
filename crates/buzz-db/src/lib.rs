@@ -1987,7 +1987,9 @@ impl Db {
     /// writer-vs-routed rule.
     #[datastore_span(name = "count_events", system = "postgresql")]
     pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
-        event::count_events(&self.pool, q).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.count_events(q).await;
+        }
     }
 
     /// [`Db::count_events`] with replica routing — same contract, rules,
