@@ -741,6 +741,18 @@ impl Db {
         }
     }
 
+    /// Clone the embedded SQLite resources when this facade uses SQLite.
+    ///
+    /// The returned store shares the same pool and serialized writer gate, so
+    /// search, audit, and security adapters remain inside one consistency
+    /// boundary. Distributed callers receive `None`.
+    pub fn sqlite_store(&self) -> Option<sqlite::SqliteStore> {
+        match self.backend.as_ref() {
+            DatabaseBackend::Sqlite(store) => Some(store.clone()),
+            DatabaseBackend::Postgres(_) => None,
+        }
+    }
+
     /// Creates a SQLite-backed database facade for the embedded deployment.
     pub async fn new_sqlite(path: &std::path::Path, config: &sqlite::SqliteConfig) -> Result<Self> {
         let store = sqlite::SqliteStore::connect(path, config).await?;
