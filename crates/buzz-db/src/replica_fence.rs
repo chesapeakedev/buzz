@@ -523,14 +523,19 @@ mod tests {
 
         let ts = Utc::now();
         fence.advance(ts);
-        assert_eq!(fence.verified_through(), Some(ts));
-        assert!(fence.covers(ts - chrono::Duration::seconds(1)));
-        assert!(fence.covers(ts), "boundary is inclusive");
-        assert!(!fence.covers(ts + chrono::Duration::seconds(1)));
+        // The atomic fence representation intentionally stores Unix
+        // microseconds, so normalize the nanosecond-resolution wall clock
+        // value before asserting the round trip.
+        let stored_ts =
+            DateTime::from_timestamp_micros(ts.timestamp_micros()).expect("valid timestamp");
+        assert_eq!(fence.verified_through(), Some(stored_ts));
+        assert!(fence.covers(stored_ts - chrono::Duration::seconds(1)));
+        assert!(fence.covers(stored_ts), "boundary is inclusive");
+        assert!(!fence.covers(stored_ts + chrono::Duration::seconds(1)));
 
         fence.close();
         assert!(fence.verified_through().is_none(), "close() must close");
-        assert!(!fence.covers(ts - chrono::Duration::days(365)));
+        assert!(!fence.covers(stored_ts - chrono::Duration::days(365)));
     }
 
     #[test]
