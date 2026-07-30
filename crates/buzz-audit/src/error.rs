@@ -35,6 +35,10 @@ pub enum AuditError {
     #[error("unknown audit action in database")]
     UnknownAction,
 
+    /// Stored backend data could not be decoded into the audit domain model.
+    #[error("invalid audit data")]
+    InvalidData,
+
     /// A JSON serialization error occurred (e.g. while canonicalising `detail`).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -69,6 +73,7 @@ mod tests {
             AuditError::ChainViolation { seq: 7 },
             AuditError::HashMismatch { seq: 42 },
             AuditError::UnknownAction,
+            AuditError::InvalidData,
         ];
 
         for err in &domain_errors {
