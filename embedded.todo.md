@@ -66,9 +66,14 @@ for a blob write. The distributed S3 path keeps its existing sidecar JSON.
       upsert/get/delete and `git_pointers` put/get/CAS-swap, with the metadata
       row as the atomic publication gate (write row before publishing the
       serve-gate, delete row with the blob).
-- [ ] 16.4 — Wire the filesystem media backend to use SQLite metadata instead
-      of `_meta/{community}/{sha256}.json` sidecars; update `upload.rs` serve
-      gate to the SQLite row.
+- [x] 16.4 — Wire the filesystem media backend to use SQLite metadata instead
+      of `_meta/{community}/{sha256}.json` sidecars; update the upload serve
+      gate to the SQLite row. `FilesystemBlobStorage::open_with_metadata`
+      delegates embedded metadata reads/writes to the SQLite adapter, including
+      idempotency checks and MIME reads; the legacy constructor retains sidecars
+      for storage-only tests and distributed behavior is unchanged. Verified:
+      `cargo test -p buzz-media --test filesystem_storage`, `cargo fmt --all
+      -- --check`, and `cargo check -p buzz-relay`.
 - [ ] 16.5 — Wire the filesystem git backend to use SQLite `git_pointers`
       metadata for the CAS pointer swap instead of sidecar/pointer-only writes.
 - [ ] 16.6 — Add S3/filesystem shared behavior tests and key-format
