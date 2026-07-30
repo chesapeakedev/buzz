@@ -24,8 +24,8 @@ pub use error::MediaError;
 pub use filesystem::{FilesystemBlobConfig, FilesystemBlobStorage};
 pub use storage::{
     ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome,
-    ByteStream, MediaStorage, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef,
-    ObjectVersionsPage,
+    BlobMetadata, ByteStream, MediaStorage, ObjectVersionEntry, ObjectVersionKind,
+    ObjectVersionRef, ObjectVersionsPage,
 };
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
