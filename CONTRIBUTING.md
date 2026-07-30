@@ -460,11 +460,11 @@ for team access setup, onboarding, and the full repo inventory. See
    handler in `buzz-db/src/` (e.g., `buzz-db/src/my_feature.rs`) with
    the appropriate `INSERT` and `SELECT` queries.
 
-6. **Index for search** (if applicable) — Postgres FTS indexes persisted
-   events automatically via the `events.search_tsv` generated column. To
-   exclude a privacy-sensitive kind from search, add it to the `CASE WHEN
-   kind IN (...)` exclusion in the `search_tsv` definition (see the initial
-   schema migration) rather than wiring a separate indexer.
+6. **Index for search** (if applicable) — PostgreSQL indexes persisted events
+   through `events.search_tsv`; SQLite uses transactional FTS5 triggers. Keep
+   their searchable-kind allowlists paired in additive backend migrations and
+   extend the shared `buzz-search` contract. Never rely on a query-time filter
+   alone to exclude a privacy-sensitive kind.
 
 7. **Audit** — the audit log captures all events automatically; no changes
    needed unless you need custom audit metadata.

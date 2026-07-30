@@ -1232,6 +1232,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "uuid",

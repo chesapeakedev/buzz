@@ -80,7 +80,7 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
     ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
     ├── buzz-auth        (NIP-42, NIP-98, API tokens, scopes, rate limiting)
     ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
-    ├── buzz-search      (Postgres FTS: query, delete)
+    ├── buzz-search      (PostgreSQL/SQLite FTS query adapters)
     ├── buzz-audit       (hash-chain tamper-evident log)
     └── buzz-workflow    (YAML-as-code automation engine)
          │
@@ -461,32 +461,32 @@ EXPIRE buzz:typing:{channel_id} 60
 
 ---
 
-### buzz-search — Postgres FTS Integration
+### buzz-search — Backend-specific FTS Integration
 
-Full-text search via Postgres FTS. Events are searchable through the
-`events.search_tsv` generated `tsvector` column (populated on insert, indexed
-by a GIN index) — there is no separate search service or out-of-band indexer.
-Privacy-sensitive kinds are excluded at the storage level (the `search_tsv`
-`CASE WHEN kind IN (...)` yields `NULL`, which never matches `@@`). In
-multi-community mode every query filter includes `community_id`, so the shared
-`events` table is infrastructure, not a cross-community result space; the relay
-re-authorizes every candidate hit before returning it.
+PostgreSQL searches the `events.search_tsv` generated `tsvector` column through
+a GIN index. SQLite searches an external-content FTS5 table maintained by
+triggers in the event write transaction. Neither adapter needs a separate
+service or out-of-band indexer. Fresh installations share a positive searchable
+kind allowlist, keeping encrypted, private, and control kinds out of both
+storage-level indexes. In multi-community mode every query includes
+`community_id`; the relay re-authorizes every candidate hit before returning it.
 
 **Key behaviors:**
-- `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
-  parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s).
+- `SearchService::new(pool)` selects PostgreSQL while
+  `SearchService::new_sqlite(pool)` selects SQLite; `search(&SearchQuery)`
+  dispatches to parameterized backend SQL and returns candidate `SearchHit`s.
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
-- Every query carries `community_id`; the FTS predicate is BitmapAnd-ed with
-  the community-leading btree filters so a query never crosses tenants.
+- Every query carries `community_id`, so a query never crosses tenants.
+- Word, phrase, prefix, channel, kind, author, time, tombstone, and pagination
+  behavior is shared. Tokenization and rank ordering may differ by backend.
 - Permission filtering is **caller's responsibility** — `buzz-search` returns
   candidate hits; the relay re-authorizes each one (channel membership, `#p`,
   owner gates) before delivering it.
 
 **Does NOT:** enforce channel membership or access control. Does NOT write
-events (indexing is the `search_tsv` generated column on the `events` insert).
+events (index maintenance is part of the database event mutation).
 
 ---
 
@@ -800,16 +800,14 @@ Docker Compose provides the full local development stack. All services include h
 | `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
 | `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
-### Full-Text Search (Postgres FTS)
+### Full-Text Search
 
-Search runs over the `events.search_tsv` generated `tsvector` column on the
-`events` table (no separate collection or service). The column is populated on
-insert — `to_tsvector('simple', content)` — and excludes privacy-sensitive
-kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
-storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
-(`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
-community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`.
+PostgreSQL uses the `events.search_tsv` generated `tsvector` column and a GIN
+index. SQLite uses an external-content FTS5 table updated by transactional
+triggers. Fresh schemas index only the public searchable-kind allowlist, so
+private or encrypted rows remain storage-level unsearchable. Both query paths
+bind `community_id` before applying FTS and optional channel, kind, author,
+time, tombstone, and pagination filters.
 
 ---
 
