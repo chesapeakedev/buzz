@@ -2093,6 +2093,11 @@ impl Db {
         agent_pubkey: &[u8],
         owner_pubkey: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_agent_owner(community_id, agent_pubkey, owner_pubkey)
+                .await;
+        }
         user::set_agent_owner(
             &self.postgres().pool,
             community_id,
@@ -2108,6 +2113,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_agent_channel_policy(community_id, pubkey).await;
+        }
         user::get_agent_channel_policy(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -2118,6 +2126,11 @@ impl Db {
         target_pubkey: &[u8],
         actor_pubkey: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .is_agent_owner(community_id, target_pubkey, actor_pubkey)
+                .await;
+        }
         user::is_agent_owner(
             &self.postgres().pool,
             community_id,
@@ -2134,6 +2147,11 @@ impl Db {
         pubkey: &[u8],
         policy: &str,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_channel_add_policy(community_id, pubkey, policy)
+                .await;
+        }
         user::set_channel_add_policy(&self.postgres().pool, community_id, pubkey, policy).await
     }
 
@@ -2328,6 +2346,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_hidden_dms(community_id, pubkey).await;
+        }
         dm::list_hidden_dms(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -3069,6 +3090,9 @@ impl Db {
         community_id: CommunityId,
         id: Uuid,
     ) -> Result<workflow::WorkflowRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_workflow(community_id, id).await;
+        }
         workflow::get_workflow(&self.postgres().pool, community_id, id).await
     }
 
@@ -3080,6 +3104,11 @@ impl Db {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<workflow::WorkflowRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_channel_workflows(community_id, channel_id, limit, offset)
+                .await;
+        }
         workflow::list_channel_workflows(
             &self.postgres().pool,
             community_id,
@@ -3096,6 +3125,11 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<workflow::WorkflowRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_enabled_channel_workflows(community_id, channel_id)
+                .await;
+        }
         workflow::list_enabled_channel_workflows(&self.postgres().pool, community_id, channel_id)
             .await
     }
@@ -3317,6 +3351,9 @@ impl Db {
         community_id: CommunityId,
         id: Uuid,
     ) -> Result<workflow::WorkflowRunRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_workflow_run(community_id, id).await;
+        }
         workflow::get_workflow_run(&self.postgres().pool, community_id, id).await
     }
 
@@ -3327,6 +3364,11 @@ impl Db {
         workflow_id: Uuid,
         limit: i64,
     ) -> Result<Vec<workflow::WorkflowRunRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_workflow_runs(community_id, workflow_id, limit)
+                .await;
+        }
         workflow::list_workflow_runs(&self.postgres().pool, community_id, workflow_id, limit).await
     }
 
@@ -4064,6 +4106,9 @@ impl Db {
 
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
     pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_archived(community_id, pubkey).await;
+        }
         archived_identities::is_archived(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -4079,6 +4124,19 @@ impl Db {
         replaced_by: Option<&str>,
         request_event_id: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .archive(
+                    community_id,
+                    pubkey,
+                    consent_path,
+                    actor,
+                    reason,
+                    replaced_by,
+                    request_event_id,
+                )
+                .await;
+        }
         archived_identities::archive(
             &self.postgres().pool,
             community_id,
@@ -4094,6 +4152,9 @@ impl Db {
 
     /// Unarchives an identity from `community_id`. Returns `true` if deleted, `false` if absent.
     pub async fn unarchive(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unarchive(community_id, pubkey).await;
+        }
         archived_identities::unarchive(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -4102,6 +4163,9 @@ impl Db {
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<archived_identities::ArchivedIdentity>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_archived(community_id).await;
+        }
         archived_identities::list_archived(&self.postgres().pool, community_id).await
     }
 
