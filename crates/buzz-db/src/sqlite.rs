@@ -49,6 +49,8 @@ mod contracts_reminders;
 #[cfg(test)]
 mod contracts_threads;
 #[cfg(test)]
+mod contracts_usage;
+#[cfg(test)]
 mod contracts_workflow_coordination;
 #[cfg(test)]
 mod contracts_workflows;
@@ -62,6 +64,7 @@ mod product_feedback;
 mod push;
 mod reactions;
 mod threads;
+mod usage;
 mod users;
 mod workflows;
 
