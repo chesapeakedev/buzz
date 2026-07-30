@@ -22,6 +22,8 @@ pub mod cache_invalidation;
 pub mod conn_control;
 /// Backend-neutral relay coordination interface.
 pub mod coordination;
+/// SQLite-backed durable replay and fixed-window security adapters.
+pub mod embedded_security;
 pub use coordination::Coordination;
 /// Error types for pub/sub operations.
 pub mod error;
@@ -30,13 +32,17 @@ pub mod local;
 pub use local::{LocalCoordination, LocalCoordinationConfig};
 /// Redis-backed NIP-98 replay seen-set.
 pub mod nip98_replay;
+pub use embedded_security::SqliteSecurityStore;
 pub use nip98_replay::RedisNip98ReplayGuard;
+
 /// Online/offline presence tracking in Redis.
 pub mod presence;
 /// Redis PUBLISH for channel event fan-out.
 pub mod publisher;
 /// Redis-backed rate limiter (fixed-window INCR + EXPIRE).
 pub mod rate_limiter;
+#[cfg(test)]
+mod security_contracts;
 /// Redis SUBSCRIBE for channel event delivery.
 pub mod subscriber;
 /// Community-scoped Redis event topics.
