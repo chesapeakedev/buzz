@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use buzz_core::TenantContext;
+use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::Mutex;
@@ -13,7 +13,9 @@ use tokio_util::io::ReaderStream;
 
 use crate::bucket_index::Page;
 use crate::error::MediaError;
-use crate::storage::{ctx_sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, ByteStream};
+use crate::storage::{
+    ctx_sidecar_key, BlobHeadMeta, BlobMeta, BlobMetadata, BlobStorage, ByteStream,
+};
 
 const TEMP_PREFIX: &str = ".buzz-tmp-";
 const MAX_LIST_PAGE: usize = 10_000;
@@ -32,17 +34,30 @@ pub struct FilesystemBlobConfig {
 /// All mutations share one writer gate. Embedded mode is single-process, so
 /// this gate makes quota checks, atomic replacement, cleanup, and accounting
 /// one coherent boundary.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FilesystemBlobStorage {
     root: Arc<PathBuf>,
     writer: Arc<Mutex<()>>,
     usage_bytes: Arc<AtomicU64>,
     quota_bytes: Option<u64>,
+    metadata: Option<Arc<dyn BlobMetadata>>,
 }
 
 impl FilesystemBlobStorage {
     /// Open or create a filesystem store and recover abandoned temporary files.
     pub async fn open(config: FilesystemBlobConfig) -> Result<Self, MediaError> {
+        Self::open_with_metadata(config, None).await
+    }
+
+    /// Open a filesystem store using an external metadata publication gate.
+    ///
+    /// Embedded mode supplies the SQLite `media_objects` adapter here. The
+    /// legacy constructor remains useful for storage-only tests and callers
+    /// that intentionally use filesystem sidecars.
+    pub async fn open_with_metadata(
+        config: FilesystemBlobConfig,
+        metadata: Option<Arc<dyn BlobMetadata>>,
+    ) -> Result<Self, MediaError> {
         if matches!(config.quota_bytes, Some(0)) {
             return Err(storage_error("filesystem quota must be positive"));
         }
@@ -72,6 +87,7 @@ impl FilesystemBlobStorage {
             writer: Arc::new(Mutex::new(())),
             usage_bytes: Arc::new(AtomicU64::new(usage)),
             quota_bytes: config.quota_bytes,
+            metadata,
         })
     }
 
@@ -317,6 +333,12 @@ impl BlobStorage for FilesystemBlobStorage {
     }
 
     async fn head(&self, key: &str) -> Result<bool, MediaError> {
+        if let Some((ctx, sha256)) = metadata_key(key) {
+            let Some(metadata) = &self.metadata else {
+                return Ok(false);
+            };
+            return Ok(metadata.get_metadata(&ctx, &sha256).await?.is_some());
+        }
         match self.read_path(key).await {
             Ok(_) => Ok(true),
             Err(MediaError::NotFound) => Ok(false),
@@ -357,6 +379,12 @@ impl BlobStorage for FilesystemBlobStorage {
     }
 
     async fn get_sidecar(&self, ctx: &TenantContext, sha256: &str) -> Result<BlobMeta, MediaError> {
+        if let Some(metadata) = &self.metadata {
+            return metadata
+                .get_metadata(ctx, sha256)
+                .await?
+                .ok_or(MediaError::NotFound);
+        }
         let key = ctx_sidecar_key(ctx, sha256);
         serde_json::from_slice(&self.get(&key).await?)
             .map_err(|_| storage_error("invalid filesystem sidecar"))
@@ -368,12 +396,18 @@ impl BlobStorage for FilesystemBlobStorage {
         sha256: &str,
         meta: &BlobMeta,
     ) -> Result<(), MediaError> {
+        if let Some(metadata) = &self.metadata {
+            return metadata.put_metadata(ctx, sha256, meta).await;
+        }
         let key = ctx_sidecar_key(ctx, sha256);
         let bytes = serde_json::to_vec(meta).map_err(|_| storage_error("cannot encode sidecar"))?;
         self.put(&key, &bytes, "application/json").await
     }
 
     async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        if let Some(metadata) = &self.metadata {
+            return metadata.read_mime(ctx, sha256_ext).await;
+        }
         let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
         self.get_sidecar(ctx, sha256)
             .await
@@ -392,6 +426,64 @@ impl BlobStorage for FilesystemBlobStorage {
             ));
         }
         scan_objects_page(self.root.as_ref().clone(), continuation_token, max_keys).await
+    }
+}
+
+fn metadata_key(key: &str) -> Option<(TenantContext, String)> {
+    let mut components = key.split('/');
+    if components.next()? != "_meta" {
+        return None;
+    }
+    let community = uuid::Uuid::parse_str(components.next()?).ok()?;
+    let digest = components.next()?.strip_suffix(".json")?;
+    if components.next().is_some() || digest.is_empty() {
+        return None;
+    }
+    Some((
+        TenantContext::resolved(CommunityId::from_uuid(community), "filesystem"),
+        digest.to_string(),
+    ))
+}
+
+/// Embedded filesystem adapter for the backend-neutral metadata interface.
+///
+/// Blob bytes remain on the filesystem; metadata operations are delegated to
+/// the configured SQLite publication gate.
+#[async_trait::async_trait]
+impl BlobMetadata for FilesystemBlobStorage {
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError> {
+        match &self.metadata {
+            Some(metadata) => metadata.get_metadata(ctx, sha256).await,
+            None => match self.get_sidecar(ctx, sha256).await {
+                Ok(meta) => Ok(Some(meta)),
+                Err(MediaError::NotFound) => Ok(None),
+                Err(error) => Err(error),
+            },
+        }
+    }
+
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        self.put_sidecar(ctx, sha256, meta).await
+    }
+
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        self.read_sidecar_mime(ctx, sha256_ext).await
+    }
+
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError> {
+        if let Some(metadata) = &self.metadata {
+            return metadata.delete_metadata(ctx, sha256).await;
+        }
+        self.delete(&ctx_sidecar_key(ctx, sha256)).await
     }
 }
 

@@ -489,10 +489,20 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid media config: {e}"))?;
     let sqlite_store = db.sqlite_store();
     let backends: SelectedBackends = if let Some(layout) = embedded_layout.as_ref() {
-        let media = buzz_media::FilesystemBlobStorage::open(buzz_media::FilesystemBlobConfig {
-            root: layout.media_objects.clone(),
-            quota_bytes: None,
-        })
+        let store = sqlite_store
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("embedded profile did not create SQLite resources"))?;
+        let metadata = Arc::new(buzz_db::SqliteBlobMetadata::new(
+            store.adapter_pool(),
+            store.adapter_writer_gate(),
+        ));
+        let media = buzz_media::FilesystemBlobStorage::open_with_metadata(
+            buzz_media::FilesystemBlobConfig {
+                root: layout.media_objects.clone(),
+                quota_bytes: None,
+            },
+            Some(metadata),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("failed to initialize filesystem media storage: {e}"))?;
         let git: Arc<dyn buzz_relay::api::git::store::GitStorage> = if config.git_enabled {
@@ -510,9 +520,6 @@ async fn main() -> anyhow::Result<()> {
             info!("Embedded Git hosting disabled (set BUZZ_GIT_ENABLED=true to opt in)");
             Arc::new(buzz_relay::api::git::store::DisabledGitStorage)
         };
-        let store = sqlite_store
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("embedded profile did not create SQLite resources"))?;
         let security = buzz_pubsub::SqliteSecurityStore::new(store);
         info!(
             git_enabled = config.git_enabled,
