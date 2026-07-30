@@ -1641,6 +1641,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_canvas(community_id, channel_id).await;
+        }
         channel::get_canvas(&self.postgres().pool, community_id, channel_id).await
     }
 
@@ -1651,6 +1654,9 @@ impl Db {
         channel_id: Uuid,
         canvas: Option<&str>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.set_canvas(community_id, channel_id, canvas).await;
+        }
         channel::set_canvas(&self.postgres().pool, community_id, channel_id, canvas).await
     }
 
@@ -1723,6 +1729,11 @@ impl Db {
         channel_ids: &[Uuid],
         pubkeys: &[Vec<u8>],
     ) -> Result<Vec<(Uuid, Vec<u8>)>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .membership_pairs(community_id, channel_ids, pubkeys)
+                .await;
+        }
         channel::membership_pairs(&self.postgres().pool, community_id, channel_ids, pubkeys).await
     }
 
@@ -1744,6 +1755,9 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<Vec<channel::MemberRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_members_bulk(community_id, channel_ids).await;
+        }
         channel::get_members_bulk(&self.postgres().pool, community_id, channel_ids).await
     }
 
@@ -1753,6 +1767,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_accessible_channel_ids(community_id, pubkey).await;
+        }
         channel::get_accessible_channel_ids(&self.postgres().pool, community_id, pubkey).await
     }
 
