@@ -1,13 +1,14 @@
 //! SQLite NIP-PL effective lease and matcher persistence.
 
 use chrono::Utc;
-use sqlx::Row as _;
+use sqlx::{QueryBuilder, Row as _};
 
 use buzz_core::CommunityId;
 
 use super::SqliteStore;
 use crate::push::{
-    ActiveLease, LeaseVersion, MatchLease, ReplaceLeaseOutcome, PUSH_GATE_BACKFILL_SECS,
+    ActiveLease, BatchedMatch, ClaimedMatchBatch, LeaseVersion, MatchLease, ReplaceLeaseOutcome,
+    MAX_MATCH_ATTEMPTS, PUSH_GATE_BACKFILL_SECS,
 };
 use crate::Result;
 
@@ -190,5 +191,164 @@ impl SqliteStore {
                 })
             })
             .collect()
+    }
+
+    /// Claim a due matcher batch from exactly one community.
+    pub async fn claim_due_push_match_batch(
+        &self,
+        limit: i64,
+        lease_until: chrono::DateTime<Utc>,
+    ) -> Result<Option<ClaimedMatchBatch>> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let now = Utc::now().timestamp_micros();
+        let claim_id = uuid::Uuid::new_v4();
+        let rows = sqlx::query(
+            "UPDATE push_match_queue SET \
+                state = 'matching', claim_id = ?, lease_until = ?, \
+                attempts = attempts + 1 \
+             WHERE rowid IN ( \
+                SELECT q.rowid FROM push_match_queue q \
+                WHERE q.community_id = ( \
+                    SELECT community_id FROM push_match_queue \
+                    WHERE attempts < ? AND next_attempt_at <= ? \
+                      AND (state = 'pending' OR ( \
+                          state = 'matching' AND lease_until < ? \
+                      )) \
+                    ORDER BY next_attempt_at, created_at LIMIT 1 \
+                ) \
+                  AND q.attempts < ? AND q.next_attempt_at <= ? \
+                  AND (q.state = 'pending' OR ( \
+                      q.state = 'matching' AND q.lease_until < ? \
+                  )) \
+                ORDER BY q.next_attempt_at, q.created_at LIMIT ? \
+             ) \
+             RETURNING community_id, event_id, attempts",
+        )
+        .bind(claim_id.to_string())
+        .bind(lease_until.timestamp_micros())
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(now)
+        .bind(now)
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(now)
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        drop(_writer);
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let community: String = rows[0].try_get("community_id")?;
+        let community = uuid::Uuid::parse_str(&community).map_err(|error| {
+            crate::DbError::InvalidData(format!("invalid match community UUID: {error}"))
+        })?;
+        let community = CommunityId::from_uuid(community);
+        let mut attempts = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            attempts.insert(
+                row.try_get::<Vec<u8>, _>("event_id")?,
+                row.try_get::<i32, _>("attempts")?,
+            );
+        }
+        let ids: Vec<&[u8]> = attempts.keys().map(Vec::as_slice).collect();
+        let events = self.get_events_by_ids(community, &ids).await?;
+        let mut jobs = Vec::with_capacity(events.len());
+        for event in events {
+            let attempt = attempts
+                .remove(event.event.id.as_bytes().as_slice())
+                .unwrap_or(1);
+            jobs.push(BatchedMatch { event, attempt });
+        }
+        let gone: Vec<Vec<u8>> = attempts.into_keys().collect();
+        if !gone.is_empty() {
+            self.complete_push_match_batch(community, claim_id, &gone)
+                .await?;
+        }
+        if jobs.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ClaimedMatchBatch {
+            community,
+            claim_id,
+            jobs,
+        }))
+    }
+
+    /// Complete fenced matcher jobs in one set-wise delete.
+    pub async fn complete_push_match_batch(
+        &self,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
+    ) -> Result<u64> {
+        if event_ids.is_empty() {
+            return Ok(0);
+        }
+        let _writer = self.acquire_writer().await;
+        let mut builder: QueryBuilder<sqlx::Sqlite> =
+            QueryBuilder::new("DELETE FROM push_match_queue WHERE community_id = ");
+        builder
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND claim_id = ")
+            .push_bind(claim_id.to_string())
+            .push(" AND state = 'matching' AND event_id IN (");
+        let mut separated = builder.separated(", ");
+        for event_id in event_ids {
+            separated.push_bind(event_id);
+        }
+        builder.push(")");
+        Ok(builder.build().execute(&self.pool).await?.rows_affected())
+    }
+
+    /// Release fenced matcher jobs for retry in one set-wise update.
+    pub async fn retry_push_match_batch(
+        &self,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
+        next: chrono::DateTime<Utc>,
+    ) -> Result<u64> {
+        if event_ids.is_empty() {
+            return Ok(0);
+        }
+        let _writer = self.acquire_writer().await;
+        let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+            "UPDATE push_match_queue SET state = 'pending', claim_id = NULL, \
+             lease_until = NULL, next_attempt_at = ",
+        );
+        builder
+            .push_bind(next.timestamp_micros())
+            .push(" WHERE community_id = ")
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND claim_id = ")
+            .push_bind(claim_id.to_string())
+            .push(" AND state = 'matching' AND event_id IN (");
+        let mut separated = builder.separated(", ");
+        for event_id in event_ids {
+            separated.push_bind(event_id);
+        }
+        builder.push(")");
+        Ok(builder.build().execute(&self.pool).await?.rows_affected())
+    }
+
+    /// Delete matcher jobs whose retry budget is exhausted.
+    pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        Ok(sqlx::query(
+            "DELETE FROM push_match_queue WHERE attempts >= ? \
+             AND (state = 'pending' OR (state = 'matching' AND lease_until < ?))",
+        )
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 }
