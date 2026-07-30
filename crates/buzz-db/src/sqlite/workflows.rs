@@ -8,8 +8,9 @@ use buzz_core::CommunityId;
 
 use super::SqliteStore;
 use crate::workflow::{
-    RunStatus, WorkflowRecord, WorkflowRunRecord, WorkflowStatus, LIST_DEFAULT_LIMIT,
-    LIST_MAX_LIMIT,
+    hash_approval_token, ApprovalRecord, ApprovalStatus, CreateApprovalParams, RunStatus,
+    ScheduledWorkflowFireClaim, WorkflowRecord, WorkflowRunRecord, WorkflowStatus,
+    LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT,
 };
 use crate::{DbError, Result};
 
@@ -21,6 +22,8 @@ const QUALIFIED_WORKFLOW_COLUMNS: &str = "w.id, w.community_id, w.name, \
 const RUN_COLUMNS: &str = "community_id, id, workflow_id, status, trigger_event_id, \
     current_step, execution_trace, trigger_context, started_at, completed_at, \
     error_message, created_at";
+const APPROVAL_COLUMNS: &str = "token, workflow_id, run_id, step_id, step_index, \
+    approver_spec, status, approver_pubkey, note, expires_at, created_at";
 
 fn parse_uuid(value: String, column: &str) -> Result<Uuid> {
     Uuid::parse_str(&value)
@@ -79,6 +82,22 @@ fn row_to_run(row: SqliteRow) -> Result<WorkflowRunRecord> {
         started_at: parse_optional_timestamp(row.try_get("started_at")?, "started_at")?,
         completed_at: parse_optional_timestamp(row.try_get("completed_at")?, "completed_at")?,
         error_message: row.try_get("error_message")?,
+        created_at: parse_timestamp(row.try_get("created_at")?, "created_at")?,
+    })
+}
+
+fn row_to_approval(row: SqliteRow) -> Result<ApprovalRecord> {
+    Ok(ApprovalRecord {
+        token: row.try_get("token")?,
+        workflow_id: parse_uuid(row.try_get("workflow_id")?, "workflow")?,
+        run_id: parse_uuid(row.try_get("run_id")?, "workflow run")?,
+        step_id: row.try_get("step_id")?,
+        step_index: row.try_get("step_index")?,
+        approver_spec: row.try_get("approver_spec")?,
+        status: row.try_get::<String, _>("status")?.parse()?,
+        approver_pubkey: row.try_get("approver_pubkey")?,
+        note: row.try_get("note")?,
+        expires_at: parse_timestamp(row.try_get("expires_at")?, "expires_at")?,
         created_at: parse_timestamp(row.try_get("created_at")?, "created_at")?,
     })
 }
@@ -505,5 +524,220 @@ impl SqliteStore {
             return Err(DbError::NotFound(format!("workflow_run {id}")));
         }
         Ok(())
+    }
+
+    /// Create a pending approval while storing only its SHA-256 token hash.
+    pub async fn create_approval(&self, params: CreateApprovalParams<'_>) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let token_hash = hash_approval_token(params.token);
+        sqlx::query(
+            "INSERT INTO workflow_approvals ( \
+                community_id, token, workflow_id, run_id, step_id, step_index, \
+                approver_spec, status, expires_at, created_at \
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        )
+        .bind(params.community_id.as_uuid().to_string())
+        .bind(token_hash)
+        .bind(params.workflow_id.to_string())
+        .bind(params.run_id.to_string())
+        .bind(params.step_id)
+        .bind(params.step_index)
+        .bind(params.approver_spec)
+        .bind(params.expires_at.timestamp_micros())
+        .bind(Utc::now().timestamp_micros())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch an approval by raw token inside one community.
+    pub async fn get_approval(
+        &self,
+        community: CommunityId,
+        token: &str,
+    ) -> Result<ApprovalRecord> {
+        self.get_approval_by_stored_hash(community, &hash_approval_token(token))
+            .await
+    }
+
+    /// Fetch an approval by its stored token hash inside one community.
+    pub async fn get_approval_by_stored_hash(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8],
+    ) -> Result<ApprovalRecord> {
+        let sql = format!(
+            "SELECT {APPROVAL_COLUMNS} FROM workflow_approvals \
+             WHERE community_id = ? AND token = ?"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid().to_string())
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| DbError::NotFound("approval token (hashed)".to_owned()))?;
+        row_to_approval(row)
+    }
+
+    /// List all approvals for one tenant-scoped workflow run.
+    pub async fn get_run_approvals(
+        &self,
+        community: CommunityId,
+        workflow_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<Vec<ApprovalRecord>> {
+        let sql = format!(
+            "SELECT {APPROVAL_COLUMNS} FROM workflow_approvals \
+             WHERE community_id = ? AND run_id = ? AND workflow_id = ? \
+             ORDER BY step_index, created_at"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid().to_string())
+            .bind(run_id.to_string())
+            .bind(workflow_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_approval).collect()
+    }
+
+    /// Resolve a pending approval by raw token at most once.
+    pub async fn update_approval(
+        &self,
+        community: CommunityId,
+        token: &str,
+        status: ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        self.update_approval_by_stored_hash(
+            community,
+            &hash_approval_token(token),
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Resolve a pending approval by stored token hash at most once.
+    pub async fn update_approval_by_stored_hash(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8],
+        status: ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let status = status.to_string();
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE workflow_approvals SET \
+                status = ?, approver_pubkey = ?, note = ?, \
+                granted_at = CASE WHEN ? = 'granted' THEN ? ELSE granted_at END, \
+                denied_at = CASE WHEN ? = 'denied' THEN ? ELSE denied_at END \
+             WHERE community_id = ? AND token = ? AND status = 'pending'",
+        )
+        .bind(&status)
+        .bind(approver_pubkey)
+        .bind(note)
+        .bind(&status)
+        .bind(now)
+        .bind(&status)
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Claim one authoritative scheduled workflow instant at most once.
+    pub async fn claim_scheduled_workflow_fire(
+        &self,
+        community: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: DateTime<Utc>,
+    ) -> Result<Option<ScheduledWorkflowFireClaim>> {
+        let _writer = self.acquire_writer().await;
+        let scheduled_for_micros = scheduled_for.timestamp_micros();
+        let claimed_at = Utc::now().timestamp_micros();
+        let row = sqlx::query(
+            "INSERT INTO scheduled_workflow_fires ( \
+                community_id, workflow_id, scheduled_for, claimed_at \
+             ) SELECT community_id, id, ?, ? FROM workflows \
+               WHERE community_id = ? AND id = ? \
+             ON CONFLICT (community_id, workflow_id, scheduled_for) DO NOTHING \
+             RETURNING community_id, workflow_id, scheduled_for, claimed_at",
+        )
+        .bind(scheduled_for_micros)
+        .bind(claimed_at)
+        .bind(community.as_uuid().to_string())
+        .bind(workflow_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let community = parse_uuid(row.try_get("community_id")?, "community")?;
+            Ok(ScheduledWorkflowFireClaim {
+                community_id: CommunityId::from_uuid(community),
+                workflow_id: parse_uuid(row.try_get("workflow_id")?, "workflow")?,
+                scheduled_for: parse_timestamp(row.try_get("scheduled_for")?, "scheduled_for")?,
+                claimed_at: parse_timestamp(row.try_get("claimed_at")?, "claimed_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Return the greatest claimed schedule instant for one workflow.
+    pub async fn latest_scheduled_workflow_fire(
+        &self,
+        community: CommunityId,
+        workflow_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let value: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(scheduled_for) FROM scheduled_workflow_fires \
+             WHERE community_id = ? AND workflow_id = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(workflow_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        parse_optional_timestamp(value, "scheduled_for")
+    }
+
+    /// Attach a won schedule claim to its run exactly once.
+    pub async fn attach_scheduled_workflow_run(
+        &self,
+        community: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: DateTime<Utc>,
+        run_id: Uuid,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE scheduled_workflow_fires SET workflow_run_id = ? \
+             WHERE community_id = ? AND workflow_id = ? AND scheduled_for = ? \
+               AND workflow_run_id IS NULL",
+        )
+        .bind(run_id.to_string())
+        .bind(community.as_uuid().to_string())
+        .bind(workflow_id.to_string())
+        .bind(scheduled_for.timestamp_micros())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Delete schedule claims older than a claimed-at retention cutoff.
+    pub async fn prune_scheduled_workflow_fires_before(
+        &self,
+        older_than: DateTime<Utc>,
+    ) -> Result<u64> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query("DELETE FROM scheduled_workflow_fires WHERE claimed_at < ?")
+            .bind(older_than.timestamp_micros())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
