@@ -10,6 +10,7 @@ description = "Distributed and single-process relay coordination for Buzz"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
+buzz-db = { workspace = true }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
 tokio = { workspace = true }
@@ -26,3 +27,4 @@ moka = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"
