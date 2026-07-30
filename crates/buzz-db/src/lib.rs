@@ -3015,7 +3015,18 @@ impl Db {
         agent_pubkey: &[u8],
         owner_pubkey: &[u8],
     ) -> Result<bool> {
-        user::set_agent_owner(&self.pool, community_id, agent_pubkey, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_agent_owner(community_id, agent_pubkey, owner_pubkey)
+                .await;
+        }
+        user::set_agent_owner(
+            &self.postgres().pool,
+            community_id,
+            agent_pubkey,
+            owner_pubkey,
+        )
+        .await
     }
 
     /// Get the channel_add_policy and agent_owner_pubkey for a user.
@@ -3025,7 +3036,10 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
-        user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_agent_channel_policy(community_id, pubkey).await;
+        }
+        user::get_agent_channel_policy(&self.postgres().pool, community_id, pubkey).await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.
@@ -3036,7 +3050,18 @@ impl Db {
         target_pubkey: &[u8],
         actor_pubkey: &[u8],
     ) -> Result<bool> {
-        user::is_agent_owner(&self.pool, community_id, target_pubkey, actor_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .is_agent_owner(community_id, target_pubkey, actor_pubkey)
+                .await;
+        }
+        user::is_agent_owner(
+            &self.postgres().pool,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
     }
 
     /// Set the channel_add_policy for a user.
@@ -3047,7 +3072,12 @@ impl Db {
         pubkey: &[u8],
         policy: &str,
     ) -> Result<()> {
-        user::set_channel_add_policy(&self.pool, community_id, pubkey, policy).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_channel_add_policy(community_id, pubkey, policy)
+                .await;
+        }
+        user::set_channel_add_policy(&self.postgres().pool, community_id, pubkey, policy).await
     }
 
     /// Find an existing DM by its participant hash.
@@ -3242,7 +3272,10 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
-        dm::list_hidden_dms(&self.pool, community_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_hidden_dms(community_id, pubkey).await;
+        }
+        dm::list_hidden_dms(&self.postgres().pool, community_id, pubkey).await
     }
 
     /// Insert thread metadata.
@@ -4383,7 +4416,10 @@ impl Db {
         community_id: CommunityId,
         id: Uuid,
     ) -> Result<workflow::WorkflowRecord> {
-        workflow::get_workflow(&self.pool, community_id, id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_workflow(community_id, id).await;
+        }
+        workflow::get_workflow(&self.postgres().pool, community_id, id).await
     }
 
     /// List workflows for a channel.
@@ -4395,7 +4431,19 @@ impl Db {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<workflow::WorkflowRecord>> {
-        workflow::list_channel_workflows(&self.pool, community_id, channel_id, limit, offset).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_channel_workflows(community_id, channel_id, limit, offset)
+                .await;
+        }
+        workflow::list_channel_workflows(
+            &self.postgres().pool,
+            community_id,
+            channel_id,
+            limit,
+            offset,
+        )
+        .await
     }
 
     /// List active, enabled workflows for a channel.
@@ -4405,7 +4453,13 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<workflow::WorkflowRecord>> {
-        workflow::list_enabled_channel_workflows(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_enabled_channel_workflows(community_id, channel_id)
+                .await;
+        }
+        workflow::list_enabled_channel_workflows(&self.postgres().pool, community_id, channel_id)
+            .await
     }
 
     /// List all active, enabled schedule-triggered workflows.
@@ -4636,7 +4690,10 @@ impl Db {
         community_id: CommunityId,
         id: Uuid,
     ) -> Result<workflow::WorkflowRunRecord> {
-        workflow::get_workflow_run(&self.pool, community_id, id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_workflow_run(community_id, id).await;
+        }
+        workflow::get_workflow_run(&self.postgres().pool, community_id, id).await
     }
 
     /// List runs for a workflow.
@@ -4647,7 +4704,12 @@ impl Db {
         workflow_id: Uuid,
         limit: i64,
     ) -> Result<Vec<workflow::WorkflowRunRecord>> {
-        workflow::list_workflow_runs(&self.pool, community_id, workflow_id, limit).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_workflow_runs(community_id, workflow_id, limit)
+                .await;
+        }
+        workflow::list_workflow_runs(&self.postgres().pool, community_id, workflow_id, limit).await
     }
 
     /// List one keyset-paginated page of workflow runs.
@@ -5446,7 +5508,10 @@ impl Db {
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
     #[datastore_span(name = "is_archived", system = "postgresql")]
     pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
-        archived_identities::is_archived(&self.pool, community_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_archived(community_id, pubkey).await;
+        }
+        archived_identities::is_archived(&self.postgres().pool, community_id, pubkey).await
     }
 
     /// Archives an identity in `community_id`. Returns `true` if inserted, `false` if already archived.
@@ -5462,6 +5527,19 @@ impl Db {
         replaced_by: Option<&str>,
         request_event_id: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .archive(
+                    community_id,
+                    pubkey,
+                    consent_path,
+                    actor,
+                    reason,
+                    replaced_by,
+                    request_event_id,
+                )
+                .await;
+        }
         archived_identities::archive(
             &self.pool,
             community_id,
@@ -5478,7 +5556,10 @@ impl Db {
     /// Unarchives an identity from `community_id`. Returns `true` if deleted, `false` if absent.
     #[datastore_span(name = "unarchive", system = "postgresql")]
     pub async fn unarchive(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
-        archived_identities::unarchive(&self.pool, community_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unarchive(community_id, pubkey).await;
+        }
+        archived_identities::unarchive(&self.postgres().pool, community_id, pubkey).await
     }
 
     /// Returns all identities archived in `community_id`, ordered by archive time ascending.
@@ -5487,7 +5568,10 @@ impl Db {
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<archived_identities::ArchivedIdentity>> {
-        archived_identities::list_archived(&self.pool, community_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_archived(community_id).await;
+        }
+        archived_identities::list_archived(&self.postgres().pool, community_id).await
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
