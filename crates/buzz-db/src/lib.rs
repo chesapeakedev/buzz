@@ -1595,6 +1595,20 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<(channel::ChannelRecord, bool)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_channel_with_id(
+                    community_id,
+                    channel_id,
+                    name,
+                    channel_type,
+                    visibility,
+                    description,
+                    created_by,
+                    ttl_seconds,
+                )
+                .await;
+        }
         channel::create_channel_with_id(
             &self.postgres().pool,
             community_id,
@@ -1615,6 +1629,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<channel::ChannelRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_channel(community_id, channel_id).await;
+        }
         channel::get_channel(&self.postgres().pool, community_id, channel_id).await
     }
 
@@ -1646,6 +1663,11 @@ impl Db {
         role: channel::MemberRole,
         invited_by: Option<&[u8]>,
     ) -> Result<channel::MemberRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .add_member(community_id, channel_id, pubkey, role, invited_by)
+                .await;
+        }
         channel::add_member(
             &self.postgres().pool,
             community_id,
@@ -1665,6 +1687,11 @@ impl Db {
         pubkey: &[u8],
         actor_pubkey: &[u8],
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .remove_member(community_id, channel_id, pubkey, actor_pubkey)
+                .await;
+        }
         channel::remove_member(
             &self.postgres().pool,
             community_id,
@@ -1682,6 +1709,9 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_member(community_id, channel_id, pubkey).await;
+        }
         channel::is_member(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
@@ -1702,6 +1732,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<channel::MemberRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_members(community_id, channel_id).await;
+        }
         channel::get_members(&self.postgres().pool, community_id, channel_id).await
     }
 
@@ -1729,6 +1762,9 @@ impl Db {
         community_id: CommunityId,
         visibility: Option<&str>,
     ) -> Result<Vec<channel::ChannelRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_channels(community_id, visibility).await;
+        }
         channel::list_channels(&self.postgres().pool, community_id, visibility).await
     }
 
@@ -1938,6 +1974,9 @@ impl Db {
     /// already existed. Callers use the `true` return to increment
     /// `buzz_users_created_total`.
     pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.ensure_user(community_id, pubkey).await;
+        }
         user::ensure_user(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -1947,6 +1986,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Option<user::UserProfile>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_user(community_id, pubkey).await;
+        }
         user::get_user(&self.postgres().pool, community_id, pubkey).await
     }
 
@@ -1960,6 +2002,18 @@ impl Db {
         about: Option<&str>,
         nip05_handle: Option<&str>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_user_profile(
+                    community_id,
+                    pubkey,
+                    display_name,
+                    avatar_url,
+                    about,
+                    nip05_handle,
+                )
+                .await;
+        }
         user::update_user_profile(
             &self.postgres().pool,
             community_id,
@@ -1979,6 +2033,11 @@ impl Db {
         local_part: &str,
         domain: &str,
     ) -> Result<Option<user::UserProfile>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_user_by_nip05(community_id, local_part, domain)
+                .await;
+        }
         user::get_user_by_nip05(&self.postgres().pool, community_id, local_part, domain).await
     }
 
@@ -1989,6 +2048,9 @@ impl Db {
         query: &str,
         limit: u32,
     ) -> Result<Vec<user::UserSearchProfile>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.search_users(community_id, query, limit).await;
+        }
         user::search_users(&self.postgres().pool, community_id, query, limit).await
     }
 
