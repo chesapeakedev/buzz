@@ -10,12 +10,13 @@
 //! non-interference floor (`auditHeads[c]` in `MultiTenantRelay.tla`): an audit
 //! observation reveals only its own community's head.
 //!
-//! Writes for a given community are serialized by a **per-community** Postgres
-//! advisory lock, so the chain stays consistent across relay processes without one
-//! global lock serializing (and timing-coupling) every tenant.
+//! PostgreSQL writes use a **per-community** advisory lock, so distributed relay
+//! processes do not corrupt a chain or globally serialize unrelated tenants.
+//! SQLite writes use a process-local writer gate plus `BEGIN IMMEDIATE`, matching
+//! the embedded single-process deployment model.
 //!
-//! The `audit_log` table is owned by the consolidated `0001` migration — this crate
-//! is pure chain logic and ships no DDL.
+//! The `audit_log` tables are owned by the PostgreSQL and SQLite migration
+//! streams; this crate is pure chain logic and ships no DDL.
 
 /// Audit action types recorded in the log.
 pub mod action;
