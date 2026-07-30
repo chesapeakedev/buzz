@@ -35,6 +35,8 @@ mod contracts_moderation;
 #[cfg(test)]
 mod contracts_reactions;
 #[cfg(test)]
+mod contracts_reminders;
+#[cfg(test)]
 mod contracts_threads;
 #[cfg(test)]
 mod contracts_workflow_coordination;
