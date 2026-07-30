@@ -37,7 +37,7 @@ async fn acquire_push_gate_lock(
 /// when a lease activates, so a user who registers moments after a message
 /// still gets woken. Product coverage only — the advisory-lock total order is
 /// what makes the gate correct; see `PUSH_GATE_LOCK_NAMESPACE`.
-const PUSH_GATE_BACKFILL_SECS: i64 = 120;
+pub(crate) const PUSH_GATE_BACKFILL_SECS: i64 = 120;
 
 /// Enqueue match jobs for recent gate-skipped events. MUST run inside the same
 /// transaction that holds the exclusive push-gate lock: after this commit,
