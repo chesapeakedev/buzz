@@ -14,7 +14,7 @@ use crate::error::Result;
 /// Maximum rows accepted by one admin query.
 pub const MAX_PAGE_SIZE: i64 = 200;
 
-fn bounded_limit(limit: i64) -> i64 {
+pub(crate) fn bounded_limit(limit: i64) -> i64 {
     limit.clamp(1, MAX_PAGE_SIZE)
 }
 
