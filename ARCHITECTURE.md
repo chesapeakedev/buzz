@@ -473,11 +473,19 @@ than S3 client types:
   derived pack indexes, verified reads, pointer snapshots, and conditional
   pointer swaps.
 
-`MediaStorage` and `GitStore` are the current S3-compatible implementations.
-Distributed startup still constructs those adapters and runs the Git
-conditional-write conformance probe before readiness. The interfaces preserve
-community sidecars as the media read gate and classify a losing Git pointer
-precondition as `CasOutcome::LostRace`, not a backend failure.
+`MediaStorage` and `GitStore` are the distributed S3-compatible
+implementations. `FilesystemBlobStorage` implements the media side for
+single-node deployments but is not selected until embedded runtime
+configuration is enabled. It confines validated keys beneath one canonical
+root, publishes owner-only files through same-directory flush-and-rename,
+fsyncs parent directories on Unix, enforces a serialized physical-byte quota,
+and removes abandoned temporary files during recovery.
+
+Distributed startup still constructs the S3 adapters and runs the Git
+conditional-write conformance probe before readiness. Both media adapters run
+the same behavior contract. The interfaces preserve community sidecars as the
+media read gate and classify a losing Git pointer precondition as
+`CasOutcome::LostRace`, not a backend failure.
 
 ---
 
