@@ -20,3 +20,7 @@ thiserror   = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
 futures-util = { workspace = true }
+
+[dev-dependencies]
+buzz-db  = { workspace = true }
+tempfile = "3"

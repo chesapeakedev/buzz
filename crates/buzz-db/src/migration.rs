@@ -27,7 +27,10 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
 }
 
 /// Run all pending fresh-install SQLite migrations.
-pub(crate) async fn run_sqlite_migrations(pool: &SqlitePool) -> Result<()> {
+///
+/// Backend adapters outside `buzz-db` use this during integration tests to
+/// exercise the exact production schema rather than a duplicated fixture.
+pub async fn run_sqlite_migrations(pool: &SqlitePool) -> Result<()> {
     SQLITE_MIGRATOR.run(pool).await?;
     Ok(())
 }

@@ -119,6 +119,19 @@ impl SqliteStore {
         &self.pool
     }
 
+    /// Clone the configured pool for a backend adapter sharing this database.
+    ///
+    /// This is an adapter-construction seam, not a general query escape hatch;
+    /// relay handlers continue to use domain operations.
+    pub fn adapter_pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
+    /// Clone the single writer gate for another SQLite backend adapter.
+    pub fn adapter_writer_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.writer)
+    }
+
     /// Acquire the process-local gate that serializes SQLite mutations.
     pub async fn acquire_writer(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.writer).lock_owned().await
@@ -201,7 +214,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 9);
+        assert_eq!(applied, 10);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -212,7 +225,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 9);
+        assert_eq!(row.len(), 10);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -222,6 +235,7 @@ mod tests {
         assert_eq!(row[6].get::<i64, _>("version"), 7);
         assert_eq!(row[7].get::<i64, _>("version"), 8);
         assert_eq!(row[8].get::<i64, _>("version"), 9);
+        assert_eq!(row[9].get::<i64, _>("version"), 10);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -279,6 +293,7 @@ mod tests {
         let expected = BTreeSet::from([
             "api_tokens".to_owned(),
             "archived_identities".to_owned(),
+            "audit_log".to_owned(),
             "channel_members".to_owned(),
             "channels".to_owned(),
             "community_bans".to_owned(),
