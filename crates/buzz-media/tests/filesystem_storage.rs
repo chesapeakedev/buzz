@@ -1,4 +1,9 @@
-use buzz_media::{BlobStorage, FilesystemBlobConfig, FilesystemBlobStorage, MediaError};
+use buzz_core::{CommunityId, TenantContext};
+use buzz_media::{
+    BlobMeta, BlobMetadata, BlobStorage, FilesystemBlobConfig, FilesystemBlobStorage, MediaError,
+};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 mod support;
 
@@ -9,6 +14,101 @@ async fn open(root: &std::path::Path, quota_bytes: Option<u64>) -> FilesystemBlo
     })
     .await
     .expect("filesystem blob store")
+}
+
+#[derive(Default)]
+struct MetadataGate {
+    rows: Mutex<HashMap<(CommunityId, String), BlobMeta>>,
+}
+
+#[async_trait::async_trait]
+impl BlobMetadata for MetadataGate {
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("metadata lock")
+            .get(&(ctx.community(), sha256.to_string()))
+            .cloned())
+    }
+
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        self.rows
+            .lock()
+            .expect("metadata lock")
+            .insert((ctx.community(), sha256.to_string()), meta.clone());
+        Ok(())
+    }
+
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
+        self.get_metadata(ctx, sha256)
+            .await
+            .ok()
+            .flatten()
+            .map(|meta| meta.mime_type)
+    }
+
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError> {
+        self.rows
+            .lock()
+            .expect("metadata lock")
+            .remove(&(ctx.community(), sha256.to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn configured_metadata_gate_replaces_filesystem_sidecars() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path().join("objects");
+    let gate = Arc::new(MetadataGate::default());
+    let storage = FilesystemBlobStorage::open_with_metadata(
+        FilesystemBlobConfig {
+            root: root.clone(),
+            quota_bytes: None,
+        },
+        Some(gate.clone()),
+    )
+    .await
+    .expect("filesystem blob store");
+    let tenant = TenantContext::resolved(CommunityId::from_uuid(uuid::Uuid::new_v4()), "media");
+    let sha256 = "a".repeat(64);
+    let meta = BlobMeta {
+        mime_type: "image/png".to_string(),
+        ext: "png".to_string(),
+        size: 1,
+        ..BlobMeta::default()
+    };
+
+    storage
+        .put_sidecar(&tenant, &sha256, &meta)
+        .await
+        .expect("metadata publication");
+    assert!(storage
+        .head(&buzz_media::ctx_sidecar_key(&tenant, &sha256))
+        .await
+        .expect("metadata head"));
+    assert_eq!(
+        storage
+            .read_sidecar_mime(&tenant, &format!("{sha256}.png"))
+            .await
+            .as_deref(),
+        Some("image/png")
+    );
+    assert!(!root
+        .join(buzz_media::ctx_sidecar_key(&tenant, &sha256))
+        .exists());
+    assert_eq!(gate.rows.lock().expect("metadata lock").len(), 1);
 }
 
 #[tokio::test]
