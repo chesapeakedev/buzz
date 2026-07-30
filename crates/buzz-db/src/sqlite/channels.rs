@@ -81,6 +81,36 @@ async fn active_role(
 }
 
 impl SqliteStore {
+    /// Return the owning community for each live channel in a batch.
+    pub async fn communities_of_channels(
+        &self,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, community_id FROM channels WHERE deleted_at IS NULL AND id IN (",
+        );
+        let mut separated = query.separated(", ");
+        for channel_id in channel_ids {
+            separated.push_bind(channel_id.to_string());
+        }
+        query.push(")");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut result = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let channel_id: String = row.try_get("id")?;
+            let community_id: String = row.try_get("community_id")?;
+            let channel_id = Uuid::parse_str(&channel_id)
+                .map_err(|error| DbError::InvalidData(format!("channel id: {error}")))?;
+            let community_id = Uuid::parse_str(&community_id)
+                .map_err(|error| DbError::InvalidData(format!("community id: {error}")))?;
+            result.insert(channel_id, CommunityId::from_uuid(community_id));
+        }
+        Ok(result)
+    }
+
     /// Create a channel with an application-generated tenant-local UUID.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_channel(
