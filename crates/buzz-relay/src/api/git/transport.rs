@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{header, StatusCode},
+    http::{header, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -2113,7 +2114,27 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_git_enabled,
+        ))
         .with_state(state)
+}
+
+async fn require_git_enabled(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.config.git_enabled {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from(
+                "git hosting is disabled; set BUZZ_GIT_ENABLED=true",
+            ))
+            .unwrap();
+    }
+    next.run(request).await
 }
 
 #[cfg(test)]

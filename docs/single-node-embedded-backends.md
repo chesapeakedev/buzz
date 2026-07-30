@@ -34,6 +34,15 @@ signaling, and Moka for bounded TTL state. PostgreSQL/Redis/S3 remain the
 distributed production profile. Existing deployments retain their current
 behavior, and v1 supports fresh SQLite installations only.
 
+Git hosting is deliberately not an embedded requirement. A local filesystem
+Git store is reasonable for a single device that keeps a few private source or
+configuration repositories, with infrequent pushes and a bounded disk quota.
+It is not a substitute for object storage on a busy relay: concurrent clones,
+large histories, and many repositories should use the distributed
+PostgreSQL/Redis/S3 profile. Embedded Git is therefore disabled by default and
+is enabled explicitly with `BUZZ_GIT_ENABLED=true` after the operator accepts
+those limits.
+
 The first ChesapeakeDev release publishes the relay container and source. It
 does not initially reproduce Block's signed desktop/mobile release lanes.
 Upstream clients remain usable by entering the fork relay's `ws://` or `wss://`
@@ -266,7 +275,7 @@ native binary:
     relay.key
   objects/
     media/
-    git/
+    git/                 # used only when BUZZ_GIT_ENABLED=true
   work/
     git/
     uploads/
@@ -336,6 +345,9 @@ Configuration behavior:
   selects distributed compatibility mode unless deployment mode was explicit.
 - Embedded mode accepts `BUZZ_DATA_DIR` and common server/community variables
   but rejects distributed-only configuration instead of silently ignoring it.
+- `BUZZ_GIT_ENABLED` defaults to `false` in embedded mode and `true` in
+  distributed mode; changing it does not change database, coordination, or
+  media backend selection.
 - Distributed mode retains the existing environment-variable contract and
   defaults for established deployments.
 - Unknown TOML fields are startup errors, preventing misspelled security
@@ -458,18 +470,19 @@ For each slice:
 Exit gate: the complete relay E2E suite passes against SQLite without
 PostgreSQL or Redis available.
 
-### Epic 4: Filesystem object storage
+### Epic 4: Filesystem object storage (Git optional)
 
 Deliver:
 
 - filesystem media/blob backend;
-- filesystem git pack/manifest/pointer backend;
+- filesystem git pack/manifest/pointer backend as an opt-in capability;
 - atomic writes, per-repository CAS, recovery, ranges, streaming, quotas, and
   traversal protection;
 - S3/filesystem shared behavior tests.
 
-Exit gate: media and git E2E tests pass after relay restart with MinIO and
-external S3 unavailable.
+Exit gate: media E2E tests pass after relay restart with MinIO and external S3
+unavailable. Git storage is tested separately when `BUZZ_GIT_ENABLED=true`.
+Embedded mode must remain usable with Git disabled.
 
 ### Epic 5: IRC-like deployment product
 
@@ -482,9 +495,10 @@ Deliver:
 - a release artifact and end-to-end “empty VPS to connected client” runbook.
 
 Exit gate: a clean Linux host with Docker can start Buzz, create/join a
-community, send/search messages, upload media, use git, restart, and restore
-from backup without installing or configuring a database, cache, or object
-store.
+community, send/search messages, upload media, restart, and restore from backup
+without installing or configuring a database, cache, or object store. Git is
+not part of the default embedded smoke path: set `BUZZ_GIT_ENABLED=true` only
+for a bounded, low-volume single-device repository use case.
 
 ### Epic 6: Release and upstream maintenance
 
