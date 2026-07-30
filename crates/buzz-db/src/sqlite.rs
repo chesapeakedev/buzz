@@ -16,6 +16,8 @@ mod community_auth;
 #[cfg(test)]
 mod contracts;
 #[cfg(test)]
+mod contracts_channel_window;
+#[cfg(test)]
 mod contracts_channels;
 #[cfg(test)]
 mod contracts_dms;
