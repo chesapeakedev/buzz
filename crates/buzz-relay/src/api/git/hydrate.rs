@@ -36,7 +36,9 @@ use tokio::process::Command;
 use super::cas_publish::ParentState;
 use super::manifest::{is_hex_oid, is_safe_refname, pointer_key, Manifest, ManifestError};
 use super::pack_cache::GitPackCache;
-use super::store::{ETag, GitStore, StoreError};
+#[cfg(test)]
+use super::store::GitStore;
+use super::store::{ETag, GitStorage, StoreError};
 use buzz_core::TenantContext;
 
 /// Manifests should stay small after ref/pack cardinality validation. Bound
@@ -122,7 +124,7 @@ pub enum HydrateError {
 /// caller should respond 404. `Ok(Some(_))` is a usable bare repo. Any other
 /// failure is a backend/data error.
 pub async fn hydrate_for_read(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
@@ -150,7 +152,7 @@ pub async fn hydrate_for_read(
 }
 
 async fn hydrate_for_read_inner(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
@@ -168,7 +170,7 @@ async fn hydrate_for_read_inner(
 /// Returns `Ok(None)` when the repo pointer is absent; otherwise verifies the
 /// pointer-named manifest digest before returning it.
 pub async fn load_manifest_for_read(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
@@ -205,7 +207,7 @@ async fn init_bare_repo(path: &Path) -> Result<(), HydrateError> {
 /// treated as "fresh repo," because that would let a corrupt pointer
 /// install a brand-new history alongside the broken one.
 pub async fn hydrate_for_write(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
@@ -244,7 +246,7 @@ pub async fn hydrate_for_write(
 /// `Ok(None)` if the pointer is absent (caller decides 404 vs first-push
 /// per call site). `Err(_)` on any below-pointer failure.
 async fn load_pointer(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
@@ -270,7 +272,7 @@ async fn load_pointer(
 }
 
 pub(super) async fn get_verified_limited(
-    store: &GitStore,
+    store: &dyn GitStorage,
     key: &str,
     digest: &str,
     max_bytes: u64,
@@ -291,7 +293,7 @@ pub(super) async fn get_verified_limited(
 /// hydrate leaves no advertised refs — failure mode is "empty/no refs,"
 /// never "refs point at missing objects."
 async fn materialize_manifest(
-    store: &GitStore,
+    store: &dyn GitStorage,
     manifest: &Manifest,
     options: HydrationOptions<'_>,
 ) -> Result<HydratedRepo, HydrateError> {
@@ -379,7 +381,7 @@ async fn materialize_manifest(
 }
 
 pub(super) async fn install_or_generate_idx(
-    store: &GitStore,
+    store: &dyn GitStorage,
     repo_path: &Path,
     pack_digest: &str,
     pack_path: &Path,

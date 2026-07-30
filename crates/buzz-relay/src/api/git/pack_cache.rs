@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use tempfile::Builder;
 
 use super::hydrate::{get_verified_limited, install_or_generate_idx, HydrateError};
-use super::store::GitStore;
+use super::store::GitStorage;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const STALE_SESSION_AGE: Duration = Duration::from_secs(10 * 60);
@@ -162,7 +162,7 @@ impl GitPackCache {
     /// Concurrent misses for the same digest share one population flight.
     pub async fn materialize_pack(
         &self,
-        store: &GitStore,
+        store: &dyn GitStorage,
         object_key: &str,
         digest: &str,
         destination: &Path,
@@ -252,7 +252,7 @@ impl GitPackCache {
 
     async fn populate(
         &self,
-        store: &GitStore,
+        store: &dyn GitStorage,
         object_key: &str,
         digest: &str,
         max_pack_bytes: u64,
