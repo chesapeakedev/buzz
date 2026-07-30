@@ -24,6 +24,8 @@ mod contracts_dms;
 #[cfg(test)]
 mod contracts_events;
 #[cfg(test)]
+mod contracts_feeds;
+#[cfg(test)]
 mod contracts_identity;
 #[cfg(test)]
 mod contracts_reactions;
@@ -31,6 +33,7 @@ mod contracts_reactions;
 mod contracts_threads;
 mod dms;
 mod events;
+mod feeds;
 mod identity_admin;
 mod reactions;
 mod threads;
