@@ -10,11 +10,14 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{DbError, Result};
 
+mod admin;
 mod api_tokens;
 mod channels;
 mod community_auth;
 #[cfg(test)]
 mod contracts;
+#[cfg(test)]
+mod contracts_admin;
 #[cfg(test)]
 mod contracts_channel_window;
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod events;
 mod feeds;
 mod identity_admin;
 mod moderation;
+mod product_feedback;
 mod reactions;
 mod threads;
 mod users;
@@ -214,7 +218,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 10);
+        assert_eq!(applied, 11);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -225,7 +229,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 10);
+        assert_eq!(row.len(), 11);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -236,6 +240,7 @@ mod tests {
         assert_eq!(row[7].get::<i64, _>("version"), 8);
         assert_eq!(row[8].get::<i64, _>("version"), 9);
         assert_eq!(row[9].get::<i64, _>("version"), 10);
+        assert_eq!(row[10].get::<i64, _>("version"), 11);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -305,6 +310,7 @@ mod tests {
             "moderation_reports".to_owned(),
             "parameterized_event_watermarks".to_owned(),
             "pubkey_allowlist".to_owned(),
+            "product_feedback".to_owned(),
             "relay_members".to_owned(),
             "reactions".to_owned(),
             "thread_metadata".to_owned(),
@@ -331,9 +337,11 @@ mod tests {
         .expect("search table metadata");
         assert_eq!(search_table.as_deref(), Some("events_fts"));
 
+        // product_feedback is the documented deployment-global operator
+        // inbox: community_id is provenance, not its identity namespace.
         for table in expected
             .iter()
-            .filter(|table| table.as_str() != "communities")
+            .filter(|table| !matches!(table.as_str(), "communities" | "product_feedback"))
         {
             // `table` comes from the fixed test-owned set above, never external input.
             let pragma = format!("PRAGMA table_info({table})");
