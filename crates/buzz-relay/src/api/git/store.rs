@@ -91,6 +91,9 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Backend-neutral local storage or durability failure.
+    #[error("object storage error: {0}")]
+    Storage(String),
     /// Invalid storage configuration detected at client construction.
     #[error("git store config error: {0}")]
     Config(String),
@@ -1082,7 +1085,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod probe {
+pub(crate) mod probe {
     //! Empirical probe of rust-s3 + `fail-on-err` + MinIO surfacing of 412.
     //!
     //! Run manually:
@@ -1115,7 +1118,7 @@ mod probe {
         hex::encode(h.finalize())
     }
 
-    async fn run_git_storage_contract(store: &dyn GitStorage) -> Vec<String> {
+    pub(crate) async fn run_git_storage_contract(store: &dyn GitStorage) -> Vec<String> {
         let run = uuid::Uuid::new_v4();
         let pack = format!("git-storage-contract-{run}").into_bytes();
         let digest = sha256_hex(&pack);
