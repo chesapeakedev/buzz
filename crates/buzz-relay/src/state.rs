@@ -561,7 +561,7 @@ pub struct AppState {
     /// Git object-store backend (content-addressed packs/manifests plus
     /// CAS-guarded manifest pointer). This is the durable git source of truth;
     /// see `api::git::store` and `docs/git-on-object-storage.md`.
-    pub git_store: crate::api::git::store::GitStore,
+    pub git_store: Arc<dyn crate::api::git::store::GitStorage>,
     /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
     /// Object storage remains authoritative; this only avoids repeated reads
     /// and index generation for content-addressed packs.
@@ -693,14 +693,16 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
-            &config.media.s3_endpoint,
-            &config.media.s3_access_key,
-            &config.media.s3_secret_key,
-            &config.media.s3_bucket,
-            &config.media.s3_region,
-        )
-        .expect("media storage was already constructed with this S3 config");
+        let git_store: Arc<dyn crate::api::git::store::GitStorage> = Arc::new(
+            crate::api::git::store::GitStore::new(
+                &config.media.s3_endpoint,
+                &config.media.s3_access_key,
+                &config.media.s3_secret_key,
+                &config.media.s3_bucket,
+                &config.media.s3_region,
+            )
+            .expect("media storage was already constructed with this S3 config"),
+        );
         let git_pack_cache = Arc::new(
             crate::api::git::pack_cache::GitPackCache::new(
                 &config.git_pack_cache_path,
