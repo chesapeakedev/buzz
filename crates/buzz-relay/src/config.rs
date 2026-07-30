@@ -73,10 +73,29 @@ impl std::fmt::Debug for KlipyConfig {
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
+/// Backend profile selected for this relay process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentMode {
+    /// One-process profile using SQLite, local coordination, and filesystem objects.
+    Embedded,
+    /// Distributed profile using PostgreSQL, Redis, and S3-compatible storage.
+    Distributed,
+}
+
+impl DeploymentMode {
+    /// Whether this profile must avoid distributed-only services.
+    pub const fn is_embedded(self) -> bool {
+        matches!(self, Self::Embedded)
+    }
+}
 
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Selected relational/coordination/object-storage deployment profile.
+    pub deployment_mode: DeploymentMode,
+    /// Durable root for the embedded profile (`/data` in the container).
+    pub data_dir: std::path::PathBuf,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -443,6 +462,35 @@ fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     parse_bool(name, false)
 }
 
+fn deployment_mode_from_env() -> Result<DeploymentMode, ConfigError> {
+    if let Ok(raw) = std::env::var("BUZZ_DEPLOYMENT_MODE") {
+        return match raw.trim().to_ascii_lowercase().as_str() {
+            "embedded" | "single-node" | "single_node" => Ok(DeploymentMode::Embedded),
+            "distributed" | "postgres" => Ok(DeploymentMode::Distributed),
+            _ => Err(ConfigError::InvalidValue(
+                "BUZZ_DEPLOYMENT_MODE must be embedded or distributed".to_string(),
+            )),
+        };
+    }
+
+    let distributed_setting_present = [
+        "DATABASE_URL",
+        "READ_DATABASE_URL",
+        "REDIS_URL",
+        "BUZZ_S3_ENDPOINT",
+        "BUZZ_S3_ACCESS_KEY",
+        "BUZZ_S3_SECRET_KEY",
+        "BUZZ_S3_BUCKET",
+    ]
+    .into_iter()
+    .any(|name| std::env::var_os(name).is_some());
+    Ok(if distributed_setting_present {
+        DeploymentMode::Distributed
+    } else {
+        DeploymentMode::Embedded
+    })
+}
+
 fn ensure_git_repo_path(
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
@@ -491,6 +539,10 @@ fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
+        let deployment_mode = deployment_mode_from_env()?;
+        let data_dir = std::env::var("BUZZ_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/data"));
         let bind_addr_raw =
             std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
@@ -1025,6 +1077,8 @@ impl Config {
         }
 
         Ok(Self {
+            deployment_mode,
+            data_dir,
             bind_addr,
             database_url,
             read_database_url,
@@ -1207,6 +1261,30 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+        assert!(!config.data_dir.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn deployment_mode_explicit_values_are_strict() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        assert_eq!(
+            deployment_mode_from_env().expect("embedded mode"),
+            DeploymentMode::Embedded
+        );
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "distributed");
+        assert_eq!(
+            deployment_mode_from_env().expect("distributed mode"),
+            DeploymentMode::Distributed
+        );
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "typo");
+        assert!(deployment_mode_from_env().is_err());
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
     }
 
     #[test]
