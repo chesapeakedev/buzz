@@ -461,6 +461,26 @@ EXPIRE buzz:typing:{channel_id} 60
 
 ---
 
+### Object Storage — Media Blobs and Git CAS
+
+Relay handlers depend on behavior-specific object-storage interfaces rather
+than S3 client types:
+
+- `buzz_media::BlobStorage` covers media writes, streaming and ranged reads,
+  metadata HEADs, deletion, tenant-scoped sidecars, and bounded listing for
+  storage accounting.
+- `api::git::store::GitStorage` covers content-addressed packs/manifests,
+  derived pack indexes, verified reads, pointer snapshots, and conditional
+  pointer swaps.
+
+`MediaStorage` and `GitStore` are the current S3-compatible implementations.
+Distributed startup still constructs those adapters and runs the Git
+conditional-write conformance probe before readiness. The interfaces preserve
+community sidecars as the media read gate and classify a losing Git pointer
+precondition as `CasOutcome::LostRace`, not a backend failure.
+
+---
+
 ### buzz-search — Backend-specific FTS Integration
 
 PostgreSQL searches the `events.search_tsv` generated `tsvector` column through
@@ -592,7 +612,9 @@ pub struct AppState {
     pub relay_keypair: nostr::Keys,           // relay identity
     pub local_event_ids: moka::sync::Cache,   // local-echo dedup
     pub search_index_tx: mpsc::Sender,        // bounded search worker queue
-    // + config, redis_pool, membership_cache, media_storage, shutdown state
+    pub media_storage: Arc<dyn BlobStorage>,
+    pub git_store: Arc<dyn GitStorage>,
+    // + config, redis_pool, membership_cache, shutdown state
 }
 ```
 
