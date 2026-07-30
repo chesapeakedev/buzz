@@ -8,11 +8,30 @@ the fork's `main` is updated with an explicit lease.
 
 ## Current baseline
 
-- Current upstream base commit: `137185e056c469ff613efc16f88044bc036a9dc6`
+- Current upstream base commit: `ab55fee81896d2b03edf5d2ca5012b715be2b93d`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync pull request.
+
+## Rebase conflict audit
+
+The rebase from `137185e056c469ff613efc16f88044bc036a9dc6` to
+`ab55fee81896d2b03edf5d2ca5012b715be2b93d` required these manual
+resolutions:
+
+- `2e461439` (`ci(relay): publish ChesapeakeDev container images`) conflicted
+  in `.github/workflows/docker.yml`. The resolution retained upstream's
+  release/debug image matrix and Block-only push-gateway jobs while reapplying
+  the ChesapeakeDev image name, repository guards, OCI source/revision labels,
+  and fork-owned merge guard. It replayed as `1b7cbc72b`.
+- `51cf0bfd6` (`refactor(db): introduce explicit backend dispatch`) conflicted
+  in `crates/buzz-db/src/lib.rs`. The resolution retained upstream's
+  `AdminReportDetail` return type and new relay-invite methods while routing
+  their PostgreSQL calls through the explicit `Db::postgres()` adapter. It
+  replayed as `42d85da35`.
+
+All other fork commits replayed without manual conflict resolution.
 
 ## Intentional omissions
 
