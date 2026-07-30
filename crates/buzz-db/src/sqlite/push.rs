@@ -7,7 +7,8 @@ use buzz_core::CommunityId;
 
 use super::SqliteStore;
 use crate::push::{
-    ActiveLease, BatchedMatch, ClaimedMatchBatch, LeaseVersion, MatchLease, ReplaceLeaseOutcome,
+    ActiveLease, BatchedMatch, ClaimedMatchBatch, ClaimedWake, EnqueueWakeOutcome, LeaseVersion,
+    MatchLease, NewWake, ReplaceLeaseOutcome, RevalidateWakeOutcome, WakeRequest,
     MAX_MATCH_ATTEMPTS, PUSH_GATE_BACKFILL_SECS,
 };
 use crate::Result;
@@ -33,6 +34,33 @@ async fn backfill_push_match_jobs(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn parse_uuid(value: String, column: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(&value)
+        .map_err(|error| crate::DbError::InvalidData(format!("invalid {column} UUID: {error}")))
+}
+
+fn row_to_claimed_wake(row: sqlx::sqlite::SqliteRow) -> Result<ClaimedWake> {
+    let community = parse_uuid(row.try_get("community_id")?, "community")?;
+    let channel_id = row
+        .try_get::<Option<String>, _>("channel_id")?
+        .map(|value| parse_uuid(value, "channel"))
+        .transpose()?;
+    Ok(ClaimedWake {
+        community: CommunityId::from_uuid(community),
+        id: parse_uuid(row.try_get("id")?, "wake")?,
+        claim_id: parse_uuid(row.try_get("claim_id")?, "claim")?,
+        event_id: row.try_get("event_id")?,
+        channel_id,
+        author: row.try_get("author")?,
+        installation_id: row.try_get("installation_id")?,
+        lease_generation: row.try_get("lease_generation")?,
+        endpoint_grant: row.try_get("endpoint_grant")?,
+        class: row.try_get("class")?,
+        expires_at: row.try_get("expires_at")?,
+        attempt: row.try_get("attempts")?,
+    })
 }
 
 impl SqliteStore {
@@ -191,6 +219,405 @@ impl SqliteStore {
                 })
             })
             .collect()
+    }
+
+    /// Idempotently enqueue one wake from the current effective lease.
+    pub async fn enqueue_push_wake(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        wake: NewWake<'_>,
+    ) -> Result<EnqueueWakeOutcome> {
+        let outcomes = self
+            .enqueue_push_wakes(
+                community,
+                &[WakeRequest {
+                    author: author.to_vec(),
+                    installation_id: installation_id.to_owned(),
+                    lease_generation: wake.lease_generation,
+                    event_id: wake.event_id.to_vec(),
+                    class: wake.class.to_owned(),
+                    expires_at: wake.expires_at,
+                }],
+            )
+            .await?;
+        outcomes.into_iter().next().ok_or_else(|| {
+            crate::DbError::InvalidData("wake enqueue returned no outcome".to_owned())
+        })
+    }
+
+    /// Set-wise enqueue wakes after resolving current lease generations.
+    pub async fn enqueue_push_wakes(
+        &self,
+        community: CommunityId,
+        requests: &[WakeRequest],
+    ) -> Result<Vec<EnqueueWakeOutcome>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let mut pairs: Vec<(Vec<u8>, String)> = requests
+            .iter()
+            .map(|request| (request.author.clone(), request.installation_id.clone()))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut lease_query: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+            "SELECT author, installation_id, generation, endpoint_hash \
+             FROM push_leases WHERE community_id = ",
+        );
+        lease_query
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND active = 1 AND endpoint_enabled = 1 AND expires_at > ")
+            .push_bind(Utc::now().timestamp())
+            .push(" AND (author, installation_id) IN (");
+        lease_query.push_values(&pairs, |mut values, (author, installation)| {
+            values.push_bind(author).push_bind(installation);
+        });
+        lease_query.push(")");
+        let rows = lease_query.build().fetch_all(&mut *transaction).await?;
+        let mut leases = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            leases.insert(
+                (
+                    row.try_get::<Vec<u8>, _>("author")?,
+                    row.try_get::<String, _>("installation_id")?,
+                ),
+                (
+                    row.try_get::<i64, _>("generation")?,
+                    row.try_get::<Vec<u8>, _>("endpoint_hash")?,
+                ),
+            );
+        }
+        let resolved: Vec<Option<Vec<u8>>> = requests
+            .iter()
+            .map(|request| {
+                leases
+                    .get(&(request.author.clone(), request.installation_id.clone()))
+                    .filter(|(generation, _)| *generation == request.lease_generation)
+                    .map(|(_, endpoint)| endpoint.clone())
+            })
+            .collect();
+        let eligible: Vec<(usize, uuid::Uuid, Vec<u8>)> = resolved
+            .iter()
+            .enumerate()
+            .filter_map(|(index, endpoint)| {
+                endpoint
+                    .as_ref()
+                    .map(|endpoint| (index, uuid::Uuid::new_v4(), endpoint.clone()))
+            })
+            .collect();
+        let now = Utc::now().timestamp_micros();
+        let mut inserted_keys = std::collections::HashSet::new();
+        let mut job_ids = std::collections::HashMap::new();
+        if !eligible.is_empty() {
+            let mut insert: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+                "INSERT INTO push_wake_outbox ( \
+                    community_id, id, author, installation_id, lease_generation, \
+                    endpoint_hash, event_id, class, expires_at, next_attempt_at, \
+                    created_at \
+                 ) ",
+            );
+            insert.push_values(&eligible, |mut values, (index, id, endpoint_hash)| {
+                let request = &requests[*index];
+                values
+                    .push_bind(community.as_uuid().to_string())
+                    .push_bind(id.to_string())
+                    .push_bind(&request.author)
+                    .push_bind(&request.installation_id)
+                    .push_bind(request.lease_generation)
+                    .push_bind(endpoint_hash)
+                    .push_bind(&request.event_id)
+                    .push_bind(&request.class)
+                    .push_bind(request.expires_at)
+                    .push_bind(now)
+                    .push_bind(now);
+            });
+            insert.push(
+                " ON CONFLICT (community_id, endpoint_hash, event_id) DO NOTHING \
+                  RETURNING endpoint_hash, event_id, id",
+            );
+            for row in insert.build().fetch_all(&mut *transaction).await? {
+                let key = (
+                    row.try_get::<Vec<u8>, _>("endpoint_hash")?,
+                    row.try_get::<Vec<u8>, _>("event_id")?,
+                );
+                let id = parse_uuid(row.try_get("id")?, "wake")?;
+                inserted_keys.insert(key.clone());
+                job_ids.insert(key, id);
+            }
+
+            let mut lookup: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+                "SELECT endpoint_hash, event_id, id FROM push_wake_outbox \
+                 WHERE community_id = ",
+            );
+            lookup
+                .push_bind(community.as_uuid().to_string())
+                .push(" AND (endpoint_hash, event_id) IN (");
+            lookup.push_values(&eligible, |mut values, (index, _, endpoint_hash)| {
+                values
+                    .push_bind(endpoint_hash)
+                    .push_bind(&requests[*index].event_id);
+            });
+            lookup.push(")");
+            for row in lookup.build().fetch_all(&mut *transaction).await? {
+                let key = (
+                    row.try_get::<Vec<u8>, _>("endpoint_hash")?,
+                    row.try_get::<Vec<u8>, _>("event_id")?,
+                );
+                job_ids
+                    .entry(key)
+                    .or_insert(parse_uuid(row.try_get("id")?, "wake")?);
+            }
+        }
+        transaction.commit().await?;
+
+        let mut reported = std::collections::HashSet::new();
+        requests
+            .iter()
+            .zip(resolved)
+            .map(|(request, endpoint)| {
+                let Some(endpoint) = endpoint else {
+                    return Ok(EnqueueWakeOutcome::InactiveLease);
+                };
+                let key = (endpoint, request.event_id.clone());
+                let id = *job_ids.get(&key).ok_or_else(|| {
+                    crate::DbError::InvalidData(
+                        "wake enqueue resolved neither insert nor duplicate".to_owned(),
+                    )
+                })?;
+                Ok(if inserted_keys.contains(&key) && reported.insert(key) {
+                    EnqueueWakeOutcome::Enqueued(id)
+                } else {
+                    EnqueueWakeOutcome::Duplicate(id)
+                })
+            })
+            .collect()
+    }
+
+    /// Claim due wakes for one community and fence the worker generation.
+    pub async fn claim_due_push_wakes(
+        &self,
+        community: CommunityId,
+        limit: i64,
+        lease_until: chrono::DateTime<Utc>,
+    ) -> Result<Vec<ClaimedWake>> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let claim_id = uuid::Uuid::new_v4();
+        let now_micros = Utc::now().timestamp_micros();
+        let now_secs = Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE push_wake_outbox SET state = 'sending', claim_id = ?, \
+                lease_until = ?, attempts = attempts + 1 \
+             WHERE rowid IN ( \
+                SELECT o.rowid FROM push_wake_outbox o \
+                JOIN push_leases l \
+                  ON l.community_id = o.community_id \
+                 AND l.author = o.author \
+                 AND l.installation_id = o.installation_id \
+                 AND l.generation = o.lease_generation \
+                 AND l.endpoint_hash = o.endpoint_hash \
+                JOIN events e \
+                  ON e.community_id = o.community_id \
+                 AND e.id = o.event_id AND e.deleted_at IS NULL \
+                WHERE o.community_id = ? AND o.expires_at > ? \
+                  AND o.next_attempt_at <= ? \
+                  AND (o.state = 'pending' OR ( \
+                      o.state = 'sending' AND o.lease_until < ? \
+                  )) \
+                  AND l.active = 1 AND l.endpoint_enabled = 1 \
+                  AND l.expires_at > ? \
+                ORDER BY o.next_attempt_at, o.created_at, o.id LIMIT ? \
+             )",
+        )
+        .bind(claim_id.to_string())
+        .bind(lease_until.timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(now_secs)
+        .bind(now_micros)
+        .bind(now_micros)
+        .bind(now_secs)
+        .bind(limit)
+        .execute(&mut *transaction)
+        .await?;
+        let rows = sqlx::query(
+            "SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id, \
+                    o.author, o.installation_id, o.lease_generation, \
+                    l.endpoint_grant, o.class, o.expires_at, o.attempts \
+             FROM push_wake_outbox o \
+             JOIN push_leases l \
+               ON l.community_id = o.community_id AND l.author = o.author \
+              AND l.installation_id = o.installation_id \
+              AND l.generation = o.lease_generation \
+              AND l.endpoint_hash = o.endpoint_hash \
+             JOIN events e ON e.community_id = o.community_id \
+              AND e.id = o.event_id AND e.deleted_at IS NULL \
+             WHERE o.community_id = ? AND o.claim_id = ? AND o.state = 'sending'",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(claim_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        rows.into_iter().map(row_to_claimed_wake).collect()
+    }
+
+    /// Revalidate the current lease, event, and unexpired worker fence.
+    pub async fn revalidate_push_wake(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        claim_id: uuid::Uuid,
+    ) -> Result<RevalidateWakeOutcome> {
+        let now_micros = Utc::now().timestamp_micros();
+        let now_secs = Utc::now().timestamp();
+        let row = sqlx::query(
+            "SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id, \
+                    o.author, o.installation_id, o.lease_generation, \
+                    l.endpoint_grant, o.class, o.expires_at, o.attempts \
+             FROM push_wake_outbox o \
+             JOIN push_leases l \
+               ON l.community_id = o.community_id AND l.author = o.author \
+              AND l.installation_id = o.installation_id \
+              AND l.generation = o.lease_generation \
+              AND l.endpoint_hash = o.endpoint_hash \
+             JOIN events e ON e.community_id = o.community_id \
+              AND e.id = o.event_id AND e.deleted_at IS NULL \
+             WHERE o.community_id = ? AND o.id = ? AND o.claim_id = ? \
+               AND o.state = 'sending' AND o.lease_until >= ? \
+               AND o.expires_at > ? AND l.active = 1 \
+               AND l.endpoint_enabled = 1 AND l.expires_at > ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(id.to_string())
+        .bind(claim_id.to_string())
+        .bind(now_micros)
+        .bind(now_secs)
+        .bind(now_secs)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_claimed_wake)
+            .transpose()?
+            .map_or(Ok(RevalidateWakeOutcome::Suppressed), |wake| {
+                Ok(RevalidateWakeOutcome::Deliver(Box::new(wake)))
+            })
+    }
+
+    async fn transition_push_wake(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        claim_id: uuid::Uuid,
+        state: &str,
+        next_attempt_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE push_wake_outbox SET state = ?, \
+                next_attempt_at = COALESCE(?, next_attempt_at), \
+                claim_id = NULL, lease_until = NULL \
+             WHERE community_id = ? AND id = ? AND claim_id = ? \
+               AND state = 'sending'",
+        )
+        .bind(state)
+        .bind(next_attempt_at.map(|next| next.timestamp_micros()))
+        .bind(community.as_uuid().to_string())
+        .bind(id.to_string())
+        .bind(claim_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Mark a fenced wake delivered.
+    pub async fn complete_push_wake(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        claim_id: uuid::Uuid,
+    ) -> Result<bool> {
+        self.transition_push_wake(community, id, claim_id, "delivered", None)
+            .await
+    }
+
+    /// Release a fenced wake for retry.
+    pub async fn retry_push_wake(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        claim_id: uuid::Uuid,
+        next: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        self.transition_push_wake(community, id, claim_id, "pending", Some(next))
+            .await
+    }
+
+    /// Permanently fail one fenced wake.
+    pub async fn fail_push_wake(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        claim_id: uuid::Uuid,
+    ) -> Result<bool> {
+        self.transition_push_wake(community, id, claim_id, "failed", None)
+            .await
+    }
+
+    /// Disable an endpoint only when the supplied generation is current.
+    pub async fn disable_push_endpoint(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE push_leases SET endpoint_enabled = 0, updated_at = ? \
+             WHERE community_id = ? AND author = ? AND installation_id = ? \
+               AND generation = ? AND active = 1 AND endpoint_enabled = 1",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(author)
+        .bind(installation_id)
+        .bind(generation)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Delete terminal or expired wakes outside the retention window.
+    pub async fn prune_push_wake_outbox(
+        &self,
+        community: CommunityId,
+        before: chrono::DateTime<Utc>,
+    ) -> Result<u64> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "DELETE FROM push_wake_outbox AS o \
+             WHERE o.community_id = ? AND o.created_at < ? \
+               AND (o.state IN ('delivered', 'failed') OR o.expires_at <= ?) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM push_match_queue q \
+                   WHERE q.community_id = o.community_id \
+                     AND q.event_id = o.event_id \
+               )",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(before.timestamp_micros())
+        .bind(Utc::now().timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Claim a due matcher batch from exactly one community.
