@@ -1574,10 +1574,13 @@ mod tests {
         ));
         let total: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM push_wake_outbox \
-             WHERE endpoint_hash = $1 AND event_id = $2",
+             WHERE endpoint_hash = $1 AND event_id = $2 \
+               AND community_id IN ($3, $4)",
         )
         .bind(endpoint)
         .bind(event)
+        .bind(a.as_uuid())
+        .bind(b.as_uuid())
         .fetch_one(&pool)
         .await
         .expect("count all jobs");
