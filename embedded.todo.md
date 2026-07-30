@@ -62,7 +62,7 @@ for a blob write. The distributed S3 path keeps its existing sidecar JSON.
       -- --check`, `cargo clippy -p buzz-media --lib`, `cargo check -p
       buzz-relay` (library compiles; relay test binaries need system
       `libssl-dev`, a pre-existing environment limitation).
-- [ ] 16.3 — Implement the SQLite blob metadata adapter: `media_objects`
+- [x] 16.3 — Implement the SQLite blob metadata adapter: `media_objects`
       upsert/get/delete and `git_pointers` put/get/CAS-swap, with the metadata
       row as the atomic publication gate (write row before publishing the
       serve-gate, delete row with the blob).

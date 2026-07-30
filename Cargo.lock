@@ -1059,6 +1059,7 @@ dependencies = [
  "async-trait",
  "buzz-core",
  "buzz-datastore-tracing",
+ "buzz-media",
  "chrono",
  "hex",
  "metrics",
