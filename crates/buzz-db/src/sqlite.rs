@@ -63,10 +63,13 @@ mod moderation;
 mod product_feedback;
 mod push;
 mod reactions;
+mod security_windows;
 mod threads;
 mod usage;
 mod users;
 mod workflows;
+
+pub use security_windows::SecurityRateWindow;
 
 /// SQLite connection and concurrency settings.
 #[derive(Debug, Clone)]
@@ -90,7 +93,7 @@ impl Default for SqliteConfig {
 }
 
 /// SQLite storage resources shared by backend-specific adapters.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
     writer: Arc<Mutex<()>>,
@@ -240,7 +243,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 16);
+        assert_eq!(applied, 17);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -251,7 +254,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 16);
+        assert_eq!(row.len(), 17);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -268,6 +271,7 @@ mod tests {
         assert_eq!(row[13].get::<i64, _>("version"), 14);
         assert_eq!(row[14].get::<i64, _>("version"), 15);
         assert_eq!(row[15].get::<i64, _>("version"), 16);
+        assert_eq!(row[16].get::<i64, _>("version"), 17);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -350,6 +354,8 @@ mod tests {
             "workflow_runs".to_owned(),
             "workflows".to_owned(),
             "scheduled_workflow_fires".to_owned(),
+            "security_rate_windows".to_owned(),
+            "security_replay_claims".to_owned(),
         ]);
         let actual: BTreeSet<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_schema \
@@ -372,12 +378,18 @@ mod tests {
         .expect("search table metadata");
         assert_eq!(search_table.as_deref(), Some("events_fts"));
 
-        // product_feedback is the documented deployment-global operator
-        // inbox: community_id is provenance, not its identity namespace.
-        for table in expected
-            .iter()
-            .filter(|table| !matches!(table.as_str(), "communities" | "product_feedback"))
-        {
+        // product_feedback is the deployment-global operator inbox. Security
+        // windows intentionally use explicit community/operator scopes because
+        // IP admission occurs before tenant resolution.
+        for table in expected.iter().filter(|table| {
+            !matches!(
+                table.as_str(),
+                "communities"
+                    | "product_feedback"
+                    | "security_rate_windows"
+                    | "security_replay_claims"
+            )
+        }) {
             // `table` comes from the fixed test-owned set above, never external input.
             let pragma = format!("PRAGMA table_info({table})");
             let columns = sqlx::query(sqlx::AssertSqlSafe(pragma))
