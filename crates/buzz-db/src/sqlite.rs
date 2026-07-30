@@ -37,6 +37,8 @@ mod contracts_reactions;
 #[cfg(test)]
 mod contracts_threads;
 #[cfg(test)]
+mod contracts_workflow_coordination;
+#[cfg(test)]
 mod contracts_workflows;
 mod dms;
 mod events;
@@ -221,7 +223,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 12);
+        assert_eq!(applied, 13);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -232,7 +234,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 12);
+        assert_eq!(row.len(), 13);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -245,6 +247,7 @@ mod tests {
         assert_eq!(row[9].get::<i64, _>("version"), 10);
         assert_eq!(row[10].get::<i64, _>("version"), 11);
         assert_eq!(row[11].get::<i64, _>("version"), 12);
+        assert_eq!(row[12].get::<i64, _>("version"), 13);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -319,8 +322,10 @@ mod tests {
             "reactions".to_owned(),
             "thread_metadata".to_owned(),
             "users".to_owned(),
+            "workflow_approvals".to_owned(),
             "workflow_runs".to_owned(),
             "workflows".to_owned(),
+            "scheduled_workflow_fires".to_owned(),
         ]);
         let actual: BTreeSet<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_schema \
