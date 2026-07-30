@@ -60,6 +60,10 @@ pub mod workflow;
 
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use sqlite::git_pointers::{
+    cas_swap_pointer, get_pointer_metadata, GitPointerRow, PointerCasOutcome,
+};
+pub use sqlite::media_objects::SqliteBlobMetadata;
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};

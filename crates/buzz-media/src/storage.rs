@@ -122,6 +122,12 @@ pub trait BlobMetadata: Send + Sync {
     /// the distinction so a cross-community request cannot distinguish a
     /// B-only blob from a missing blob.
     async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String>;
+
+    /// Remove community-scoped blob metadata.
+    ///
+    /// Must be called when the blob is deleted so the serve gate tears down
+    /// with the content. No-op for already-absent metadata.
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError>;
 }
 
 /// S3-compatible object storage client.
@@ -573,6 +579,11 @@ impl BlobMetadata for MediaStorage {
 
     async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
         MediaStorage::read_sidecar_mime(self, ctx, sha256_ext).await
+    }
+
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        self.delete(&key).await
     }
 }
 

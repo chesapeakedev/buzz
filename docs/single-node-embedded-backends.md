@@ -29,8 +29,9 @@ docker run -p 127.0.0.1:3000:3000 -v buzz-data:/data \
   -e BUZZ_BIND=0.0.0.0:3000 ghcr.io/chesapeakedev/buzz:main
 ```
 
-The embedded profile uses SQLite, filesystem object storage, Tokio local
-signaling, and Moka for bounded TTL state. PostgreSQL/Redis/S3 remain the
+The embedded profile uses SQLite for both relational data and blob metadata,
+content-addressed filesystem object storage, Tokio local signaling, and Moka
+for bounded TTL state. PostgreSQL/Redis/S3 remain the
 distributed production profile. Existing deployments retain their current
 behavior, and v1 supports fresh SQLite installations only.
 
@@ -244,8 +245,17 @@ Before enabling Actions with write permissions:
 - Add filesystem media and git object backends.
   - Introduce backend-neutral blob and compare-and-swap interfaces, retaining
     the existing S3 implementations.
-  - Store media, git packs/manifests, and pointers beneath `/data/objects`, with
-    validated digest-derived paths.
+  - Map S3 key prefixes directly to filesystem subdirectories, keeping keys
+    identical so objects are portable between S3 and filesystem:
+
+    | S3 prefix | Filesystem path |
+    |-----------|----------------|
+    | `media/<key>` | `objects/media/<sha256[:2]>/<sha256[2:4]>/<sha256>` |
+    | `packs/<sha256>` | `objects/git/packs/<sha256>` |
+    | `manifests/<sha256>` | `objects/git/manifests/<sha256>` |
+    | `idx/<pack_digest>` | `objects/git/idx/<pack_digest>` |
+    | `repos/<community>/<owner>/<repo>/pointer` | `objects/git/pointers/<community>/<owner>/<repo>/pointer` |
+
   - Implement writes through same-directory temporary files, flush, and atomic
     rename.
   - Serialize git pointer CAS operations per repository; the deployment-wide
@@ -254,9 +264,48 @@ Before enabling Actions with write permissions:
     objects into memory.
   - Fsync parent directories after durable renames where the platform supports
     it, and remove abandoned temporary files during startup recovery.
-  - Keep object keys and manifests wire-compatible with S3 storage where
-    practical so a future export tool can copy objects without rewriting
-    content.
+  - Store blob metadata (MIME type, size, upload timestamps, community,
+    uploader pubkey) in SQLite `media_objects` and `git_pointers` tables
+    rather than sidecar JSON files. The SQLite metadata row is the atomic
+    publication gate for a blob write, replacing the sidecar-JSON approach
+    used in the filesystem-backed S3 implementation.
+  - Keep object keys and manifests wire-compatible with S3 storage so a
+    future migration tool can copy objects between filesystem and S3 by
+    transferring key-content pairs without rewriting content.
+
+### Object storage architecture rationale
+
+For large blobs (media uploads, git packs), the filesystem is the correct
+production-grade choice for single-node embedded deployments — not a fallback
+from S3:
+
+- **Byte-range reads**: HTTP 206 Partial Content requires streaming sub-ranges
+  of large blobs. The filesystem provides this natively through `pread` and
+  `sendfile`. No embedded KV database (RocksDB, Redb, Fjall, Sled) exposes a
+  partial-read API — all require loading entire values into memory before
+  slicing.
+- **Immutability**: Content-addressed blobs are write-once. The filesystem's
+  write-then-rename with fsync provides atomicity without compaction overhead.
+  No LSM-tree or B-tree compaction is needed for objects that are never
+  updated in place.
+- **Zero-copy I/O**: `sendfile()` copies data directly from the page cache to
+  the socket. KV databases deserialize through their own buffer and cache
+  layers before returning bytes to the application.
+- **No background threads**: Filesystem operations use Tokio's blocking pool.
+  RocksDB spawns its own compaction and flush threads that are unaware of the
+  async runtime and can interfere with cooperative scheduling.
+- **No C++ build dependency**: An embedded KV database with comparable
+  production maturity (RocksDB) would require the full Clang/LLVM toolchain
+  and add minutes to every compilation. Pure-Rust alternatives (Redb, Fjall,
+  Sled) are either not production-mature or lack key-value separation for
+  large blobs.
+
+The SQLite relational database, already planned for embedded mode, is the
+correct complement: it stores blob metadata (MIME type, size, uploader,
+timestamps, community) with ACID guarantees, while the filesystem stores the
+immutable blob bytes. This hybrid mirrors the architecture used by PocketBase,
+GitHub, and Discord — content-addressed CAS on the filesystem, metadata in a
+relational database.
 
 ## Embedded Runtime Layout
 
@@ -273,15 +322,21 @@ native binary:
     buzz.sqlite3-shm
   secrets/
     relay.key
-  objects/
-    media/
+  objects/               # content-addressed blob store, metadata in SQLite
+    media/               # media files keyed by SHA-256
     git/                 # used only when BUZZ_GIT_ENABLED=true
+      packs/             # pack files (content-addressed by SHA-256)
+      manifests/         # manifest JSON (content-addressed by SHA-256)
+      idx/               # pack index sidecars (keyed by pack digest)
+      pointers/          # mutable CAS pointer files per repo
   work/
     git/
     uploads/
 ```
 
-- `db`, `secrets`, and `objects` are durable and included in backups.
+- `db`, `secrets`, and `objects` are durable and included in backups. Blob
+  metadata is stored in the SQLite database (not sidecar JSON files), keeping
+  metadata and blobs within a single backup scope.
 - `work` contains reconstructable temporary state and may be cleared only while
   the relay is stopped.
 - Private files are created with owner-only permissions on Unix.
@@ -470,15 +525,18 @@ For each slice:
 Exit gate: the complete relay E2E suite passes against SQLite without
 PostgreSQL or Redis available.
 
-### Epic 4: Filesystem object storage (Git optional)
+### Epic 4: Content-addressed filesystem with SQLite metadata (Git optional)
 
 Deliver:
 
-- filesystem media/blob backend;
+- content-addressed filesystem media and git backends mapping S3 key prefixes
+  to subdirectories (`packs/`, `manifests/`, `idx/`, `pointers/`);
 - filesystem git pack/manifest/pointer backend as an opt-in capability;
+- SQLite `media_objects` and `git_pointers` tables replacing sidecar JSON
+  for ACID blob metadata;
 - atomic writes, per-repository CAS, recovery, ranges, streaming, quotas, and
   traversal protection;
-- S3/filesystem shared behavior tests.
+- S3/filesystem shared behavior tests and key-format compatibility.
 
 Exit gate: media E2E tests pass after relay restart with MinIO and external S3
 unavailable. Git storage is tested separately when `BUZZ_GIT_ENABLED=true`.
@@ -531,11 +589,13 @@ without bypassing tests.
 13. SQLite workflow/reminder/push slice.
 14. SQLite git/usage/security slice.
 15. Blob/CAS interfaces plus unchanged S3 adapters.
-16. Filesystem media backend.
-17. Filesystem git backend.
-18. Embedded config, data layout, locking, and recovery.
-19. Relay-only container, Compose/Caddy example, and operational docs.
-20. Embedded release candidate, resource benchmarks, soak test, and stable
+16. SQLite blob metadata tables (`media_objects`, `git_pointers`) replacing
+    sidecar JSON.
+17. Filesystem media backend.
+18. Filesystem git backend.
+19. Embedded config, data layout, locking, and recovery.
+20. Relay-only container, Compose/Caddy example, and operational docs.
+21. Embedded release candidate, resource benchmarks, soak test, and stable
     release.
 
 Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
