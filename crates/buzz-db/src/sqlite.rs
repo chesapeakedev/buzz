@@ -29,6 +29,8 @@ mod contracts_events;
 #[cfg(test)]
 mod contracts_feeds;
 #[cfg(test)]
+mod contracts_git_repo;
+#[cfg(test)]
 mod contracts_identity;
 #[cfg(test)]
 mod contracts_moderation;
@@ -53,6 +55,7 @@ mod contracts_workflows;
 mod dms;
 mod events;
 mod feeds;
+mod git_repo;
 mod identity_admin;
 mod moderation;
 mod product_feedback;
@@ -234,7 +237,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 15);
+        assert_eq!(applied, 16);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -245,7 +248,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 15);
+        assert_eq!(row.len(), 16);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -261,6 +264,7 @@ mod tests {
         assert_eq!(row[12].get::<i64, _>("version"), 13);
         assert_eq!(row[13].get::<i64, _>("version"), 14);
         assert_eq!(row[14].get::<i64, _>("version"), 15);
+        assert_eq!(row[15].get::<i64, _>("version"), 16);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -325,6 +329,7 @@ mod tests {
             "communities".to_owned(),
             "event_mentions".to_owned(),
             "events".to_owned(),
+            "git_repo_names".to_owned(),
             "join_policy_acceptances".to_owned(),
             "moderation_actions".to_owned(),
             "moderation_reports".to_owned(),
