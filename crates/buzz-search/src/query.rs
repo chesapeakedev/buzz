@@ -1,4 +1,4 @@
-//! NIP-50 search query against Postgres FTS, community-scoped.
+//! Community-scoped NIP-50 search queries for PostgreSQL FTS and SQLite FTS5.
 //!
 //! The relay never trusts a hit by itself: this layer returns canonical event
 //! ids ordered by relevance, the relay refetches `StoredEvent`s through
@@ -8,7 +8,7 @@
 //!
 //! See conformance row 50.
 
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::{PgPool, QueryBuilder, Row, SqlitePool};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -115,7 +115,7 @@ pub struct SearchHit {
     pub channel_id: Option<Uuid>,
     /// Unix seconds.
     pub created_at: i64,
-    /// `ts_rank_cd` relevance score (higher = better).
+    /// Backend relevance score (higher = better).
     pub rank: f32,
 }
 
@@ -195,6 +195,64 @@ fn normalized_search_text(q: &str) -> Option<String> {
     } else {
         Some(cleaned.to_string())
     }
+}
+
+fn sqlite_match_expression(search_text: &str, mode: SearchMode) -> Option<String> {
+    let mut terms = Vec::new();
+    let mut word = String::new();
+    let mut phrase = Vec::new();
+    let mut quoted = false;
+
+    let flush_word =
+        |word: &mut String, phrase: &mut Vec<String>, terms: &mut Vec<String>, quoted: bool| {
+            if word.is_empty() {
+                return;
+            }
+            if quoted {
+                phrase.push(std::mem::take(word));
+            } else {
+                terms.push(std::mem::take(word));
+            }
+        };
+
+    for character in search_text.chars() {
+        if character == '"' {
+            flush_word(&mut word, &mut phrase, &mut terms, quoted);
+            if quoted && !phrase.is_empty() {
+                terms.push(phrase.join(" "));
+                phrase.clear();
+            }
+            quoted = !quoted;
+        } else if character.is_alphanumeric() || character == '_' {
+            word.push(character);
+        } else {
+            flush_word(&mut word, &mut phrase, &mut terms, quoted);
+        }
+    }
+    flush_word(&mut word, &mut phrase, &mut terms, quoted);
+    if !phrase.is_empty() {
+        terms.push(phrase.join(" "));
+    }
+    if terms.is_empty() {
+        return None;
+    }
+
+    let last = terms.len() - 1;
+    Some(
+        terms
+            .into_iter()
+            .enumerate()
+            .map(|(index, term)| {
+                let escaped = term.replace('"', "\"\"");
+                if mode == SearchMode::Prefix && index == last {
+                    format!("\"{escaped}\"*")
+                } else {
+                    format!("\"{escaped}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
 }
 
 /// Execute a community-scoped FTS query.
@@ -339,6 +397,148 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     Ok(SearchResult { hits, page })
 }
 
+/// Execute a community-scoped SQLite FTS5 query.
+///
+/// Candidate ranking may differ from PostgreSQL, but tenant, channel, kind,
+/// author, time, pagination, and tombstone filters have the same semantics.
+pub async fn search_sqlite(
+    pool: &SqlitePool,
+    query: &SearchQuery,
+) -> Result<SearchResult, SearchError> {
+    let page = query.page.clamp(1, PAGE_MAX);
+    let Some(search_text) = normalized_search_text(&query.q) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    };
+    let Some(match_expression) = sqlite_match_expression(&search_text, query.mode) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    };
+    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
+    let per_page_actual = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        per_page
+    };
+    let offset = i64::from(page - 1) * i64::from(per_page_actual);
+
+    let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT e.id, e.kind, e.pubkey, e.channel_id, \
+         e.created_at / 1000000 AS created_at_s, \
+         -bm25(events_fts) AS rank \
+         FROM events_fts JOIN events e ON e.rowid = events_fts.rowid \
+         WHERE e.community_id = ",
+    );
+    builder
+        .push_bind(query.community.as_uuid().to_string())
+        .push(" AND e.deleted_at IS NULL AND events_fts MATCH ")
+        .push_bind(match_expression);
+
+    match &query.channel_scope {
+        ChannelScope::Any => {}
+        ChannelScope::ChannelLessOnly => {
+            builder.push(" AND e.channel_id IS NULL");
+        }
+        ChannelScope::Channels(channels) if channels.is_empty() => {
+            builder.push(" AND 0");
+        }
+        ChannelScope::Channels(channels) => {
+            builder.push(" AND e.channel_id IN (");
+            let mut separated = builder.separated(", ");
+            for channel in channels {
+                separated.push_bind(channel.to_string());
+            }
+            builder.push(")");
+        }
+        ChannelScope::ChannelsOrChannelLess(channels) if channels.is_empty() => {
+            builder.push(" AND e.channel_id IS NULL");
+        }
+        ChannelScope::ChannelsOrChannelLess(channels) => {
+            builder.push(" AND (e.channel_id IN (");
+            let mut separated = builder.separated(", ");
+            for channel in channels {
+                separated.push_bind(channel.to_string());
+            }
+            builder.push(") OR e.channel_id IS NULL)");
+        }
+    }
+
+    if let Some(kinds) = query.kinds.as_deref().filter(|kinds| !kinds.is_empty()) {
+        builder.push(" AND e.kind IN (");
+        let mut separated = builder.separated(", ");
+        for kind in kinds {
+            separated.push_bind(*kind);
+        }
+        builder.push(")");
+    }
+    if let Some(authors) = query
+        .authors
+        .as_deref()
+        .filter(|authors| !authors.is_empty())
+    {
+        builder.push(" AND e.pubkey IN (");
+        let mut separated = builder.separated(", ");
+        for author in authors {
+            separated.push_bind(author.clone());
+        }
+        builder.push(")");
+    }
+    if let Some(since) = query.since {
+        builder
+            .push(" AND e.created_at >= ")
+            .push_bind(since.saturating_mul(1_000_000));
+    }
+    if let Some(until) = query.until {
+        builder
+            .push(" AND e.created_at <= ")
+            .push_bind(until.saturating_mul(1_000_000));
+    }
+    builder
+        .push(" ORDER BY rank DESC, e.created_at DESC, e.id LIMIT ")
+        .push_bind(i64::from(per_page_actual))
+        .push(" OFFSET ")
+        .push_bind(offset);
+
+    let rows = builder.build().fetch_all(pool).await?;
+    let mut hits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id_bytes: Vec<u8> = row.try_get("id")?;
+        let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+        let id = id_bytes.try_into().map_err(|value: Vec<u8>| {
+            sqlx::Error::Decode(
+                format!("event id column is {} bytes, expected 32", value.len()).into(),
+            )
+        })?;
+        let pubkey = pubkey_bytes.try_into().map_err(|value: Vec<u8>| {
+            sqlx::Error::Decode(
+                format!("pubkey column is {} bytes, expected 32", value.len()).into(),
+            )
+        })?;
+        let channel_id = row
+            .try_get::<Option<String>, _>("channel_id")?
+            .map(|value| {
+                Uuid::parse_str(&value).map_err(|error| {
+                    sqlx::Error::Decode(format!("invalid channel UUID: {error}").into())
+                })
+            })
+            .transpose()?;
+        let rank = row.try_get::<f64, _>("rank")? as f32;
+        hits.push(SearchHit {
+            event_id: id,
+            kind: row.try_get("kind")?,
+            pubkey,
+            channel_id,
+            created_at: row.try_get("created_at_s")?,
+            rank,
+        });
+    }
+    Ok(SearchResult { hits, page })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +565,18 @@ mod tests {
         let long = "x".repeat(SEARCH_TEXT_MAX_CHARS + 10);
         let cleaned = normalized_search_text(&long).expect("non-empty");
         assert_eq!(cleaned.chars().count(), SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn sqlite_expression_preserves_phrases_and_prefixes_only_the_tail() {
+        assert_eq!(
+            sqlite_match_expression("alpha \"beta gamma\"", SearchMode::FullText).as_deref(),
+            Some("\"alpha\" AND \"beta gamma\"")
+        );
+        assert_eq!(
+            sqlite_match_expression("alpha pro", SearchMode::Prefix).as_deref(),
+            Some("\"alpha\" AND \"pro\"*")
+        );
+        assert!(sqlite_match_expression("---", SearchMode::FullText).is_none());
     }
 }

@@ -198,7 +198,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 7);
+        assert_eq!(applied, 8);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -209,7 +209,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 7);
+        assert_eq!(row.len(), 8);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -217,6 +217,7 @@ mod tests {
         assert_eq!(row[4].get::<i64, _>("version"), 5);
         assert_eq!(row[5].get::<i64, _>("version"), 6);
         assert_eq!(row[6].get::<i64, _>("version"), 7);
+        assert_eq!(row[7].get::<i64, _>("version"), 8);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -289,7 +290,8 @@ mod tests {
         ]);
         let actual: BTreeSet<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_schema \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'",
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
+               AND name NOT LIKE 'events_fts%' AND name <> '_sqlx_migrations'",
         )
         .fetch_all(store.pool())
         .await
@@ -297,6 +299,15 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(actual, expected);
+        let search_table: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'events_fts' \
+               AND sql LIKE 'CREATE VIRTUAL TABLE%fts5%'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .expect("search table metadata");
+        assert_eq!(search_table.as_deref(), Some("events_fts"));
 
         for table in expected
             .iter()
