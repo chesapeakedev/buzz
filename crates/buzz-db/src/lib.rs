@@ -667,36 +667,57 @@ impl Db {
 
     /// Return total number of communities on this relay.
     pub async fn usage_community_count(&self) -> Result<i64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_community_count().await;
+        }
         usage::community_count(&self.postgres().pool).await
     }
 
     /// Return per-community user counts split by human/agent.
     pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_user_counts().await;
+        }
         usage::user_counts(&self.postgres().pool).await
     }
 
     /// Return per-community channel counts by type.
     pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_channel_counts().await;
+        }
         usage::channel_counts(&self.postgres().pool).await
     }
 
     /// Return per-community kind=9 message counts.
     pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_message_counts().await;
+        }
         usage::message_counts(&self.postgres().pool).await
     }
 
     /// Return per-community relay-member counts by role.
     pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_relay_member_counts().await;
+        }
         usage::relay_member_counts(&self.postgres().pool).await
     }
 
     /// Return per-community workflow counts by status.
     pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_workflow_counts().await;
+        }
         usage::workflow_counts(&self.postgres().pool).await
     }
 
     /// Return per-community git-repo counts.
     pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_git_repo_counts().await;
+        }
         usage::git_repo_counts(&self.postgres().pool).await
     }
 
@@ -707,6 +728,9 @@ impl Db {
         &self,
         interval_sql: &'static str,
     ) -> Result<Vec<usage::CommunityActiveUsers>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_active_user_counts(interval_sql).await;
+        }
         usage::active_user_counts(&self.postgres().pool, interval_sql).await
     }
 
@@ -715,11 +739,17 @@ impl Db {
         &self,
         interval_sql: &'static str,
     ) -> Result<Vec<usage::CommunityActiveChannels>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_active_channel_counts(interval_sql).await;
+        }
         usage::active_channel_counts(&self.postgres().pool, interval_sql).await
     }
 
     /// Return all community id → host mappings.
     pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.usage_community_hosts().await;
+        }
         usage::community_hosts(&self.postgres().pool).await
     }
 
@@ -1356,6 +1386,9 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<Vec<push::MatchLease>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.active_push_match_leases(community).await;
+        }
         push::active_match_leases(&self.postgres().pool, community).await
     }
 
@@ -1382,6 +1415,9 @@ impl Db {
 
     /// Delete exhausted matcher jobs (periodic sweep, off the claim path).
     pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.reap_exhausted_push_matches().await;
+        }
         push::reap_exhausted_matches(&self.postgres().pool).await
     }
 
@@ -1393,6 +1429,11 @@ impl Db {
         installation_id: &str,
         wake: push::NewWake<'_>,
     ) -> Result<push::EnqueueWakeOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .enqueue_push_wake(community, author, installation_id, wake)
+                .await;
+        }
         push::enqueue_wake(
             &self.postgres().pool,
             community,
@@ -1409,6 +1450,9 @@ impl Db {
         community: CommunityId,
         requests: &[push::WakeRequest],
     ) -> Result<Vec<push::EnqueueWakeOutcome>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.enqueue_push_wakes(community, requests).await;
+        }
         push::enqueue_wakes(&self.postgres().pool, community, requests).await
     }
 
@@ -1419,6 +1463,11 @@ impl Db {
         limit: i64,
         lease_until: DateTime<Utc>,
     ) -> Result<Vec<push::ClaimedWake>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_due_push_wakes(community, limit, lease_until)
+                .await;
+        }
         push::claim_due_wakes(&self.postgres().pool, community, limit, lease_until).await
     }
 
@@ -3559,6 +3608,10 @@ impl Db {
 
     /// Ensures monthly partitions exist for the next N months.
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
+        if matches!(self.backend.as_ref(), DatabaseBackend::Sqlite(_)) {
+            let _ = months_ahead;
+            return Ok(());
+        }
         partition::ensure_future_partitions(&self.postgres().pool, months_ahead).await
     }
 
@@ -3567,6 +3620,9 @@ impl Db {
     /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
     /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
     pub async fn backfill_d_tags(&self) -> Result<u64> {
+        if matches!(self.backend.as_ref(), DatabaseBackend::Sqlite(_)) {
+            return Ok(0);
+        }
         let result = sqlx::query(
             "UPDATE events \
              SET d_tag = COALESCE( \
