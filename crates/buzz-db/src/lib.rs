@@ -1800,6 +1800,9 @@ impl Db {
         &self,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.communities_of_channels(channel_ids).await;
+        }
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -2109,15 +2112,13 @@ impl Db {
         d_tag: &str,
         deletion_created_at_secs: i64,
     ) -> Result<bool> {
-        event::soft_delete_by_coordinate(
-            &self.pool,
-            community_id,
-            kind,
-            pubkey,
-            d_tag,
-            deletion_created_at_secs,
-        )
-        .await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .soft_delete_by_coordinate(community_id, kind, pubkey, d_tag)
+                .await;
+        }
+        event::soft_delete_by_coordinate(&self.postgres().pool, community_id, kind, pubkey, d_tag)
+            .await
     }
 
     /// Atomically soft-delete an event and decrement thread reply counters.
@@ -2847,7 +2848,10 @@ impl Db {
     pub async fn reap_expired_ephemeral_channels(
         &self,
     ) -> Result<Vec<channel::ReapedEphemeralChannel>> {
-        channel::reap_expired_ephemeral_channels(&self.pool).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.reap_expired_ephemeral_channels().await;
+        }
+        channel::reap_expired_ephemeral_channels(&self.postgres().pool).await
     }
 
     /// Query due reminders ready for delivery.
@@ -5381,7 +5385,10 @@ impl Db {
         community: CommunityId,
         repo_id: &str,
     ) -> Result<Option<String>> {
-        git_repo::repo_name_owner(&self.pool, community, repo_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.repo_name_owner(community, repo_id).await;
+        }
+        git_repo::repo_name_owner(&self.postgres().pool, community, repo_id).await
     }
 
     /// Reserve a git repo name for `owner_pubkey` in `community` (NIP-34).
@@ -5395,7 +5402,12 @@ impl Db {
         repo_id: &str,
         owner_pubkey: &str,
     ) -> Result<git_repo::ReserveOutcome> {
-        git_repo::reserve_repo_name(&self.pool, community, repo_id, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .reserve_repo_name(community, repo_id, owner_pubkey)
+                .await;
+        }
+        git_repo::reserve_repo_name(&self.postgres().pool, community, repo_id, owner_pubkey).await
     }
 
     /// Count git repos reserved by `owner_pubkey` in `community` (quota check).
@@ -5405,7 +5417,10 @@ impl Db {
         community: CommunityId,
         owner_pubkey: &str,
     ) -> Result<i64> {
-        git_repo::count_repos_for_owner(&self.pool, community, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.count_repos_for_owner(community, owner_pubkey).await;
+        }
+        git_repo::count_repos_for_owner(&self.postgres().pool, community, owner_pubkey).await
     }
 
     /// Release a git repo name reservation held by `owner_pubkey` (rollback).
@@ -5418,7 +5433,12 @@ impl Db {
         repo_id: &str,
         owner_pubkey: &str,
     ) -> Result<u64> {
-        git_repo::release_repo_name(&self.pool, community, repo_id, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .release_repo_name(community, repo_id, owner_pubkey)
+                .await;
+        }
+        git_repo::release_repo_name(&self.postgres().pool, community, repo_id, owner_pubkey).await
     }
 
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
