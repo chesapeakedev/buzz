@@ -11,9 +11,12 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use crate::{DbError, Result};
 
 mod api_tokens;
+mod channels;
 mod community_auth;
 #[cfg(test)]
 mod contracts;
+#[cfg(test)]
+mod contracts_channels;
 #[cfg(test)]
 mod contracts_events;
 #[cfg(test)]
@@ -181,7 +184,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 4);
+        assert_eq!(applied, 5);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -192,11 +195,12 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 4);
+        assert_eq!(row.len(), 5);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
         assert_eq!(row[3].get::<i64, _>("version"), 4);
+        assert_eq!(row[4].get::<i64, _>("version"), 5);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -254,6 +258,8 @@ mod tests {
         let expected = BTreeSet::from([
             "api_tokens".to_owned(),
             "archived_identities".to_owned(),
+            "channel_members".to_owned(),
+            "channels".to_owned(),
             "communities".to_owned(),
             "event_mentions".to_owned(),
             "events".to_owned(),
