@@ -7,9 +7,9 @@ use buzz_core::CommunityId;
 
 use super::SqliteStore;
 use crate::push::{
-    ActiveLease, BatchedMatch, ClaimedMatchBatch, ClaimedWake, EnqueueWakeOutcome, LeaseVersion,
-    MatchLease, NewWake, ReplaceLeaseOutcome, RevalidateWakeOutcome, WakeRequest,
-    MAX_MATCH_ATTEMPTS, PUSH_GATE_BACKFILL_SECS,
+    AcceptLeaseOutcome, ActiveLease, BatchedMatch, ClaimedMatchBatch, ClaimedWake,
+    EnqueueWakeOutcome, LeaseVersion, MatchLease, NewWake, ReplaceLeaseOutcome,
+    RevalidateWakeOutcome, WakeRequest, MAX_MATCH_ATTEMPTS, PUSH_GATE_BACKFILL_SECS,
 };
 use crate::Result;
 
@@ -63,7 +63,224 @@ fn row_to_claimed_wake(row: sqlx::sqlite::SqliteRow) -> Result<ClaimedWake> {
     })
 }
 
+fn acceptance_constraint_outcome(error: &sqlx::Error) -> Option<AcceptLeaseOutcome> {
+    let database = error.as_database_error()?;
+    let message = database.message();
+    if message.contains(
+        "push_leases.community_id, push_leases.author, \
+         push_leases.app_profile, push_leases.endpoint_hash",
+    ) {
+        Some(AcceptLeaseOutcome::EndpointAlreadyLeased)
+    } else if message.contains("push_leases.community_id, push_leases.source_event_id") {
+        Some(AcceptLeaseOutcome::SourceEventCollision)
+    } else if database.is_unique_violation()
+        || database.is_check_violation()
+        || database.is_foreign_key_violation()
+    {
+        Some(AcceptLeaseOutcome::ConstraintViolation)
+    } else {
+        None
+    }
+}
+
 impl SqliteStore {
+    /// Atomically persist a validated signed lease event and effective state.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_push_lease_event(
+        &self,
+        community: CommunityId,
+        event: &nostr::Event,
+        installation_id: &str,
+        version: LeaseVersion<'_>,
+        active: Option<ActiveLease<'_>>,
+        max_active_leases: i64,
+    ) -> Result<AcceptLeaseOutcome> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let author = event.pubkey.to_bytes();
+
+        if let Some(row) = sqlx::query(
+            "SELECT author, installation_id FROM push_leases \
+             WHERE community_id = ? AND source_event_id = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(version.source_event_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let existing_author: Vec<u8> = row.try_get("author")?;
+            let existing_installation: String = row.try_get("installation_id")?;
+            transaction.rollback().await?;
+            return Ok(
+                if existing_author.as_slice() == author && existing_installation == installation_id
+                {
+                    AcceptLeaseOutcome::StaleEvent
+                } else {
+                    AcceptLeaseOutcome::SourceEventCollision
+                },
+            );
+        }
+
+        if let Some(row) = sqlx::query(
+            "SELECT source_event_id, source_created_at, generation \
+             FROM push_leases \
+             WHERE community_id = ? AND author = ? AND installation_id = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(author.as_slice())
+        .bind(installation_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let current_created_at: i64 = row.try_get("source_created_at")?;
+            let current_event_id: Vec<u8> = row.try_get("source_event_id")?;
+            let current_generation: i64 = row.try_get("generation")?;
+            let wins_event = version.source_created_at > current_created_at
+                || (version.source_created_at == current_created_at
+                    && version.source_event_id < current_event_id.as_slice());
+            if !wins_event {
+                transaction.rollback().await?;
+                return Ok(AcceptLeaseOutcome::StaleEvent);
+            }
+            if version.generation <= current_generation {
+                transaction.rollback().await?;
+                return Ok(AcceptLeaseOutcome::StaleGeneration);
+            }
+        }
+
+        let now_micros = Utc::now().timestamp_micros();
+        sqlx::query(
+            "UPDATE push_leases SET active = 0, endpoint_enabled = 0, \
+                app_profile = NULL, endpoint_hash = NULL, endpoint_grant = NULL, \
+                max_class = NULL, subscriptions = NULL, updated_at = ? \
+             WHERE community_id = ? AND author = ? AND active = 1 \
+               AND expires_at <= ?",
+        )
+        .bind(now_micros)
+        .bind(community.as_uuid().to_string())
+        .bind(author.as_slice())
+        .bind(Utc::now().timestamp())
+        .execute(&mut *transaction)
+        .await?;
+
+        if let Some(active) = active {
+            let active_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM push_leases \
+                 WHERE community_id = ? AND author = ? AND active = 1 \
+                   AND installation_id <> ?",
+            )
+            .bind(community.as_uuid().to_string())
+            .bind(author.as_slice())
+            .bind(installation_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if active_count >= max_active_leases {
+                transaction.rollback().await?;
+                return Ok(AcceptLeaseOutcome::LeaseQuotaExceeded);
+            }
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS( \
+                    SELECT 1 FROM push_leases \
+                    WHERE community_id = ? AND author = ? \
+                      AND installation_id <> ? AND active = 1 \
+                      AND app_profile = ? AND endpoint_hash = ? \
+                 )",
+            )
+            .bind(community.as_uuid().to_string())
+            .bind(author.as_slice())
+            .bind(installation_id)
+            .bind(active.app_profile)
+            .bind(active.endpoint_hash)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if duplicate {
+                transaction.rollback().await?;
+                return Ok(AcceptLeaseOutcome::EndpointAlreadyLeased);
+            }
+        }
+
+        sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND kind = 30350 AND pubkey = ? \
+               AND d_tag = ? AND deleted_at IS NULL",
+        )
+        .bind(now_micros)
+        .bind(community.as_uuid().to_string())
+        .bind(author.as_slice())
+        .bind(installation_id)
+        .execute(&mut *transaction)
+        .await?;
+        let (_, inserted) =
+            super::events::insert_event_transaction(&mut transaction, community, event, None)
+                .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(AcceptLeaseOutcome::ConstraintViolation);
+        }
+
+        let (is_active, app_profile, endpoint_hash, endpoint_grant, max_class, subscriptions) =
+            match active {
+                Some(active) => (
+                    1_i64,
+                    Some(active.app_profile),
+                    Some(active.endpoint_hash),
+                    Some(active.endpoint_grant),
+                    Some(active.max_class),
+                    Some(serde_json::to_string(active.subscriptions)?),
+                ),
+                None => (0, None, None, None, None, None),
+            };
+        let lease = sqlx::query(
+            "INSERT INTO push_leases ( \
+                community_id, author, installation_id, source_event_id, \
+                source_created_at, generation, active, app_profile, \
+                endpoint_hash, endpoint_grant, max_class, subscriptions, \
+                expires_at, updated_at \
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (community_id, author, installation_id) DO UPDATE SET \
+                source_event_id = excluded.source_event_id, \
+                source_created_at = excluded.source_created_at, \
+                generation = excluded.generation, active = excluded.active, \
+                endpoint_enabled = 1, app_profile = excluded.app_profile, \
+                endpoint_hash = excluded.endpoint_hash, \
+                endpoint_grant = excluded.endpoint_grant, \
+                max_class = excluded.max_class, \
+                subscriptions = excluded.subscriptions, \
+                expires_at = excluded.expires_at, updated_at = excluded.updated_at",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(author.as_slice())
+        .bind(installation_id)
+        .bind(version.source_event_id)
+        .bind(version.source_created_at)
+        .bind(version.generation)
+        .bind(is_active)
+        .bind(app_profile)
+        .bind(endpoint_hash)
+        .bind(endpoint_grant)
+        .bind(max_class)
+        .bind(subscriptions)
+        .bind(version.expires_at)
+        .bind(now_micros)
+        .execute(&mut *transaction)
+        .await;
+        if let Err(error) = lease {
+            let outcome = acceptance_constraint_outcome(&error);
+            transaction.rollback().await?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+            return Err(error.into());
+        }
+        if is_active == 1 {
+            backfill_push_match_jobs(&mut transaction, community, now_micros).await?;
+        }
+        transaction.commit().await?;
+        Ok(AcceptLeaseOutcome::Accepted)
+    }
+
     /// Create or rotate an active lease when event and generation ordering win.
     #[allow(clippy::too_many_arguments)]
     pub async fn replace_active_lease(

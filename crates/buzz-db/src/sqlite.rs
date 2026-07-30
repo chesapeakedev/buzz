@@ -33,6 +33,8 @@ mod contracts_identity;
 #[cfg(test)]
 mod contracts_moderation;
 #[cfg(test)]
+mod contracts_push_acceptance;
+#[cfg(test)]
 mod contracts_push_leases;
 #[cfg(test)]
 mod contracts_push_matcher;
