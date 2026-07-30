@@ -15,6 +15,16 @@ use serde::{Deserialize, Serialize};
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
+/// Build the community-scoped sidecar key for one bare SHA-256 digest.
+pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
+    format!("_meta/{community}/{sha256}.json")
+}
+
+/// Build a community-scoped sidecar key from the resolved request tenant.
+pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
+    sidecar_key(ctx.community(), sha256)
+}
+
 /// Backend-neutral media blob operations used by upload, download, and sweep paths.
 ///
 /// Implementations must preserve object keys and existing not-found semantics,
@@ -234,12 +244,12 @@ impl MediaStorage {
     /// community must never be observable through a global `_meta/{sha}.json`
     /// lookup.
     pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
-        format!("_meta/{community}/{sha256}.json")
+        sidecar_key(community, sha256)
     }
 
     /// Build the community-scoped sidecar key from the resolved request tenant.
     pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
-        Self::sidecar_key(ctx.community(), sha256)
+        ctx_sidecar_key(ctx, sha256)
     }
 
     /// Read community-scoped sidecar JSON for a given sha256 (bare hash).
