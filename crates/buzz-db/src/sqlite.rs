@@ -243,7 +243,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 17);
+        assert_eq!(applied, 18);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -254,7 +254,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 17);
+        assert_eq!(row.len(), 18);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -272,6 +272,7 @@ mod tests {
         assert_eq!(row[14].get::<i64, _>("version"), 15);
         assert_eq!(row[15].get::<i64, _>("version"), 16);
         assert_eq!(row[16].get::<i64, _>("version"), 17);
+        assert_eq!(row[17].get::<i64, _>("version"), 18);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -336,7 +337,9 @@ mod tests {
             "communities".to_owned(),
             "event_mentions".to_owned(),
             "events".to_owned(),
+            "git_pointers".to_owned(),
             "git_repo_names".to_owned(),
+            "media_objects".to_owned(),
             "join_policy_acceptances".to_owned(),
             "moderation_actions".to_owned(),
             "moderation_reports".to_owned(),

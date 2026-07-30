@@ -22,7 +22,8 @@ pub use config::MediaConfig;
 pub use error::MediaError;
 pub use filesystem::{FilesystemBlobConfig, FilesystemBlobStorage};
 pub use storage::{
-    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, ByteStream, MediaStorage,
+    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobMetadata, BlobStorage, ByteStream,
+    MediaStorage,
 };
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};

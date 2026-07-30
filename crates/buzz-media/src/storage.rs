@@ -78,6 +78,52 @@ pub trait BlobStorage: Send + Sync {
     ) -> Result<crate::bucket_index::Page, MediaError>;
 }
 
+/// Backend-neutral community-scoped blob metadata.
+///
+/// The distributed S3 adapter persists this as sidecar JSON under
+/// `_meta/{community}/{sha256}.json` (see [`BlobStorage::get_sidecar`]). The
+/// embedded SQLite adapter stores the same [`BlobMeta`] fields as a relational
+/// `media_objects` row, making the metadata row the atomic publication gate
+/// for a blob write. The `BlobMeta` wire shape and community-scoped keying stay
+/// identical across backends so objects remain portable between S3 and
+/// filesystem storage.
+///
+/// `ctx` must always be the server-resolved request tenant. Callers must never
+/// derive the community from client-supplied blob metadata, URLs, or event
+/// tags; the community scope is the read-authorization boundary for otherwise
+/// shared content-addressed bytes.
+#[async_trait::async_trait]
+pub trait BlobMetadata: Send + Sync {
+    /// Read community-scoped blob metadata for a bare SHA-256 digest.
+    ///
+    /// Returns `Ok(None)` when no metadata has been published for this
+    /// community + digest. Absence is not an error — it is the normal state
+    /// of an uploaded blob whose serve gate has not yet been published.
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError>;
+
+    /// Publish community-scoped blob metadata.
+    ///
+    /// This is the atomic serve gate: until it succeeds the blob is not
+    /// readable through the media API. Idempotent for identical metadata.
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError>;
+
+    /// Read just the MIME type for a `sha256.ext` (or bare) digest.
+    ///
+    /// Returns `None` for absent metadata and unreadable sidecars, collapsing
+    /// the distinction so a cross-community request cannot distinguish a
+    /// B-only blob from a missing blob.
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String>;
+}
+
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
@@ -389,6 +435,42 @@ impl BlobStorage for MediaStorage {
     }
 }
 
+/// Distributed adapter: persist blob metadata as community-scoped sidecar JSON.
+///
+/// This preserves the existing S3 behavior exactly — the sidecar write goes
+/// through the same `put` path and `read_mime` collapses absence and failure
+/// to `None`. `get_metadata` maps an S3 404 to `Ok(None)` so absent metadata is
+/// distinguishable from a genuine storage failure, which the SQLite adapter
+/// (the embedded `media_objects` row) provides natively.
+#[async_trait::async_trait]
+impl BlobMetadata for MediaStorage {
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        match self.bucket.get_object(&key).await {
+            Ok(resp) => Ok(Some(serde_json::from_slice(&resp.to_vec())?)),
+            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        MediaStorage::put_sidecar(self, ctx, sha256, meta).await
+    }
+
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        MediaStorage::read_sidecar_mime(self, ctx, sha256_ext).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +533,12 @@ mod tests {
             err.to_string().contains("must be configured together"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn media_storage_implements_blob_metadata() {
+        fn assert_blob_metadata<T: BlobMetadata>() {}
+        assert_blob_metadata::<MediaStorage>();
     }
 
     #[test]
