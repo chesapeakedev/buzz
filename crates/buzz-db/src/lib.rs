@@ -200,6 +200,8 @@ async fn insert_mentions_in_transaction(
 pub enum DatabaseBackendKind {
     /// Distributed PostgreSQL storage.
     Postgres,
+    /// Single-process SQLite storage.
+    Sqlite,
 }
 #[derive(Debug)]
 struct PostgresStore {
@@ -211,6 +213,7 @@ struct PostgresStore {
 #[derive(Debug)]
 enum DatabaseBackend {
     Postgres(PostgresStore),
+    Sqlite(sqlite::SqliteStore),
 }
 
 /// Backend-dispatching database facade. Clone is cheap.
@@ -625,6 +628,7 @@ impl Db {
     fn postgres(&self) -> &PostgresStore {
         match self.backend.as_ref() {
             DatabaseBackend::Postgres(store) => store,
+            DatabaseBackend::Sqlite(_) => panic!("PostgreSQL backend requested from SQLite Db"),
         }
     }
     #[cfg(test)]
@@ -635,6 +639,7 @@ impl Db {
     pub fn backend_kind(&self) -> DatabaseBackendKind {
         match self.backend.as_ref() {
             DatabaseBackend::Postgres(_) => DatabaseBackendKind::Postgres,
+            DatabaseBackend::Sqlite(_) => DatabaseBackendKind::Sqlite,
         }
     }
     fn from_postgres_parts(
@@ -661,6 +666,15 @@ impl Db {
             replica_read_max_age,
             reader_aurora_identity,
         }
+    }
+
+    /// Creates a SQLite-backed database facade for the embedded deployment.
+    pub async fn new_sqlite(path: &std::path::Path, config: &sqlite::SqliteConfig) -> Result<Self> {
+        let store = sqlite::SqliteStore::connect(path, config).await?;
+        store.migrate().await?;
+        Ok(Self {
+            backend: std::sync::Arc::new(DatabaseBackend::Sqlite(store)),
+        })
     }
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
@@ -863,6 +877,9 @@ impl Db {
     /// stays closed: every cursor page routes to the writer. The relay keeps
     /// serving — degraded capacity, never holes.
     pub async fn spawn_fence_probe(&self) -> Result<bool> {
+        if matches!(self.backend.as_ref(), DatabaseBackend::Sqlite(_)) {
+            return Ok(false);
+        }
         if self.read_pool.is_none() {
             return Ok(false);
         }
@@ -1043,12 +1060,23 @@ impl Db {
     /// Run pending database migrations.
     #[datastore_span(name = "migrate", system = "postgresql")]
     pub async fn migrate(&self) -> Result<()> {
-        migration::run_migrations(&self.pool).await
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => migration::run_migrations(&store.pool).await,
+            DatabaseBackend::Sqlite(store) => store.migrate().await,
+        }
     }
 
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
-        sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => {
+                sqlx::query("SELECT 1").execute(&store.pool).await.is_ok()
+            }
+            DatabaseBackend::Sqlite(store) => sqlx::query("SELECT 1")
+                .execute(&store.adapter_pool())
+                .await
+                .is_ok(),
+        }
     }
 
     /// Validate the minimum deletion fence catalog required by serving paths.
@@ -1067,10 +1095,20 @@ impl Db {
     /// `idle`  — connections available for immediate reuse
     /// `max`   — pool ceiling set at construction
     pub fn pool_stats(&self) -> DbPoolStats {
-        DbPoolStats {
-            size: self.pool.size(),
-            idle: self.pool.num_idle() as u32,
-            max: self.max_connections,
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => DbPoolStats {
+                size: store.pool.size(),
+                idle: store.pool.num_idle() as u32,
+                max: store.max_connections,
+            },
+            DatabaseBackend::Sqlite(store) => {
+                let pool = store.adapter_pool();
+                DbPoolStats {
+                    size: pool.size(),
+                    idle: pool.num_idle() as u32,
+                    max: pool.options().get_max_connections(),
+                }
+            }
         }
     }
 
@@ -1083,11 +1121,14 @@ impl Db {
     /// exactly the ratio of the two pool sizes — in the direction that hides
     /// the problem.
     pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
-        self.read_pool.as_ref().map(|p| DbPoolStats {
-            size: p.size(),
-            idle: p.num_idle() as u32,
-            max: self.read_max_connections,
-        })
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => store.read_pool.as_ref().map(|p| DbPoolStats {
+                size: p.size(),
+                idle: p.num_idle() as u32,
+                max: store.max_connections,
+            }),
+            DatabaseBackend::Sqlite(_) => None,
+        }
     }
 
     /// Try to acquire the detached session advisory lock for relay usage metrics.
@@ -1264,6 +1305,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.lookup_community_by_host(normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -1293,6 +1337,9 @@ impl Db {
     /// Returns whether a community id still exists in the active lifecycle state.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_community_active(community_id).await;
+        }
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
@@ -1452,6 +1499,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.ensure_configured_community(normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -1722,7 +1772,11 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let result = event::insert_event(&self.pool, community_id, event, channel_id).await?;
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_event(community_id, event, channel_id).await;
+        }
+        let result =
+            event::insert_event(&self.postgres().pool, community_id, event, channel_id).await?;
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
@@ -1783,6 +1837,9 @@ impl Db {
     /// explicit, per-callsite decision, never a change to this method.
     #[datastore_span(name = "query_events", system = "postgresql")]
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.query_events(q).await;
+        }
         event::query_events(&self.pool, q).await
     }
 
@@ -1944,7 +2001,10 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
-        event::get_event_by_id(&self.pool, community_id, id_bytes).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_event_by_id(community_id, id_bytes).await;
+        }
+        event::get_event_by_id(&self.postgres().pool, community_id, id_bytes).await
     }
 
     /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
@@ -1954,7 +2014,13 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
-        event::get_event_by_id_including_deleted(&self.pool, community_id, id_bytes).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_event_by_id_including_deleted(community_id, id_bytes)
+                .await;
+        }
+        event::get_event_by_id_including_deleted(&self.postgres().pool, community_id, id_bytes)
+            .await
     }
 
     /// Soft-deletes an event. Returns `Ok(true)` if deleted, `Ok(false)` if already deleted.
@@ -1964,7 +2030,10 @@ impl Db {
         community_id: CommunityId,
         event_id: &[u8],
     ) -> Result<bool> {
-        event::soft_delete_event(&self.pool, community_id, event_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.soft_delete_event(community_id, event_id).await;
+        }
+        event::soft_delete_event(&self.postgres().pool, community_id, event_id).await
     }
 
     /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`
@@ -4765,6 +4834,9 @@ impl Db {
     /// permission reads.
     #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_relay_member(community, pubkey).await;
+        }
         let path = "relay_membership";
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
@@ -4885,7 +4957,10 @@ impl Db {
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
     #[datastore_span(name = "bootstrap_owner", system = "postgresql")]
     pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
-        relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.bootstrap_owner(community, owner_pubkey).await;
+        }
+        relay_members::bootstrap_owner(&self.postgres().pool, community, owner_pubkey).await
     }
 
     /// Returns `true` if any member of `community` holds the `admin` or
@@ -4920,7 +4995,10 @@ impl Db {
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     #[datastore_span(name = "backfill_from_allowlist", system = "postgresql")]
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
-        relay_members::backfill_from_allowlist(&self.pool, community).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.backfill_from_allowlist(community).await;
+        }
+        relay_members::backfill_from_allowlist(&self.postgres().pool, community).await
     }
 
     /// Mints a v2 use-limited relay invite. The plaintext code is returned
@@ -5278,6 +5356,11 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .replace_addressable_event(community_id, event, channel_id)
+                .await;
+        }
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
@@ -5704,6 +5787,43 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    async fn postgres_constructors_select_postgres_backend() {
+        let pool = PgPool::connect_lazy(TEST_DB_URL).expect("create lazy Postgres pool");
+        let db = Db::from_pool(pool);
+        assert_eq!(db.backend_kind(), DatabaseBackendKind::Postgres);
+        assert_eq!(db.clone().backend_kind(), DatabaseBackendKind::Postgres);
+    }
+
+    #[tokio::test]
+    async fn sqlite_constructor_applies_migrations_and_dispatches_core_operations() {
+        let directory = tempfile::tempdir().expect("temporary SQLite directory");
+        let db = Db::new_sqlite(
+            &directory.path().join("buzz.sqlite3"),
+            &sqlite::SqliteConfig::default(),
+        )
+        .await
+        .expect("SQLite facade");
+        assert_eq!(db.backend_kind(), DatabaseBackendKind::Sqlite);
+        assert!(db.ping().await);
+        assert!(db.read_pool_stats().is_none());
+        let host = format!("embedded-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure SQLite community");
+        assert_eq!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("lookup SQLite community")
+                .expect("community exists")
+                .id,
+            community.id
+        );
+        assert!(db.is_community_active(community.id).await.expect("active"));
+        assert!(!db.spawn_fence_probe().await.expect("SQLite fence disabled"));
     }
 
     #[tokio::test]
@@ -10833,3 +10953,224 @@ mod tests {
         drop_scratch_db(&admin, pool, &name).await;
     }
 }
+    pub async fn replace_parameterized_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .replace_parameterized_event(community_id, event, d_tag, channel_id)
+                .await;
+        }
+        let kind_i32 = buzz_core::kind::event_kind_i32(event);
+        let pubkey_bytes = event.pubkey.to_bytes();
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
+
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let d_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
+            .count();
+        let has_exact_d_tag = event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+        });
+        let read_state_t_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+            })
+            .count();
+        let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
+            && d_tag_count == 1
+            && has_exact_d_tag
+            && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
+                slot.len() == 32
+                    && slot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            && read_state_t_tag_count == 1;
+        let is_buzz_mesh_status = kind_i32 == buzz_core::kind::KIND_BOOKMARK_SET as i32
+            && d_tag.starts_with("buzz-mesh-member-status:")
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
+            });
+        let hard_delete_superseded = is_nip_rs || is_buzz_mesh_status;
+
+        // Check the live head and, for NIP-RS, the compact historical ordering
+        // watermark. The watermark remains after a NIP-09 coordinate deletion,
+        // preventing a previously accepted signed blob from being resurrected.
+        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let watermark: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = if is_nip_rs {
+            sqlx::query_as(
+                "SELECT created_at, event_id FROM parameterized_event_watermarks \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+
+        // Stale-write protection: reject if either durable ordering source
+        // dominates the incoming tuple. Equal timestamps use lowest event id.
+        let incoming_id = event.id.as_bytes().as_slice();
+        let dominated =
+            existing
+                .iter()
+                .chain(watermark.iter())
+                .any(|(accepted_ts, accepted_id)| {
+                    created_at < *accepted_ts
+                        || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
+                });
+        if dominated {
+            tx.rollback().await?;
+            let received_at = chrono::Utc::now();
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        if existing.is_some() {
+            if is_nip_rs {
+                // Migration 0011 rejects regex-coordinate hard deletes from
+                // pre-fix writers. Authorize only this corrected NIP-RS delete,
+                // transaction-locally so pooled connections cannot leak it.
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let statement = if hard_delete_superseded {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .execute(&mut *tx)
+                .await?;
+
+            if hard_delete_superseded {
+                if let Some((_, existing_id)) = &existing {
+                    // Event first, mentions second: migration 0009's live-event
+                    // fence uses this global lock order to avoid deadlocks.
+                    sqlx::query(
+                        "DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(existing_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+
+        // Insert the new event inside the transaction.
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag)
+        .bind(event::extract_not_before(event))
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if !was_inserted {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        if is_nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .bind(created_at)
+            .bind(incoming_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+
+        // Mentions are a denormalized index — safe outside the transaction.
+        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+            true,
+        ))
+    }
+}
+/// A full API token record.
