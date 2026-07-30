@@ -171,6 +171,53 @@ pub struct GitStore {
     bucket: Arc<Bucket>,
 }
 
+/// Backend-neutral immutable-object and compare-and-swap operations for Git.
+///
+/// Implementations keep packs and manifests content-addressed, validate
+/// immutable reads, return pointer bodies and version tokens from one
+/// snapshot, and classify failed pointer preconditions as
+/// [`CasOutcome::LostRace`] rather than storage failures.
+#[async_trait::async_trait]
+pub trait GitStorage: Send + Sync {
+    /// Store one immutable pack and return its content-addressed key.
+    async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Best-effort create-only write of one derived pack index.
+    async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Read one derived pack index, returning `None` when absent.
+    async fn get_idx(&self, pack_digest: &str, max_bytes: u64)
+        -> Result<Option<Bytes>, StoreError>;
+
+    /// Store one immutable manifest and return its content-addressed key.
+    async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Read and digest-verify an immutable object.
+    async fn get_verified(&self, key: &str, expected_digest: &str) -> Result<Bytes, StoreError>;
+
+    /// Read and digest-verify a bounded immutable object.
+    async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError>;
+
+    /// Read a pointer body and version token from one snapshot.
+    async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError>;
+
+    /// Conditionally replace a pointer.
+    async fn put_pointer(
+        &self,
+        key: &str,
+        body: &[u8],
+        precond: Precond,
+    ) -> Result<CasOutcome, StoreError>;
+
+    /// Verify immutable-object and pointer-CAS guarantees.
+    async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError>;
+}
+
 impl GitStore {
     /// Build a client against an S3-compatible endpoint (e.g. MinIO).
     ///
@@ -912,6 +959,59 @@ impl GitStore {
     }
 }
 
+#[async_trait::async_trait]
+impl GitStorage for GitStore {
+    async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_pack(self, bytes).await
+    }
+
+    async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_idx(self, pack_digest, idx_bytes).await
+    }
+
+    async fn get_idx(
+        &self,
+        pack_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Bytes>, StoreError> {
+        GitStore::get_idx(self, pack_digest, max_bytes).await
+    }
+
+    async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_manifest(self, bytes).await
+    }
+
+    async fn get_verified(&self, key: &str, expected_digest: &str) -> Result<Bytes, StoreError> {
+        GitStore::get_verified(self, key, expected_digest).await
+    }
+
+    async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError> {
+        GitStore::get_verified_limited(self, key, expected_digest, max_bytes).await
+    }
+
+    async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        GitStore::get_pointer(self, key).await
+    }
+
+    async fn put_pointer(
+        &self,
+        key: &str,
+        body: &[u8],
+        precond: Precond,
+    ) -> Result<CasOutcome, StoreError> {
+        GitStore::put_pointer(self, key, body, precond).await
+    }
+
+    async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        GitStore::run_conformance_probe(self, config).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,7 +1124,7 @@ mod probe {
     //!   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //!     api::git::store::probe -- --nocapture --test-threads=1
     //!
-    //! Pre-req: `docker compose up minio` and the `buzz-git` bucket exists.
+    //! Pre-req: `docker compose up -d minio minio-init`.
 
     use super::*;
 
@@ -1062,6 +1162,111 @@ mod probe {
         let mut h = Sha256::new();
         h.update(b);
         hex::encode(h.finalize())
+    }
+
+    async fn run_git_storage_contract(store: &dyn GitStorage) -> Vec<String> {
+        let run = uuid::Uuid::new_v4();
+        let pack = format!("git-storage-contract-{run}").into_bytes();
+        let digest = sha256_hex(&pack);
+        let pack_key = store.put_pack(&pack).await.expect("put pack");
+        assert_eq!(pack_key, format!("packs/{digest}"));
+        assert_eq!(
+            store.put_pack(&pack).await.expect("idempotent pack put"),
+            pack_key
+        );
+        assert_eq!(
+            store
+                .get_verified_limited(&pack_key, &digest, pack.len() as u64)
+                .await
+                .expect("bounded verified pack read"),
+            pack
+        );
+        assert!(matches!(
+            store.get_verified(&pack_key, &"0".repeat(64)).await,
+            Err(StoreError::DigestMismatch { .. })
+        ));
+
+        let idx = b"derived-index";
+        assert_eq!(
+            store
+                .put_idx(&digest, idx)
+                .await
+                .expect("put derived index"),
+            format!("idx/{digest}")
+        );
+        assert_eq!(
+            store
+                .get_idx(&digest, idx.len() as u64)
+                .await
+                .expect("get derived index")
+                .expect("derived index exists"),
+            idx.as_slice()
+        );
+
+        let manifest = format!(r#"{{"contract":"{run}"}}"#);
+        let manifest_key = store
+            .put_manifest(manifest.as_bytes())
+            .await
+            .expect("put manifest");
+        let manifest_digest = manifest_key
+            .strip_prefix("manifests/")
+            .expect("content-addressed manifest key");
+        assert_eq!(
+            store
+                .get_verified(&manifest_key, manifest_digest)
+                .await
+                .expect("verified manifest read"),
+            manifest
+        );
+
+        let pointer_key = format!("pointers/contract-{run}.json");
+        assert!(store
+            .get_pointer(&pointer_key)
+            .await
+            .expect("missing pointer read")
+            .is_none());
+        let first = store
+            .put_pointer(
+                &pointer_key,
+                manifest_digest.as_bytes(),
+                Precond::IfNoneMatchStar,
+            )
+            .await
+            .expect("create pointer");
+        let first_etag = match first {
+            CasOutcome::Won(etag) => etag,
+            CasOutcome::LostRace => panic!("fresh pointer create must win"),
+        };
+        assert_eq!(
+            store
+                .put_pointer(&pointer_key, b"stale", Precond::IfNoneMatchStar)
+                .await
+                .expect("second create-only pointer write"),
+            CasOutcome::LostRace
+        );
+        let second = store
+            .put_pointer(&pointer_key, b"next", Precond::IfMatch(first_etag.clone()))
+            .await
+            .expect("matching pointer swap");
+        assert!(matches!(second, CasOutcome::Won(_)));
+        assert_eq!(
+            store
+                .put_pointer(&pointer_key, b"stale", Precond::IfMatch(first_etag))
+                .await
+                .expect("stale pointer swap"),
+            CasOutcome::LostRace
+        );
+        assert_eq!(
+            store
+                .get_pointer(&pointer_key)
+                .await
+                .expect("pointer snapshot")
+                .expect("pointer exists")
+                .1,
+            b"next".as_slice()
+        );
+
+        vec![pack_key, format!("idx/{digest}"), manifest_key, pointer_key]
     }
 
     #[tokio::test]
@@ -1169,6 +1374,17 @@ mod probe {
         // Cleanup.
         let _ = st.bucket.delete_object(&pkey).await;
         let _ = st.bucket.delete_object(&key).await;
+    }
+
+    #[tokio::test]
+    async fn probe_backend_neutral_storage_contract() {
+        if !probe_enabled() {
+            return;
+        }
+        let store = store();
+        for key in run_git_storage_contract(&store).await {
+            let _ = store.bucket.delete_object(&key).await;
+        }
     }
 
     /// End-to-end conformance probe against MinIO. This is the same code path
