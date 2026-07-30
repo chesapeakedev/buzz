@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use super::{SqliteConfig, SqliteStore};
-use crate::channel::{ChannelRecord, ChannelType, ChannelVisibility, MemberRecord, MemberRole};
+use crate::channel::{
+    ChannelRecord, ChannelType, ChannelUpdate, ChannelVisibility, MemberRecord, MemberRole,
+    ReapedEphemeralChannel,
+};
 use crate::{CommunityId, Db, DbError, EnsuredCommunityRecord, Result};
 
 #[async_trait]
@@ -20,6 +23,13 @@ trait ChannelFoundationContract: Sync {
         created_by: &[u8],
     ) -> Result<(ChannelRecord, bool)>;
     async fn get_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<ChannelRecord>;
+    async fn get_canvas(&self, community: CommunityId, channel_id: Uuid) -> Result<Option<String>>;
+    async fn set_canvas(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        canvas: Option<&str>,
+    ) -> Result<()>;
     async fn list_channels(
         &self,
         community: CommunityId,
@@ -79,6 +89,30 @@ trait ChannelFoundationContract: Sync {
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>>;
+    async fn update_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        updates: ChannelUpdate,
+    ) -> Result<ChannelRecord>;
+    async fn set_topic(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        topic: &str,
+        set_by: &[u8],
+    ) -> Result<()>;
+    async fn set_purpose(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        purpose: &str,
+        set_by: &[u8],
+    ) -> Result<()>;
+    async fn archive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()>;
+    async fn unarchive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()>;
+    async fn soft_delete_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<bool>;
+    async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>>;
 }
 
 macro_rules! impl_contract {
@@ -117,6 +151,23 @@ macro_rules! impl_contract {
                 channel_id: Uuid,
             ) -> Result<ChannelRecord> {
                 self.get_channel(community, channel_id).await
+            }
+
+            async fn get_canvas(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+            ) -> Result<Option<String>> {
+                self.get_canvas(community, channel_id).await
+            }
+
+            async fn set_canvas(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                canvas: Option<&str>,
+            ) -> Result<()> {
+                self.set_canvas(community, channel_id, canvas).await
             }
 
             async fn list_channels(
@@ -215,6 +266,64 @@ macro_rules! impl_contract {
                 pubkey: &[u8],
             ) -> Result<Vec<Uuid>> {
                 self.get_accessible_channel_ids(community, pubkey).await
+            }
+
+            async fn update_channel(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                updates: ChannelUpdate,
+            ) -> Result<ChannelRecord> {
+                self.update_channel(community, channel_id, updates).await
+            }
+
+            async fn set_topic(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                topic: &str,
+                set_by: &[u8],
+            ) -> Result<()> {
+                self.set_topic(community, channel_id, topic, set_by).await
+            }
+
+            async fn set_purpose(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                purpose: &str,
+                set_by: &[u8],
+            ) -> Result<()> {
+                self.set_purpose(community, channel_id, purpose, set_by)
+                    .await
+            }
+
+            async fn archive_channel(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+            ) -> Result<()> {
+                self.archive_channel(community, channel_id).await
+            }
+
+            async fn unarchive_channel(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+            ) -> Result<()> {
+                self.unarchive_channel(community, channel_id).await
+            }
+
+            async fn soft_delete_channel(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+            ) -> Result<bool> {
+                self.soft_delete_channel(community, channel_id).await
+            }
+
+            async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
+                self.reap_expired_ephemeral_channels().await
             }
         }
     };
@@ -370,6 +479,100 @@ async fn run_contract(store: &impl ChannelFoundationContract) {
             .len(),
         1
     );
+
+    store
+        .set_canvas(community_a, channel_id, Some(r#"{"type":"doc"}"#))
+        .await
+        .expect("set canvas");
+    assert_eq!(
+        store
+            .get_canvas(community_a, channel_id)
+            .await
+            .expect("get canvas")
+            .as_deref(),
+        Some(r#"{"type":"doc"}"#)
+    );
+    let updated = store
+        .update_channel(
+            community_a,
+            channel_id,
+            ChannelUpdate {
+                name: Some("  #renamed  ".to_owned()),
+                description: Some("channel contract".to_owned()),
+                visibility: Some(ChannelVisibility::Open.as_str().to_owned()),
+                ttl_seconds: Some(Some(-1)),
+            },
+        )
+        .await
+        .expect("update channel");
+    assert_eq!(updated.name, "renamed");
+    assert_eq!(updated.description.as_deref(), Some("channel contract"));
+    assert_eq!(updated.ttl_seconds, Some(-1));
+    assert!(updated.ttl_deadline.is_some());
+    assert_eq!(
+        store
+            .get_channel(community_b, channel_id)
+            .await
+            .expect("foreign channel unchanged")
+            .name,
+        "private-room"
+    );
+    store
+        .set_topic(community_a, channel_id, "contract topic", &owner_a)
+        .await
+        .expect("set topic");
+    store
+        .set_purpose(community_a, channel_id, "contract purpose", &owner_a)
+        .await
+        .expect("set purpose");
+    let metadata = store
+        .get_channel(community_a, channel_id)
+        .await
+        .expect("channel metadata");
+    assert_eq!(metadata.topic.as_deref(), Some("contract topic"));
+    assert_eq!(metadata.topic_set_by.as_deref(), Some(owner_a.as_slice()));
+    assert_eq!(metadata.purpose.as_deref(), Some("contract purpose"));
+    assert_eq!(metadata.purpose_set_by.as_deref(), Some(owner_a.as_slice()));
+
+    store
+        .archive_channel(community_a, channel_id)
+        .await
+        .expect("archive");
+    assert!(matches!(
+        store
+            .archive_channel(community_a, channel_id)
+            .await
+            .expect_err("repeat archive"),
+        DbError::AccessDenied(_)
+    ));
+    store
+        .unarchive_channel(community_a, channel_id)
+        .await
+        .expect("unarchive");
+    assert!(matches!(
+        store
+            .unarchive_channel(community_a, channel_id)
+            .await
+            .expect_err("repeat unarchive"),
+        DbError::AccessDenied(_)
+    ));
+    let reaped = store
+        .reap_expired_ephemeral_channels()
+        .await
+        .expect("reap expired channel");
+    assert!(reaped.iter().any(|channel| {
+        channel.community_id == community_a && channel.channel_id == channel_id
+    }));
+    assert!(store
+        .get_channel(community_a, channel_id)
+        .await
+        .expect("reaped channel")
+        .archived_at
+        .is_some());
+    store
+        .unarchive_channel(community_a, channel_id)
+        .await
+        .expect("restore reaped channel");
 
     let private_id = Uuid::new_v4();
     store
@@ -562,6 +765,30 @@ async fn run_contract(store: &impl ChannelFoundationContract) {
         .filter(|member| member.role == MemberRole::Owner.as_str())
         .count();
     assert_eq!(owners, 1);
+
+    assert!(store
+        .soft_delete_channel(community_a, channel_id)
+        .await
+        .expect("soft delete"));
+    assert!(!store
+        .soft_delete_channel(community_a, channel_id)
+        .await
+        .expect("repeat soft delete"));
+    assert!(matches!(
+        store
+            .get_channel(community_a, channel_id)
+            .await
+            .expect_err("deleted channel is hidden"),
+        DbError::ChannelNotFound(id) if id == channel_id
+    ));
+    assert_eq!(
+        store
+            .get_channel(community_b, channel_id)
+            .await
+            .expect("foreign channel survives")
+            .name,
+        "private-room"
+    );
 }
 
 #[tokio::test]

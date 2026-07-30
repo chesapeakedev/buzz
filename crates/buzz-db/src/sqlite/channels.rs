@@ -5,7 +5,10 @@ use sqlx::{QueryBuilder, Row as _, Sqlite};
 use uuid::Uuid;
 
 use super::SqliteStore;
-use crate::channel::{ChannelRecord, ChannelType, ChannelVisibility, MemberRecord, MemberRole};
+use crate::channel::{
+    ChannelRecord, ChannelType, ChannelUpdate, ChannelVisibility, MemberRecord, MemberRole,
+    ReapedEphemeralChannel,
+};
 use crate::{CommunityId, DbError, Result};
 
 fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
@@ -706,5 +709,331 @@ impl SqliteStore {
                     .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))
             })
             .collect()
+    }
+}
+
+impl SqliteStore {
+    /// Return canvas content for a live channel.
+    pub async fn get_canvas(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT canvas FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))
+    }
+
+    /// Set or clear canvas content for a live channel.
+    pub async fn set_canvas(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        canvas: Option<&str>,
+    ) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE channels SET canvas = ? \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(canvas)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        Ok(())
+    }
+
+    /// Update supplied channel metadata fields.
+    pub async fn update_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        mut updates: ChannelUpdate,
+    ) -> Result<ChannelRecord> {
+        if updates.name.is_none()
+            && updates.description.is_none()
+            && updates.visibility.is_none()
+            && updates.ttl_seconds.is_none()
+        {
+            return Err(DbError::InvalidData(
+                "at least one field must be provided for update".to_owned(),
+            ));
+        }
+        if let Some(name) = updates.name.as_mut() {
+            *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+            if name.is_empty() {
+                return Err(DbError::InvalidData("channel name is required".to_owned()));
+            }
+        }
+
+        let now = Utc::now().timestamp_micros();
+        let ttl_deadline = match updates.ttl_seconds {
+            Some(Some(ttl)) => Some(
+                i64::from(ttl)
+                    .checked_mul(1_000_000)
+                    .and_then(|duration| now.checked_add(duration))
+                    .ok_or_else(|| {
+                        DbError::InvalidData("ttl_seconds produces an invalid deadline".to_owned())
+                    })?,
+            ),
+            Some(None) | None => None,
+        };
+        let _writer = self.acquire_writer().await;
+        let mut builder = QueryBuilder::<Sqlite>::new("UPDATE channels SET ");
+        let mut assignments = builder.separated(", ");
+        if let Some(name) = updates.name {
+            assignments.push("name = ").push_bind_unseparated(name);
+        }
+        if let Some(description) = updates.description {
+            assignments
+                .push("description = ")
+                .push_bind_unseparated(description);
+        }
+        if let Some(visibility) = updates.visibility {
+            assignments
+                .push("visibility = ")
+                .push_bind_unseparated(visibility);
+        }
+        if let Some(ttl_seconds) = updates.ttl_seconds {
+            assignments
+                .push("ttl_seconds = ")
+                .push_bind_unseparated(ttl_seconds)
+                .push_unseparated(", ttl_deadline = ")
+                .push_bind_unseparated(ttl_deadline);
+        }
+        assignments.push("updated_at = ").push_bind_unseparated(now);
+        builder
+            .push(" WHERE community_id = ")
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND id = ")
+            .push_bind(channel_id.to_string())
+            .push(" AND deleted_at IS NULL");
+        let result = builder.build().execute(&self.pool).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        self.get_channel(community, channel_id).await
+    }
+
+    /// Set a channel topic and its author timestamp.
+    pub async fn set_topic(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        topic: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        self.set_text_metadata(community, channel_id, "topic", topic, set_by)
+            .await
+    }
+
+    /// Set a channel purpose and its author timestamp.
+    pub async fn set_purpose(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        purpose: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        self.set_text_metadata(community, channel_id, "purpose", purpose, set_by)
+            .await
+    }
+
+    async fn set_text_metadata(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        field: &'static str,
+        value: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        if set_by.len() != 32 {
+            return Err(DbError::InvalidData(format!(
+                "pubkey must be 32 bytes, got {}",
+                set_by.len()
+            )));
+        }
+        let sql = match field {
+            "topic" => {
+                "UPDATE channels \
+                 SET topic = ?, topic_set_by = ?, topic_set_at = ? \
+                 WHERE community_id = ? AND id = ? AND deleted_at IS NULL"
+            }
+            "purpose" => {
+                "UPDATE channels \
+                 SET purpose = ?, purpose_set_by = ?, purpose_set_at = ? \
+                 WHERE community_id = ? AND id = ? AND deleted_at IS NULL"
+            }
+            _ => {
+                return Err(DbError::InvalidData(
+                    "unsupported channel metadata field".to_owned(),
+                ))
+            }
+        };
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(sql)
+            .bind(value)
+            .bind(set_by)
+            .bind(now)
+            .bind(community.as_uuid().to_string())
+            .bind(channel_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        Ok(())
+    }
+
+    /// Archive a live, unarchived channel.
+    pub async fn archive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels SET archived_at = ? \
+             WHERE community_id = ? AND id = ? \
+               AND deleted_at IS NULL AND archived_at IS NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        self.channel_lifecycle_error(community, channel_id, true)
+            .await
+    }
+
+    /// Unarchive a live channel and renew its ephemeral deadline.
+    pub async fn unarchive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels \
+             SET archived_at = NULL, \
+                 ttl_deadline = CASE \
+                   WHEN ttl_seconds IS NOT NULL THEN ? + ttl_seconds * 1000000 \
+                   ELSE ttl_deadline END \
+             WHERE community_id = ? AND id = ? \
+               AND deleted_at IS NULL AND archived_at IS NOT NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        self.channel_lifecycle_error(community, channel_id, false)
+            .await
+    }
+
+    async fn channel_lifecycle_error(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        archiving: bool,
+    ) -> Result<()> {
+        let archived_at: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT archived_at FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        match archived_at {
+            None => Err(DbError::ChannelNotFound(channel_id)),
+            Some(Some(_)) if archiving => Err(DbError::AccessDenied(
+                "channel is already archived".to_owned(),
+            )),
+            Some(None) if !archiving => {
+                Err(DbError::AccessDenied("channel is not archived".to_owned()))
+            }
+            Some(_) => Err(DbError::Conflict(
+                "channel lifecycle changed concurrently".to_owned(),
+            )),
+        }
+    }
+
+    /// Soft-delete a channel, returning false when absent or already deleted.
+    pub async fn soft_delete_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels SET deleted_at = ? \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Archive every due ephemeral channel in active communities.
+    pub async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT ch.community_id, c.host, ch.id \
+             FROM channels ch \
+             JOIN communities c ON ch.community_id = c.id \
+             WHERE ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < ? \
+               AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+               AND c.archived_at IS NULL \
+             ORDER BY ch.community_id, ch.id",
+        )
+        .bind(now)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut reaped = Vec::with_capacity(rows.len());
+        for row in rows {
+            let community_id: String = row.try_get("community_id")?;
+            let channel_id: String = row.try_get("id")?;
+            sqlx::query(
+                "UPDATE channels SET archived_at = ? \
+                 WHERE community_id = ? AND id = ? AND archived_at IS NULL",
+            )
+            .bind(now)
+            .bind(&community_id)
+            .bind(&channel_id)
+            .execute(&mut *transaction)
+            .await?;
+            reaped.push(ReapedEphemeralChannel {
+                community_id: CommunityId::from_uuid(
+                    Uuid::parse_str(&community_id).map_err(|error| {
+                        DbError::InvalidData(format!("community UUID: {error}"))
+                    })?,
+                ),
+                host: row.try_get("host")?,
+                channel_id: Uuid::parse_str(&channel_id)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?,
+            });
+        }
+        transaction.commit().await?;
+        Ok(reaped)
     }
 }
