@@ -21,7 +21,8 @@ pub use bucket_index::{
 pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
 pub use storage::{
-    BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage, ObjectVersionEntry,
+    BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome, ByteStream, MediaStorage,
+    ObjectVersionEntry,
     ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
 };
 pub use types::BlobDescriptor;

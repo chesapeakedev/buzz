@@ -137,7 +137,7 @@ pub struct UploadEventFacts<'a> {
 /// record's `ObjectCreated` event is the moderation pipeline's only scan
 /// trigger, so no newly published media may exist without a record.
 pub async fn record_upload_event(
-    storage: &crate::storage::MediaStorage,
+    storage: &dyn crate::storage::BlobStorage,
     ctx: &TenantContext,
     uploader: &nostr::PublicKey,
     attribution: &UploadAttribution,
