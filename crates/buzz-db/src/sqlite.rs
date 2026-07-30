@@ -57,8 +57,12 @@ mod contracts_workflows;
 mod dms;
 mod events;
 mod feeds;
+/// Git pointer CAS data access layer.
+pub mod git_pointers;
 mod git_repo;
 mod identity_admin;
+/// Blob metadata (media_objects) data access.
+pub mod media_objects;
 mod moderation;
 mod product_feedback;
 mod push;

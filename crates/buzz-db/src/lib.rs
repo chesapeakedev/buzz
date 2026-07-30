@@ -58,6 +58,10 @@ pub mod workflow;
 
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome};
+pub use sqlite::git_pointers::{
+    cas_swap_pointer, get_pointer_metadata, GitPointerRow, PointerCasOutcome,
+};
+pub use sqlite::media_objects::SqliteBlobMetadata;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
