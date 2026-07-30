@@ -61,6 +61,55 @@ async fn insert_mentions(
     Ok(())
 }
 
+pub(super) async fn insert_event_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let kind = event.kind.as_u16();
+    if u32::from(kind) == KIND_AUTH {
+        return Err(DbError::AuthEventRejected);
+    }
+    if is_ephemeral(u32::from(kind)) {
+        return Err(DbError::EphemeralEventRejected(kind));
+    }
+
+    let created_at = event_timestamp_micros(event)?;
+    let received_at = Utc::now();
+    let result = sqlx::query(
+        "INSERT INTO events \
+         (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+          received_at, channel_id, d_tag, not_before) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (community_id, id) DO NOTHING",
+    )
+    .bind(community_id.as_uuid().to_string())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(event.pubkey.to_bytes().as_slice())
+    .bind(created_at)
+    .bind(event_kind_i32(event))
+    .bind(serde_json::to_string(&event.tags)?)
+    .bind(&event.content)
+    .bind(event.sig.serialize().as_slice())
+    .bind(received_at.timestamp_micros())
+    .bind(channel_id.map(|id| id.to_string()))
+    .bind(extract_d_tag(event))
+    .bind(extract_not_before(event))
+    .execute(&mut **transaction)
+    .await?;
+    let was_inserted = result.rows_affected() > 0;
+
+    if was_inserted {
+        insert_mentions(transaction, community_id, event, channel_id, created_at).await?;
+    }
+
+    Ok((
+        StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+        was_inserted,
+    ))
+}
+
 fn is_nip_rs(event: &Event, d_tag: &str) -> bool {
     let d_tag_count = event
         .tags
@@ -101,7 +150,7 @@ fn is_buzz_mesh_status(event: &Event, d_tag: &str) -> bool {
         })
 }
 
-fn row_to_stored_event(row: sqlx::sqlite::SqliteRow) -> Result<Option<StoredEvent>> {
+pub(super) fn row_to_stored_event(row: sqlx::sqlite::SqliteRow) -> Result<Option<StoredEvent>> {
     let id: Vec<u8> = row.try_get("id")?;
     let pubkey: Vec<u8> = row.try_get("pubkey")?;
     let created_at: i64 = row.try_get("created_at")?;
@@ -154,60 +203,14 @@ impl SqliteStore {
         event: &Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let kind = event.kind.as_u16();
-        if u32::from(kind) == KIND_AUTH {
-            return Err(DbError::AuthEventRejected);
-        }
-        if is_ephemeral(u32::from(kind)) {
-            return Err(DbError::EphemeralEventRejected(kind));
-        }
-
-        let created_at = event_timestamp_micros(event)?;
-        let received_at = Utc::now();
-        let tags = serde_json::to_string(&event.tags)?;
         let _writer = self.acquire_writer().await;
         let mut connection = self.pool.acquire().await?;
         let mut transaction =
             sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
-        let result = sqlx::query(
-            "INSERT INTO events \
-             (community_id, id, pubkey, created_at, kind, tags, content, sig, \
-              received_at, channel_id, d_tag, not_before) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (community_id, id) DO NOTHING",
-        )
-        .bind(community_id.as_uuid().to_string())
-        .bind(event.id.as_bytes().as_slice())
-        .bind(event.pubkey.to_bytes().as_slice())
-        .bind(created_at)
-        .bind(event_kind_i32(event))
-        .bind(tags)
-        .bind(&event.content)
-        .bind(event.sig.serialize().as_slice())
-        .bind(received_at.timestamp_micros())
-        .bind(channel_id.map(|id| id.to_string()))
-        .bind(extract_d_tag(event))
-        .bind(extract_not_before(event))
-        .execute(&mut *transaction)
-        .await?;
-        let was_inserted = result.rows_affected() > 0;
-
-        if was_inserted {
-            insert_mentions(
-                &mut transaction,
-                community_id,
-                event,
-                channel_id,
-                created_at,
-            )
-            .await?;
-        }
+        let result =
+            insert_event_transaction(&mut transaction, community_id, event, channel_id).await?;
         transaction.commit().await?;
-
-        Ok((
-            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            was_inserted,
-        ))
+        Ok(result)
     }
 
     /// Atomically replace a NIP-16 or channel-scoped relay state event.
