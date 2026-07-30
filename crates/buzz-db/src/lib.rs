@@ -1134,6 +1134,9 @@ impl Db {
         &self,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.communities_of_channels(channel_ids).await;
+        }
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -1282,6 +1285,11 @@ impl Db {
         pubkey: &[u8],
         d_tag: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .soft_delete_by_coordinate(community_id, kind, pubkey, d_tag)
+                .await;
+        }
         event::soft_delete_by_coordinate(&self.postgres().pool, community_id, kind, pubkey, d_tag)
             .await
     }
@@ -1921,6 +1929,9 @@ impl Db {
     pub async fn reap_expired_ephemeral_channels(
         &self,
     ) -> Result<Vec<channel::ReapedEphemeralChannel>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.reap_expired_ephemeral_channels().await;
+        }
         channel::reap_expired_ephemeral_channels(&self.postgres().pool).await
     }
 
@@ -3995,6 +4006,9 @@ impl Db {
         community: CommunityId,
         repo_id: &str,
     ) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.repo_name_owner(community, repo_id).await;
+        }
         git_repo::repo_name_owner(&self.postgres().pool, community, repo_id).await
     }
 
@@ -4008,6 +4022,11 @@ impl Db {
         repo_id: &str,
         owner_pubkey: &str,
     ) -> Result<git_repo::ReserveOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .reserve_repo_name(community, repo_id, owner_pubkey)
+                .await;
+        }
         git_repo::reserve_repo_name(&self.postgres().pool, community, repo_id, owner_pubkey).await
     }
 
@@ -4017,6 +4036,9 @@ impl Db {
         community: CommunityId,
         owner_pubkey: &str,
     ) -> Result<i64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.count_repos_for_owner(community, owner_pubkey).await;
+        }
         git_repo::count_repos_for_owner(&self.postgres().pool, community, owner_pubkey).await
     }
 
@@ -4029,6 +4051,11 @@ impl Db {
         repo_id: &str,
         owner_pubkey: &str,
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .release_repo_name(community, repo_id, owner_pubkey)
+                .await;
+        }
         git_repo::release_repo_name(&self.postgres().pool, community, repo_id, owner_pubkey).await
     }
 
