@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Postgres full-text search for Buzz, scoped by community"
+description = "Backend-neutral full-text search for Buzz, scoped by community"
 
 [dependencies]
 buzz-core   = { workspace = true }
@@ -17,3 +17,4 @@ tracing     = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
+tempfile    = "3"
