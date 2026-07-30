@@ -30,6 +30,55 @@ trait ChannelFoundationContract: Sync {
         community: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<MemberRecord>>;
+    async fn membership_pairs(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Uuid, Vec<u8>)>>;
+    async fn get_members_bulk(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<MemberRecord>>;
+    async fn add_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        role: MemberRole,
+        invited_by: Option<&[u8]>,
+    ) -> Result<MemberRecord>;
+    async fn remove_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<()>;
+    async fn is_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool>;
+    async fn get_member_role(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<Option<String>>;
+    async fn get_member_count(&self, community: CommunityId, channel_id: Uuid) -> Result<i64>;
+    async fn get_member_counts_bulk(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>>;
+    async fn get_accessible_channel_ids(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>>;
 }
 
 macro_rules! impl_contract {
@@ -84,6 +133,88 @@ macro_rules! impl_contract {
                 channel_id: Uuid,
             ) -> Result<Vec<MemberRecord>> {
                 self.get_members(community, channel_id).await
+            }
+
+            async fn membership_pairs(
+                &self,
+                community: CommunityId,
+                channel_ids: &[Uuid],
+                pubkeys: &[Vec<u8>],
+            ) -> Result<Vec<(Uuid, Vec<u8>)>> {
+                self.membership_pairs(community, channel_ids, pubkeys).await
+            }
+
+            async fn get_members_bulk(
+                &self,
+                community: CommunityId,
+                channel_ids: &[Uuid],
+            ) -> Result<Vec<MemberRecord>> {
+                self.get_members_bulk(community, channel_ids).await
+            }
+
+            async fn add_member(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                pubkey: &[u8],
+                role: MemberRole,
+                invited_by: Option<&[u8]>,
+            ) -> Result<MemberRecord> {
+                self.add_member(community, channel_id, pubkey, role, invited_by)
+                    .await
+            }
+
+            async fn remove_member(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                pubkey: &[u8],
+                actor_pubkey: &[u8],
+            ) -> Result<()> {
+                self.remove_member(community, channel_id, pubkey, actor_pubkey)
+                    .await
+            }
+
+            async fn is_member(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                pubkey: &[u8],
+            ) -> Result<bool> {
+                self.is_member(community, channel_id, pubkey).await
+            }
+
+            async fn get_member_role(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+                pubkey: &[u8],
+            ) -> Result<Option<String>> {
+                self.get_member_role(community, channel_id, pubkey).await
+            }
+
+            async fn get_member_count(
+                &self,
+                community: CommunityId,
+                channel_id: Uuid,
+            ) -> Result<i64> {
+                self.get_member_count(community, channel_id).await
+            }
+
+            async fn get_member_counts_bulk(
+                &self,
+                community: CommunityId,
+                channel_ids: &[Uuid],
+            ) -> Result<std::collections::HashMap<Uuid, i64>> {
+                self.get_member_counts_bulk(community, channel_ids).await
+            }
+
+            async fn get_accessible_channel_ids(
+                &self,
+                community: CommunityId,
+                pubkey: &[u8],
+            ) -> Result<Vec<Uuid>> {
+                self.get_accessible_channel_ids(community, pubkey).await
             }
         }
     };
@@ -239,6 +370,198 @@ async fn run_contract(store: &impl ChannelFoundationContract) {
             .len(),
         1
     );
+
+    let private_id = Uuid::new_v4();
+    store
+        .create_with_id(
+            community_a,
+            private_id,
+            "private-membership",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            &owner_a,
+        )
+        .await
+        .expect("private channel");
+    let member = vec![0xc3; 32];
+    let outsider = vec![0xd4; 32];
+    let no_invite = store
+        .add_member(community_a, private_id, &member, MemberRole::Member, None)
+        .await
+        .expect_err("private join requires invite");
+    assert!(matches!(no_invite, DbError::AccessDenied(_)));
+    store
+        .add_member(
+            community_a,
+            private_id,
+            &member,
+            MemberRole::Member,
+            Some(&owner_a),
+        )
+        .await
+        .expect("owner invite");
+    assert!(store
+        .is_member(community_a, private_id, &member)
+        .await
+        .expect("active member"));
+    assert_eq!(
+        store
+            .get_member_role(community_a, private_id, &member)
+            .await
+            .expect("member role")
+            .as_deref(),
+        Some(MemberRole::Member.as_str())
+    );
+    assert_eq!(
+        store
+            .get_member_count(community_a, private_id)
+            .await
+            .expect("member count"),
+        2
+    );
+    let pairs = store
+        .membership_pairs(
+            community_a,
+            &[private_id, Uuid::new_v4()],
+            &[owner_a.clone(), member.clone(), outsider.clone()],
+        )
+        .await
+        .expect("membership pairs");
+    assert_eq!(pairs.len(), 2);
+    assert!(pairs.contains(&(private_id, owner_a.clone())));
+    assert!(pairs.contains(&(private_id, member.clone())));
+    assert!(store
+        .membership_pairs(community_a, &[], std::slice::from_ref(&owner_a))
+        .await
+        .expect("empty channel pairs")
+        .is_empty());
+    assert_eq!(
+        store
+            .get_members_bulk(community_a, &[private_id, channel_id])
+            .await
+            .expect("bulk members")
+            .len(),
+        3
+    );
+    let counts = store
+        .get_member_counts_bulk(community_a, &[private_id, channel_id, Uuid::new_v4()])
+        .await
+        .expect("bulk counts");
+    assert_eq!(counts.get(&private_id), Some(&2));
+    assert_eq!(counts.get(&channel_id), Some(&1));
+
+    let unauthorized_elevation = store
+        .add_member(
+            community_a,
+            private_id,
+            &outsider,
+            MemberRole::Admin,
+            Some(&member),
+        )
+        .await
+        .expect_err("ordinary member cannot grant admin");
+    assert!(matches!(unauthorized_elevation, DbError::AccessDenied(_)));
+    let unauthorized_remove = store
+        .remove_member(community_a, private_id, &owner_a, &member)
+        .await
+        .expect_err("ordinary member cannot remove owner");
+    assert!(matches!(unauthorized_remove, DbError::AccessDenied(_)));
+
+    store
+        .remove_member(community_a, private_id, &member, &owner_a)
+        .await
+        .expect("owner removes member");
+    assert!(!store
+        .is_member(community_a, private_id, &member)
+        .await
+        .expect("removed member"));
+    store
+        .add_member(
+            community_a,
+            private_id,
+            &member,
+            MemberRole::Member,
+            Some(&owner_a),
+        )
+        .await
+        .expect("reactivate member");
+    assert_eq!(
+        store
+            .get_member_count(community_a, private_id)
+            .await
+            .expect("reactivated count"),
+        2
+    );
+
+    let last_owner = store
+        .remove_member(community_a, private_id, &owner_a, &owner_a)
+        .await
+        .expect_err("last owner is protected");
+    assert!(matches!(last_owner, DbError::AccessDenied(_)));
+
+    let accessible = store
+        .get_accessible_channel_ids(community_a, &member)
+        .await
+        .expect("accessible channels");
+    assert!(accessible.contains(&channel_id));
+    assert!(accessible.contains(&raced_id));
+    assert!(accessible.contains(&private_id));
+    assert!(!store
+        .is_member(community_b, private_id, &member)
+        .await
+        .expect("foreign membership"));
+
+    let governance_id = Uuid::new_v4();
+    store
+        .create_with_id(
+            community_a,
+            governance_id,
+            "governance-race",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            &owner_a,
+        )
+        .await
+        .expect("governance channel");
+    store
+        .add_member(
+            community_a,
+            governance_id,
+            &owner_b,
+            MemberRole::Owner,
+            Some(&owner_a),
+        )
+        .await
+        .expect("second owner");
+    let (demote_a, demote_b) = tokio::join!(
+        store.add_member(
+            community_a,
+            governance_id,
+            &owner_a,
+            MemberRole::Member,
+            Some(&owner_b),
+        ),
+        store.add_member(
+            community_a,
+            governance_id,
+            &owner_b,
+            MemberRole::Member,
+            Some(&owner_a),
+        )
+    );
+    assert_eq!(
+        usize::from(demote_a.is_ok()) + usize::from(demote_b.is_ok()),
+        1,
+        "serialized demotions must preserve one owner"
+    );
+    let owners = store
+        .get_members(community_a, governance_id)
+        .await
+        .expect("governance members")
+        .into_iter()
+        .filter(|member| member.role == MemberRole::Owner.as_str())
+        .count();
+    assert_eq!(owners, 1);
 }
 
 #[tokio::test]
