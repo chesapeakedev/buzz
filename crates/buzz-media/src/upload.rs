@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use crate::auth::verify_blossom_upload_auth;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
-use crate::storage::{BlobMeta, BlobStorage, MediaStorage};
+use crate::storage::{ctx_sidecar_key, BlobMeta, BlobStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
@@ -89,7 +89,7 @@ where
     .map_err(|_| MediaError::Internal)??;
 
     let key = format!("{sha256}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
+    let meta_key = ctx_sidecar_key(ctx, &sha256);
 
     // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
     // sidecar exists but the blob is missing, fall through to re-upload.
@@ -424,7 +424,7 @@ pub async fn process_video_upload(
 
     let ext = "mp4";
     let key = format!("{sha256_hex}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
+    let meta_key = ctx_sidecar_key(ctx, &sha256_hex);
 
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;

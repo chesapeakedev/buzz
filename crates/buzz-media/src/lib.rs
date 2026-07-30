@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bucket_index;
 pub mod config;
 pub mod error;
+pub mod filesystem;
 pub mod storage;
 pub mod thumbnail;
 pub mod types;
@@ -20,10 +21,11 @@ pub use bucket_index::{
 };
 pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
+pub use filesystem::{FilesystemBlobConfig, FilesystemBlobStorage};
 pub use storage::{
-    BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome, ByteStream, MediaStorage,
-    ObjectVersionEntry,
-    ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
+    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome,
+    ByteStream, MediaStorage, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef,
+    ObjectVersionsPage,
 };
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
