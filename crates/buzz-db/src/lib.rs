@@ -2523,7 +2523,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<String>> {
-        channel::get_canvas(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_canvas(community_id, channel_id).await;
+        }
+        channel::get_canvas(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Sets or clears the canvas content for a channel.
@@ -2534,7 +2537,10 @@ impl Db {
         channel_id: Uuid,
         canvas: Option<&str>,
     ) -> Result<()> {
-        channel::set_canvas(&self.pool, community_id, channel_id, canvas).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.set_canvas(community_id, channel_id, canvas).await;
+        }
+        channel::set_canvas(&self.postgres().pool, community_id, channel_id, canvas).await
     }
 
     /// Verify the mixed-version channel-roster database fence end to end.
@@ -2628,7 +2634,12 @@ impl Db {
         channel_ids: &[Uuid],
         pubkeys: &[Vec<u8>],
     ) -> Result<Vec<(Uuid, Vec<u8>)>> {
-        channel::membership_pairs(&self.pool, community_id, channel_ids, pubkeys).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .membership_pairs(community_id, channel_ids, pubkeys)
+                .await;
+        }
+        channel::membership_pairs(&self.postgres().pool, community_id, channel_ids, pubkeys).await
     }
 
     /// Returns all active members of a channel.
@@ -2651,7 +2662,10 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<Vec<channel::MemberRecord>> {
-        channel::get_members_bulk(&self.pool, community_id, channel_ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_members_bulk(community_id, channel_ids).await;
+        }
+        channel::get_members_bulk(&self.postgres().pool, community_id, channel_ids).await
     }
 
     /// Get all channel IDs accessible to a pubkey.
@@ -2661,7 +2675,10 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
-        channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_accessible_channel_ids(community_id, pubkey).await;
+        }
+        channel::get_accessible_channel_ids(&self.postgres().pool, community_id, pubkey).await
     }
 
     /// Returns large active-channel rosters whose relay-authored snapshots differ.
