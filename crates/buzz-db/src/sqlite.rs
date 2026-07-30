@@ -23,9 +23,12 @@ mod contracts_dms;
 mod contracts_events;
 #[cfg(test)]
 mod contracts_identity;
+#[cfg(test)]
+mod contracts_threads;
 mod dms;
 mod events;
 mod identity_admin;
+mod threads;
 mod users;
 
 /// SQLite connection and concurrency settings.
@@ -187,7 +190,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 5);
+        assert_eq!(applied, 6);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -198,12 +201,13 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 5);
+        assert_eq!(row.len(), 6);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
         assert_eq!(row[3].get::<i64, _>("version"), 4);
         assert_eq!(row[4].get::<i64, _>("version"), 5);
+        assert_eq!(row[5].get::<i64, _>("version"), 6);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -270,6 +274,7 @@ mod tests {
             "parameterized_event_watermarks".to_owned(),
             "pubkey_allowlist".to_owned(),
             "relay_members".to_owned(),
+            "thread_metadata".to_owned(),
             "users".to_owned(),
         ]);
         let actual: BTreeSet<String> = sqlx::query_scalar(
