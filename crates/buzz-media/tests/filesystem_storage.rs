@@ -116,6 +116,7 @@ async fn filesystem_satisfies_shared_blob_contract() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let storage = open(&directory.path().join("objects"), None).await;
     support::run_blob_storage_contract(&storage).await;
+    support::run_blob_metadata_contract(&storage).await;
     assert_eq!(storage.usage_bytes(), 0);
 }
 
