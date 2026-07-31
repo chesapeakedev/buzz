@@ -79,8 +79,11 @@ for a blob write. The distributed S3 path keeps its existing sidecar JSON.
       files. Immutable packs, manifests, and indexes remain filesystem-backed;
       the S3 `GitStore` path is unchanged. Verified: `cargo check -p buzz-relay`
       and `cargo test -p buzz-relay --lib api::git::filesystem`.
-- [ ] 16.6 — Add S3/filesystem shared behavior tests and key-format
-      compatibility tests; verify the distributed S3 path is unchanged.
+- [x] 16.6 — Add S3/filesystem shared behavior tests and key-format
+      compatibility tests; verify the distributed S3 path is unchanged. Added
+      shared metadata publication, MIME, deletion, tenant-isolation, and media
+      key-format coverage; the same contract runs against filesystem storage
+      and the ignored live-MinIO S3 test.
 
 ## PR 19 — Embedded config, data layout, locking, and recovery (finish)
 

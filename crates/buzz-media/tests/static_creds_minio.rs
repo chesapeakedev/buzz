@@ -54,4 +54,5 @@ async fn static_creds_round_trip_against_minio() {
     let storage =
         MediaStorage::new(&minio_config()).expect("static creds should build a storage client");
     support::run_blob_storage_contract(&storage).await;
+    support::run_blob_metadata_contract(&storage).await;
 }
