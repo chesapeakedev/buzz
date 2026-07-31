@@ -32,6 +32,8 @@ use s3::error::S3Error;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 
+use buzz_core::CommunityId;
+
 /// Opaque object-store ETag (used for `If-Match` on pointer CAS).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ETag(pub String);
@@ -60,6 +62,40 @@ pub enum CasOutcome {
     Won(ETag),
     /// CAS lost the race (server returned 412).
     LostRace,
+}
+
+/// Backend-neutral durable metadata for one embedded Git pointer.
+#[derive(Debug, Clone)]
+pub struct GitPointerMetadata {
+    /// Manifest digest currently published by the pointer.
+    pub content_digest: String,
+    /// Pointer body size in bytes.
+    pub size: i64,
+    /// Opaque CAS token for the current publication.
+    pub etag: String,
+}
+
+/// SQLite-backed publication gate used by the filesystem Git adapter.
+#[async_trait::async_trait]
+pub trait GitPointerMetadataStore: Send + Sync {
+    /// Read the community-scoped pointer metadata.
+    async fn get_pointer_metadata(
+        &self,
+        community: CommunityId,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<GitPointerMetadata>, StoreError>;
+
+    /// Atomically publish a pointer under an optional If-Match token.
+    async fn cas_pointer(
+        &self,
+        community: CommunityId,
+        owner: &str,
+        repo: &str,
+        content_digest: &str,
+        size: i64,
+        expected_etag: Option<&str>,
+    ) -> Result<CasOutcome, StoreError>;
 }
 
 /// Errors that are *actually* errors — `LostRace` is not one.
