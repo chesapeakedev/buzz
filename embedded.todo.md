@@ -74,8 +74,11 @@ for a blob write. The distributed S3 path keeps its existing sidecar JSON.
       for storage-only tests and distributed behavior is unchanged. Verified:
       `cargo test -p buzz-media --test filesystem_storage`, `cargo fmt --all
       -- --check`, and `cargo check -p buzz-relay`.
-- [ ] 16.5 — Wire the filesystem git backend to use SQLite `git_pointers`
-      metadata for the CAS pointer swap instead of sidecar/pointer-only writes.
+- [x] 16.5 — Wire the filesystem git backend to use SQLite `git_pointers`
+      metadata for pointer reads and the CAS swap instead of pointer-envelope
+      files. Immutable packs, manifests, and indexes remain filesystem-backed;
+      the S3 `GitStore` path is unchanged. Verified: `cargo check -p buzz-relay`
+      and `cargo test -p buzz-relay --lib api::git::filesystem`.
 - [ ] 16.6 — Add S3/filesystem shared behavior tests and key-format
       compatibility tests; verify the distributed S3 path is unchanged.
 

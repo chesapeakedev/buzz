@@ -11,7 +11,8 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Mutex;
 
 use super::store::{
-    CasOutcome, ETag, GitStorage, Precond, ProbeConfig, ProbeFailure, ProbeReport, StoreError,
+    CasOutcome, ETag, GitPointerMetadataStore, GitStorage, Precond, ProbeConfig, ProbeFailure,
+    ProbeReport, StoreError,
 };
 
 const TEMP_PREFIX: &str = ".buzz-tmp-";
@@ -35,17 +36,30 @@ pub struct FilesystemGitConfig {
 /// internal version token and body in one atomically replaced envelope so
 /// `get_pointer` returns a consistent snapshot and stale tokens cannot win
 /// after an ABA body transition.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FilesystemGitStorage {
     root: Arc<PathBuf>,
     usage_bytes: Arc<AtomicU64>,
     quota_bytes: Option<u64>,
     pointer_locks: Arc<Vec<Mutex<()>>>,
+    metadata: Option<Arc<dyn GitPointerMetadataStore>>,
 }
 
 impl FilesystemGitStorage {
     /// Open or create a filesystem Git store and recover abandoned writes.
     pub async fn open(config: FilesystemGitConfig) -> Result<Self, StoreError> {
+        Self::open_with_metadata(config, None).await
+    }
+
+    /// Open a filesystem Git store with an external pointer publication gate.
+    ///
+    /// Embedded mode supplies SQLite metadata here. Immutable packs, manifests,
+    /// and indexes remain filesystem objects; pointer state is then read and
+    /// CAS-swapped through the metadata store.
+    pub async fn open_with_metadata(
+        config: FilesystemGitConfig,
+        metadata: Option<Arc<dyn GitPointerMetadataStore>>,
+    ) -> Result<Self, StoreError> {
         if matches!(config.quota_bytes, Some(0)) {
             return Err(storage_error("filesystem Git quota must be positive"));
         }
@@ -77,6 +91,7 @@ impl FilesystemGitStorage {
             usage_bytes: Arc::new(AtomicU64::new(usage)),
             quota_bytes: config.quota_bytes,
             pointer_locks: Arc::new((0..POINTER_LOCK_SHARDS).map(|_| Mutex::new(())).collect()),
+            metadata,
         })
     }
 
@@ -546,6 +561,13 @@ impl GitStorage for FilesystemGitStorage {
     }
 
     async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        if let Some(metadata) = &self.metadata {
+            let (community, owner, repo) = pointer_identity(key)?;
+            return metadata
+                .get_pointer_metadata(community, owner, repo)
+                .await
+                .map(|row| row.map(|row| (ETag(row.etag), Bytes::from(row.content_digest))));
+        }
         let _pointer = self.pointer_lock(key).lock().await;
         Ok(self
             .get_pointer_inner(key)
@@ -559,6 +581,26 @@ impl GitStorage for FilesystemGitStorage {
         body: &[u8],
         precond: Precond,
     ) -> Result<CasOutcome, StoreError> {
+        if let Some(metadata) = &self.metadata {
+            let (community, owner, repo) = pointer_identity(key)?;
+            let digest = std::str::from_utf8(body)
+                .map_err(|_| storage_error("filesystem Git pointer is not UTF-8"))?;
+            validate_digest(digest)?;
+            return metadata
+                .cas_pointer(
+                    community,
+                    owner,
+                    repo,
+                    digest,
+                    i64::try_from(body.len())
+                        .map_err(|_| storage_error("filesystem Git pointer is too large"))?,
+                    match precond {
+                        Precond::IfNoneMatchStar => None,
+                        Precond::IfMatch(ref etag) => Some(etag.0.as_str()),
+                    },
+                )
+                .await;
+        }
         self.put_pointer_inner(key, body, precond).await
     }
 
@@ -652,6 +694,17 @@ fn validate_pointer_key(key: &str) -> Result<(), StoreError> {
         return Err(storage_error("invalid filesystem Git pointer key"));
     }
     Ok(())
+}
+
+fn pointer_identity(key: &str) -> Result<(buzz_core::CommunityId, &str, &str), StoreError> {
+    let components = validate_key(key)?;
+    if components.len() != 5 || components[0] != "repos" || components[4] != "pointer" {
+        return Err(storage_error("invalid canonical Git pointer key"));
+    }
+    let community = uuid::Uuid::parse_str(components[1])
+        .map(buzz_core::CommunityId::from_uuid)
+        .map_err(|_| storage_error("invalid Git pointer community"))?;
+    Ok((community, components[2], components[3]))
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
