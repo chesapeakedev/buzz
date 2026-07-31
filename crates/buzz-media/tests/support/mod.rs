@@ -1,5 +1,5 @@
 use buzz_core::{CommunityId, TenantContext};
-use buzz_media::storage::{ctx_sidecar_key, BlobMeta, BlobStorage};
+use buzz_media::storage::{ctx_sidecar_key, BlobMeta, BlobMetadata, BlobStorage};
 use futures_util::StreamExt as _;
 use sha2::Digest as _;
 use uuid::Uuid;
@@ -90,4 +90,85 @@ pub async fn run_blob_storage_contract(storage: &dyn BlobStorage) {
         .await
         .expect("sidecar delete should succeed");
     assert!(!storage.head(&key).await.expect("head after delete"));
+}
+
+/// Exercise metadata publication and tenant isolation against every adapter.
+pub async fn run_blob_metadata_contract(metadata: &dyn BlobMetadata) {
+    let tenant_a = TenantContext::resolved(
+        CommunityId::from_uuid(Uuid::new_v4()),
+        "metadata-a.example.test",
+    );
+    let tenant_b = TenantContext::resolved(
+        CommunityId::from_uuid(Uuid::new_v4()),
+        "metadata-b.example.test",
+    );
+    let sha = hex::encode(sha2::Sha256::digest(b"metadata-contract"));
+    let meta = BlobMeta {
+        ext: "bin".to_string(),
+        mime_type: "application/octet-stream".to_string(),
+        size: 18,
+        uploaded_at: 1_700_000_000,
+        ..BlobMeta::default()
+    };
+
+    assert!(metadata
+        .get_metadata(&tenant_a, &sha)
+        .await
+        .expect("initial metadata")
+        .is_none());
+    metadata
+        .put_metadata(&tenant_a, &sha, &meta)
+        .await
+        .expect("metadata put");
+    let stored = metadata
+        .get_metadata(&tenant_a, &sha)
+        .await
+        .expect("metadata get")
+        .expect("published metadata");
+    assert_eq!(stored.ext, meta.ext);
+    assert_eq!(stored.mime_type, meta.mime_type);
+    assert_eq!(stored.size, meta.size);
+    assert_eq!(stored.uploaded_at, meta.uploaded_at);
+    assert_eq!(
+        metadata
+            .read_mime(&tenant_a, &format!("{sha}.bin"))
+            .await
+            .as_deref(),
+        Some("application/octet-stream")
+    );
+    assert!(metadata
+        .get_metadata(&tenant_b, &sha)
+        .await
+        .expect("cross-tenant metadata")
+        .is_none());
+
+    metadata
+        .delete_metadata(&tenant_a, &sha)
+        .await
+        .expect("metadata delete");
+    assert!(metadata
+        .get_metadata(&tenant_a, &sha)
+        .await
+        .expect("deleted metadata")
+        .is_none());
+}
+
+#[test]
+fn community_scoped_media_keys_are_wire_compatible() {
+    let community = CommunityId::from_uuid(Uuid::from_u128(1));
+    let sha = "a".repeat(64);
+    assert_eq!(
+        ctx_sidecar_key(
+            &TenantContext::resolved(community, "media.example.test"),
+            &sha,
+        ),
+        format!("_meta/{community}/{sha}.json")
+    );
+    assert_ne!(
+        ctx_sidecar_key(
+            &TenantContext::resolved(community, "media.example.test"),
+            &sha,
+        ),
+        format!("_meta/{sha}.json")
+    );
 }
