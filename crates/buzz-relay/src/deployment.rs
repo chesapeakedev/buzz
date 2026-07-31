@@ -72,6 +72,7 @@ impl EmbeddedInstanceLock {
     fn acquire(path: &Path) -> Result<Self, DeploymentError> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .read(true)
             .write(true)
             .open(path)
