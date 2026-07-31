@@ -506,12 +506,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to initialize filesystem media storage: {e}"))?;
         let git: Arc<dyn buzz_relay::api::git::store::GitStorage> = if config.git_enabled {
+            let git_metadata = Arc::new(
+                buzz_relay::api::git::sqlite_metadata::SqliteGitPointerMetadata::new(store.clone()),
+            );
             Arc::new(
-                buzz_relay::api::git::filesystem::FilesystemGitStorage::open(
+                buzz_relay::api::git::filesystem::FilesystemGitStorage::open_with_metadata(
                     buzz_relay::api::git::filesystem::FilesystemGitConfig {
                         root: layout.git_objects.clone(),
                         quota_bytes: Some(config.git_max_repo_bytes),
                     },
+                    Some(git_metadata),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to initialize filesystem Git storage: {e}"))?,
