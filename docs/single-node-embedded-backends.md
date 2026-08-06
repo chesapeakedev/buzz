@@ -26,7 +26,8 @@ directory, and one command:
 
 ```bash
 docker run -p 127.0.0.1:3000:3000 -v buzz-data:/data \
-  -e BUZZ_BIND=0.0.0.0:3000 ghcr.io/chesapeakedev/buzz:main
+  -e BUZZ_BIND=0.0.0.0:3000 -e RELAY_ACCESS=open \
+  ghcr.io/chesapeakedev/buzz:main
 ```
 
 The embedded profile uses SQLite for both relational data and blob metadata,
@@ -425,6 +426,7 @@ docker run --name buzz \
   -p 127.0.0.1:3000:3000 \
   -v buzz-data:/data \
   -e BUZZ_BIND=0.0.0.0:3000 \
+  -e RELAY_ACCESS=open \
   ghcr.io/chesapeakedev/buzz:main
 ```
 
@@ -435,8 +437,9 @@ docker run --name buzz \
   -p 3000:3000 \
   -v buzz-data:/data \
   -e BUZZ_BIND=0.0.0.0:3000 \
+  -e RELAY_ACCESS=open \
   -e RELAY_URL=wss://buzz.example.com \
-  -e RELAY_OWNER_PUBKEY=<owner-npub-or-hex> \
+  -e RELAY_OWNER_PUBKEY=<owner-pubkey-hex> \
   ghcr.io/chesapeakedev/buzz:main
 ```
 
