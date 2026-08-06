@@ -378,6 +378,8 @@ native binary:
 - Replace the current single-node Compose bundle with relay-only storage
   dependencies; retain a separate distributed Compose example with PostgreSQL,
   Redis, and MinIO.
+- Ship `deploy/embedded/compose.yml` as the relay-only Compose example and keep
+  its Caddy TLS override separate from `deploy/compose/`'s distributed stack.
 - Make health output backend-neutral while reporting selected database,
   coordination, and object-store kinds. Remove PostgreSQL/Redis readiness
   requirements in embedded mode.
@@ -446,6 +448,12 @@ docker run --name buzz \
 The public example assumes TLS termination by Caddy, another reverse proxy, or
 the host platform. The relay remains the only required application service and
 storage dependency.
+
+For a reproducible Compose deployment, see
+[`deploy/embedded/README.md`](../deploy/embedded/README.md). It includes the
+relay-only stack, the Caddy override, and the stop-and-copy backup/restore
+procedure. Keep the distributed stack under `deploy/compose/` for scaled
+PostgreSQL/Redis/S3 deployments.
 
 ### Access and bootstrap policy
 

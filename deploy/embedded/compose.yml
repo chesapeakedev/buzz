@@ -1,0 +1,37 @@
+name: buzz-embedded
+
+services:
+  relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/chesapeakedev/buzz:main}
+    environment:
+      BUZZ_DEPLOYMENT_MODE: embedded
+      BUZZ_DATA_DIR: /data
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+      RELAY_ACCESS: ${RELAY_ACCESS:-open}
+      RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      RELAY_OWNER_PUBKEY: ${RELAY_OWNER_PUBKEY:-}
+      BUZZ_REQUIRE_AUTH_TOKEN: ${BUZZ_REQUIRE_AUTH_TOKEN:-false}
+      BUZZ_GIT_ENABLED: ${BUZZ_GIT_ENABLED:-false}
+      RUST_LOG: ${RUST_LOG:-buzz_relay=info,buzz_db=info,buzz_auth=info}
+    ports:
+      - "${BUZZ_HTTP_PORT:-3000}:3000"
+    volumes:
+      - buzz-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  buzz-data:
+    labels:
+      com.buzz.volume: embedded-data

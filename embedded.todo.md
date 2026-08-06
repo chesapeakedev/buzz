@@ -90,30 +90,34 @@ for a blob write. The distributed S3 path keeps its existing sidecar JSON.
 Data layout + `instance.lock` already exist; the rest of the Epic 5 runtime UX
 remains.
 
-- [ ] 19.1 — `buzz.toml` reader with environment-over-TOML-over-default
+- [x] 19.1 — `buzz.toml` reader with environment-over-TOML-over-default
       precedence and unknown-field rejection (`unknown TOML fields are startup
-      errors`).
-- [ ] 19.2 — Durable relay signing key generation/persistence under
+      errors`). Strict TOML parsing and precedence tests added.
+- [x] 19.2 — Durable relay signing key generation/persistence under
       `/data/secrets/relay.key` (owner-only, never written to TOML or logs).
-- [ ] 19.3 — Automatic first run + access bootstrap policy: loopback may start
+      The key is generated under the instance lock and reused across restarts.
+- [x] 19.3 — Automatic first run + access bootstrap policy: loopback may start
       open with no owner; non-loopback requires owner + closed membership unless
-      `access = "open"`; print actionable first-run instructions.
-- [ ] 19.4 — Startup recovery sequence: create missing dirs idempotently,
+      `access = "open"`; the embedded README supplies actionable first-run
+      commands.
+- [x] 19.4 — Startup recovery sequence: create missing dirs idempotently,
       validate ownership/writability, acquire lock, open SQLite, run migrations,
-      recover abandoned temp files, then report readiness.
-- [ ] 19.5 — Backend-neutral readiness/health output reporting selected
+      recover abandoned temp files, then report readiness. Filesystem adapters
+      perform temporary-file recovery during open.
+- [x] 19.5 — Backend-neutral readiness/health output reporting selected
       database, coordination, and object-store kinds; drop Postgres/Redis
       readiness requirements in embedded mode.
 
 ## PR 20 — Relay-only container, Compose/Caddy example, operational docs
 
-- [ ] 20.1 — Relay-only container image + entrypoint defaulting to
+- [x] 20.1 — Relay-only container image + entrypoint defaulting to
       `0.0.0.0:3000` with `/data` volume.
-- [ ] 20.2 — Minimal Compose + Caddy TLS example; keep a separate distributed
-      Compose with PostgreSQL/Redis/MinIO.
-- [ ] 20.3 — Backup/restore (stop-and-copy `/data`), upgrade, troubleshooting,
-      and security documentation.
-- [ ] 20.4 — End-to-end "empty VPS to connected client" runbook.
+- [x] 20.2 — Minimal relay-only Compose + Caddy TLS example in `deploy/embedded/`;
+      the distributed PostgreSQL/Redis/MinIO Compose remains separate.
+- [x] 20.3 — Backup/restore (stop-and-copy `/data`), upgrade, troubleshooting,
+      and security documentation in the embedded deployment README and plan.
+- [x] 20.4 — End-to-end "empty VPS to connected client" runbook in the
+      embedded deployment README.
 
 ## PR 21 — Embedded release candidate, benchmarks, soak, stable release
 
