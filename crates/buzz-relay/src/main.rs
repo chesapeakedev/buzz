@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting buzz-relay");
 
-    let config = Config::from_env().map_err(|e| {
+    let mut config = Config::from_env().map_err(|e| {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
@@ -181,13 +181,44 @@ async fn main() -> anyhow::Result<()> {
         let layout = EmbeddedLayout::prepare(&config.data_dir).map_err(|error| {
             anyhow::anyhow!("failed to prepare embedded data directory: {error}")
         })?;
+        layout
+            .validate_writable()
+            .map_err(|error| anyhow::anyhow!("embedded data directory is not writable: {error}"))?;
         let lock = layout
             .lock()
             .map_err(|error| anyhow::anyhow!("failed to lock embedded data directory: {error}"))?;
+        layout
+            .ensure_default_config()
+            .map_err(|error| anyhow::anyhow!("failed to create embedded config: {error}"))?;
+        if config.relay_private_key.is_none() {
+            let key = layout
+                .load_or_create_secret(&layout.relay_key, || {
+                    nostr::Keys::generate().secret_key().to_secret_hex()
+                })
+                .map_err(|error| anyhow::anyhow!("failed to load embedded relay key: {error}"))?;
+            config.relay_private_key = Some(key);
+        }
         (Some(layout), Some(lock))
     } else {
         (None, None)
     };
+
+    if config.deployment_mode.is_embedded() && !config.bind_addr.ip().is_loopback() {
+        if !config.community_access_explicit {
+            return Err(anyhow::anyhow!(
+                "non-loopback embedded binds require explicit RELAY_ACCESS=open or closed"
+            ));
+        }
+        if matches!(
+            config.community_access,
+            buzz_relay::config::CommunityAccess::Closed
+        ) && config.relay_owner_pubkey.is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "closed non-loopback embedded relays require RELAY_OWNER_PUBKEY or community.owner_pubkey"
+            ));
+        }
+    }
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
@@ -293,13 +324,6 @@ async fn main() -> anyhow::Result<()> {
     // NIP-43: relay membership requires a stable signing key.
     // Check this before any DB mutations so we fail fast — no point backfilling
     // or bootstrapping if we'll reject the config anyway.
-    if config.require_relay_membership && config.relay_private_key.is_none() {
-        return Err(anyhow::anyhow!(
-            "BUZZ_RELAY_PRIVATE_KEY is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true. \
-             NIP-43 events signed with an ephemeral key become unverifiable after restart."
-        ));
-    }
-
     // NIP-43 / multi-tenant: seed the deployment's *own* community before any
     // membership backfill or owner bootstrap, so those writes are scoped to a
     // real `(community_id, pubkey)` and not a global pubkey. The host is derived

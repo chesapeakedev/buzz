@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
@@ -58,6 +59,43 @@ pub enum DeploymentMode {
     Distributed,
 }
 
+/// Access policy for the deployment's configured community.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityAccess {
+    /// Anyone may join; authentication and channel policy still apply.
+    Open,
+    /// Membership must be granted by an owner or operator.
+    Closed,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    server: Option<FileServerConfig>,
+    community: Option<FileCommunityConfig>,
+    git: Option<FileGitConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileServerConfig {
+    bind: Option<String>,
+    public_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileCommunityConfig {
+    access: Option<String>,
+    owner_pubkey: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGitConfig {
+    enabled: Option<bool>,
+}
+
 impl DeploymentMode {
     /// Whether this profile must avoid distributed-only services.
     pub const fn is_embedded(self) -> bool {
@@ -73,6 +111,10 @@ pub struct Config {
     /// Whether Git hosting is enabled. Embedded mode defaults to disabled;
     /// distributed mode defaults to enabled for backwards compatibility.
     pub git_enabled: bool,
+    /// Access policy for the deployment community.
+    pub community_access: CommunityAccess,
+    /// Whether the access policy was explicitly supplied by the operator.
+    pub community_access_explicit: bool,
     /// Durable root for the embedded profile (`/data` in the container).
     pub data_dir: std::path::PathBuf,
     /// Address the relay HTTP/WebSocket server binds to.
@@ -320,6 +362,32 @@ fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
 }
 
+fn load_file_config(data_dir: &std::path::Path) -> Result<FileConfig, ConfigError> {
+    let path = std::env::var("BUZZ_CONFIG_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("buzz.toml"));
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str(&contents).map_err(|error| {
+            ConfigError::InvalidValue(format!("{} is invalid TOML: {error}", path.display()))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{} could not be read: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn parse_community_access(raw: &str) -> Result<CommunityAccess, ConfigError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "open" => Ok(CommunityAccess::Open),
+        "closed" | "private" => Ok(CommunityAccess::Closed),
+        _ => Err(ConfigError::InvalidValue(
+            "community access must be open or closed".to_string(),
+        )),
+    }
+}
+
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
     match std::env::var(name) {
         Ok(raw) => raw
@@ -419,13 +487,17 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
         Err(error) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid UTF-8: {error}"
         ))),
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "on" => Ok(true),
-            "false" | "0" | "off" | "" => Ok(false),
-            _ => Err(ConfigError::InvalidValue(format!(
-                "{name} must be true or false"
-            ))),
-        },
+        Ok(value) => parse_bool_value(name, &value),
+    }
+}
+
+fn parse_bool_value(name: &str, value: &str) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" => Ok(true),
+        "false" | "0" | "off" | "" => Ok(false),
+        _ => Err(ConfigError::InvalidValue(format!(
+            "{name} must be true or false"
+        ))),
     }
 }
 
@@ -511,15 +583,54 @@ impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let deployment_mode = deployment_mode_from_env()?;
-        let git_enabled = parse_bool(
-            "BUZZ_GIT_ENABLED",
-            deployment_mode == DeploymentMode::Distributed,
-        )?;
         let data_dir = std::env::var("BUZZ_DATA_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("/data"));
-        let bind_addr_raw =
-            std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+        let file_config = load_file_config(&data_dir)?;
+        let file_server = file_config.server.as_ref();
+        let file_community = file_config.community.as_ref();
+        let file_git = file_config.git.as_ref();
+        let git_enabled = match std::env::var("BUZZ_GIT_ENABLED") {
+            Ok(raw) => parse_bool_value("BUZZ_GIT_ENABLED", &raw)?,
+            Err(std::env::VarError::NotPresent) => file_git
+                .and_then(|git| git.enabled)
+                .unwrap_or(deployment_mode == DeploymentMode::Distributed),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_GIT_ENABLED must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let community_access_explicit = std::env::var_os("RELAY_ACCESS").is_some()
+            || file_community
+                .and_then(|community| community.access.as_ref())
+                .is_some();
+        let community_access = match std::env::var("RELAY_ACCESS") {
+            Ok(raw) => parse_community_access(&raw)?,
+            Err(std::env::VarError::NotPresent) => file_community
+                .and_then(|community| community.access.as_deref())
+                .map(parse_community_access)
+                .transpose()?
+                .unwrap_or(CommunityAccess::Open),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "RELAY_ACCESS must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let bind_addr_raw = std::env::var("BUZZ_BIND_ADDR")
+            .or_else(|_| std::env::var("BUZZ_BIND"))
+            .unwrap_or_else(|_| {
+                file_server
+                    .and_then(|server| server.bind.clone())
+                    .unwrap_or_else(|| {
+                        if deployment_mode.is_embedded() {
+                            "127.0.0.1:3000".to_string()
+                        } else {
+                            "0.0.0.0:3000".to_string()
+                        }
+                    })
+            });
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
@@ -590,8 +701,11 @@ impl Config {
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
 
-        let relay_url =
-            std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+        let relay_url = std::env::var("RELAY_URL").unwrap_or_else(|_| {
+            file_server
+                .and_then(|server| server.public_url.clone())
+                .unwrap_or_else(|| "ws://localhost:3000".to_string())
+        });
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -646,9 +760,17 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let require_relay_membership = match std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP") {
+            Ok(value) => parse_bool_value("BUZZ_REQUIRE_RELAY_MEMBERSHIP", &value)?,
+            Err(std::env::VarError::NotPresent) => {
+                matches!(community_access, CommunityAccess::Closed)
+            }
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_REQUIRE_RELAY_MEMBERSHIP must be valid UTF-8: {error}"
+                )))
+            }
+        };
 
         // Defaults true → single-pod (N=1) keeps today's huddle behavior. A
         // horizontally-scaled deployment sets this false; see the field doc.
@@ -689,8 +811,10 @@ impl Config {
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
-        let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
+        let relay_owner_raw = std::env::var("RELAY_OWNER_PUBKEY")
             .ok()
+            .or_else(|| file_community.and_then(|community| community.owner_pubkey.clone()));
+        let relay_owner_pubkey = relay_owner_raw
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .and_then(|s| {
@@ -1048,6 +1172,8 @@ impl Config {
         Ok(Self {
             deployment_mode,
             git_enabled,
+            community_access,
+            community_access_explicit,
             data_dir,
             bind_addr,
             database_url,
@@ -1818,5 +1944,61 @@ mod tests {
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
         );
+    }
+
+    #[test]
+    fn embedded_toml_rejects_unknown_fields() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        std::fs::write(
+            directory.path().join("buzz.toml"),
+            "[server]\nbind = \"127.0.0.1:3000\"\nmisspelled = true\n",
+        )
+        .expect("write config");
+        let error = load_file_config(directory.path()).expect_err("unknown field must fail");
+        assert!(error.to_string().contains("invalid TOML"));
+    }
+
+    #[test]
+    fn community_access_accepts_only_open_or_closed() {
+        assert_eq!(
+            parse_community_access("private").expect("private alias"),
+            CommunityAccess::Closed
+        );
+        assert!(parse_community_access("maybe").is_err());
+    }
+
+    #[test]
+    fn environment_values_override_embedded_toml() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        std::fs::write(
+            directory.path().join("buzz.toml"),
+            "[server]\nbind = \"127.0.0.1:3010\"\npublic_url = \"ws://file.example\"\n[community]\naccess = \"closed\"\n[git]\nenabled = true\n",
+        )
+        .expect("write config");
+        let git_path = directory.path().join("git");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        std::env::set_var("BUZZ_DATA_DIR", directory.path());
+        std::env::set_var("BUZZ_CONFIG_PATH", directory.path().join("buzz.toml"));
+        std::env::set_var("BUZZ_GIT_REPO_PATH", &git_path);
+        std::env::set_var("BUZZ_BIND_ADDR", "127.0.0.1:3020");
+        std::env::set_var("RELAY_ACCESS", "open");
+        std::env::set_var("BUZZ_GIT_ENABLED", "false");
+        let config = Config::from_env().expect("config");
+        for name in [
+            "BUZZ_DEPLOYMENT_MODE",
+            "BUZZ_DATA_DIR",
+            "BUZZ_CONFIG_PATH",
+            "BUZZ_GIT_REPO_PATH",
+            "BUZZ_BIND_ADDR",
+            "RELAY_ACCESS",
+            "BUZZ_GIT_ENABLED",
+        ] {
+            std::env::remove_var(name);
+        }
+        assert_eq!(config.bind_addr.port(), 3020);
+        assert_eq!(config.community_access, CommunityAccess::Open);
+        assert!(!config.git_enabled);
+        assert_eq!(config.relay_url, "ws://file.example");
     }
 }
