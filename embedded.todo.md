@@ -27,10 +27,14 @@ Completed (on `upstream-sync`, ahead of `main`):
 - PR 18 — Filesystem git backend
 - Facade wiring — SQLite `Db` facade dispatch + selected-backend service injection
   (unnumbered integration step completing Epic 3's exit gate)
-- PR 19 (partial) — `EmbeddedLayout` data directory layout + `instance.lock`
-  exclusive lock (`crates/buzz-relay/src/deployment.rs`)
+- PR 19 — Embedded config, data directory layout, durable relay identity,
+  access bootstrap, recovery, and backend-neutral readiness
+- PR 20 — Relay-only embedded Compose/Caddy bundle and operational runbook
 
 Remaining:
+
+PR19 and PR20 are complete on `upstream-sync`; the remaining release and
+evidence work is tracked in PR21 below.
 
 ## PR 16 — SQLite blob metadata tables replacing sidecar JSON
 
