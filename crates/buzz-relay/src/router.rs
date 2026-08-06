@@ -363,8 +363,8 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, the selected database, and Redis
-/// connectivity when the distributed backend is selected.
+/// Readiness probe — checks the selected database and distributed Redis
+/// connectivity when present. Embedded readiness never requires Redis.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use std::time::Duration;
 
@@ -377,25 +377,35 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 
     let check = async {
-        let (pg_ok, redis_ok) = tokio::join!(state.db.ping(), async {
+        let (database_ok, coordination_ok) = tokio::join!(state.db.ping(), async {
             match state.redis_pool.as_ref() {
                 Some(pool) => pool.get().await.is_ok(),
                 None => true,
             }
         },);
-        (pg_ok, redis_ok)
+        (database_ok, coordination_ok)
     };
 
-    let (pg_ok, redis_ok) = tokio::time::timeout(Duration::from_secs(2), check)
+    let (database_ok, coordination_ok) = tokio::time::timeout(Duration::from_secs(2), check)
         .await
         .unwrap_or((false, false));
 
-    if pg_ok && redis_ok {
-        (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
+    let backend_status = json!({
+        "deployment": if state.config.deployment_mode.is_embedded() { "embedded" } else { "distributed" },
+        "database": if state.config.deployment_mode.is_embedded() { "sqlite" } else { "postgres" },
+        "coordination": if state.redis_pool.is_some() { "redis" } else { "local" },
+        "objects": if state.config.deployment_mode.is_embedded() { "filesystem" } else { "s3" },
+    });
+    if database_ok && coordination_ok {
+        (
+            StatusCode::OK,
+            Json(json!({"status": "ready", "backends": backend_status})),
+        )
+            .into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "not_ready", "postgres": pg_ok, "redis": redis_ok})),
+            Json(json!({"status": "not_ready", "database": database_ok, "coordination": coordination_ok, "backends": backend_status})),
         )
             .into_response()
     }

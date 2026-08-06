@@ -68,6 +68,7 @@ fs2 = "0.4"
 bytes = "1"
 infer = "0.19"
 serde_yaml      = { workspace = true }
+toml            = "1.0"
 sha2            = { workspace = true }
 hmac            = { workspace = true }
 subtle          = { workspace = true }
