@@ -631,6 +631,10 @@ Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
 - Add a container smoke test that starts from an empty volume with no
   PostgreSQL, Redis, or MinIO network access and exercises channels, messages,
   search, media, git, workflows, restart, and backup/restore.
+- Run `scripts/test-embedded-compose.sh` against the relay image for the
+  startup/readiness, durable-key, restart, and stop-and-copy backup/restore
+  portion of that gate; protocol workload coverage remains an explicit E2E
+  follow-up before the stable release.
 - Record an ADR and focused benchmark comparing Moka, `quick_cache`, and `scc`
   using Buzz presence/TTL workloads; Moka remains the selected implementation
   unless it fails the correctness or bounded-memory tests.

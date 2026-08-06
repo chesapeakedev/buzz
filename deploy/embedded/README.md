@@ -27,3 +27,10 @@ Stop the relay, copy the entire `buzz-data` volume, and record the image tag.
 Restore only into an empty volume while the relay is stopped; then start the
 same or a newer compatible image and verify `/_readiness`. Do not run two
 instances with the same data volume or relay key.
+
+The image-level regression check is reproducible from the repository root:
+
+```bash
+BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
+  ./scripts/test-embedded-compose.sh
+```
