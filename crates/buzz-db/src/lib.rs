@@ -4476,6 +4476,11 @@ impl Db {
         ttl_secs: u64,
         max_uses: Option<i32>,
     ) -> Result<relay_invite::MintedInvite> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .mint_relay_invite(community, created_by, ttl_secs, max_uses)
+                .await;
+        }
         relay_invite::mint_relay_invite(
             &self.postgres().pool,
             community,
@@ -4491,6 +4496,9 @@ impl Db {
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.reap_expired_relay_invites(cutoff).await;
+        }
         relay_invite::reap_expired_relay_invites(&self.postgres().pool, cutoff).await
     }
 
@@ -4506,6 +4514,11 @@ impl Db {
         claimer_pubkey: &str,
         policy_version: Option<&str>,
     ) -> Result<relay_invite::ClaimOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_relay_invite(community, token_hash, claimer_pubkey, policy_version)
+                .await;
+        }
         relay_invite::claim_relay_invite(
             &self.postgres().pool,
             community,
