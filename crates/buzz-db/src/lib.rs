@@ -1450,6 +1450,9 @@ impl Db {
         limit: i64,
         lease_until: DateTime<Utc>,
     ) -> Result<Option<push::ClaimedMatchBatch>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.claim_due_push_match_batch(limit, lease_until).await;
+        }
         push::claim_due_match_batch(&self.postgres().pool, limit, lease_until).await
     }
 
@@ -1471,6 +1474,11 @@ impl Db {
         claim_id: uuid::Uuid,
         event_ids: &[Vec<u8>],
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .complete_push_match_batch(community, claim_id, event_ids)
+                .await;
+        }
         push::complete_match_batch(&self.postgres().pool, community, claim_id, event_ids).await
     }
 
@@ -1482,6 +1490,11 @@ impl Db {
         event_ids: &[Vec<u8>],
         next: DateTime<Utc>,
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .retry_push_match_batch(community, claim_id, event_ids, next)
+                .await;
+        }
         push::retry_match_batch(&self.postgres().pool, community, claim_id, event_ids, next).await
     }
 
@@ -1550,6 +1563,9 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<push::RevalidateWakeOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.revalidate_push_wake(community, id, claim_id).await;
+        }
         push::revalidate_wake_for_send(&self.postgres().pool, community, id, claim_id).await
     }
 
@@ -1560,6 +1576,9 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.complete_push_wake(community, id, claim_id).await;
+        }
         push::complete_wake(&self.postgres().pool, community, id, claim_id).await
     }
 
@@ -1571,6 +1590,9 @@ impl Db {
         claim_id: Uuid,
         next: DateTime<Utc>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.retry_push_wake(community, id, claim_id, next).await;
+        }
         push::retry_wake(&self.postgres().pool, community, id, claim_id, next).await
     }
 
@@ -1581,6 +1603,9 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.fail_push_wake(community, id, claim_id).await;
+        }
         push::fail_wake(&self.postgres().pool, community, id, claim_id).await
     }
 
@@ -1592,6 +1617,11 @@ impl Db {
         installation_id: &str,
         generation: i64,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .disable_push_endpoint(community, author, installation_id, generation)
+                .await;
+        }
         push::disable_endpoint_generation(
             &self.postgres().pool,
             community,
@@ -1613,6 +1643,18 @@ impl Db {
         active: Option<push::ActiveLease<'_>>,
         max_active_leases: i64,
     ) -> Result<push::AcceptLeaseOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .accept_push_lease_event(
+                    community,
+                    event,
+                    installation_id,
+                    version,
+                    active,
+                    max_active_leases,
+                )
+                .await;
+        }
         push::accept_lease_event(
             &self.postgres().pool,
             community,
