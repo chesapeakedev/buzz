@@ -5649,7 +5649,22 @@ impl Db {
             )));
         }
 
-        let mut tx = self.pool.begin().await?;
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_approval_command(
+                    community_id,
+                    event,
+                    expected_kind,
+                    token_hash,
+                    status,
+                    approver_pubkey,
+                    note,
+                )
+                .await;
+        }
+
+        let mut tx = self.postgres().pool.begin().await?;
+        let mut tx = self.postgres().pool.begin().await?;
         let (_, inserted) =
             event::insert_event_with_thread_metadata_tx(&mut tx, community_id, event, None, None)
                 .await?;
