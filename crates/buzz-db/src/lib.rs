@@ -2517,6 +2517,19 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<channel::ChannelRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_channel(
+                    community_id,
+                    name,
+                    channel_type,
+                    visibility,
+                    description,
+                    created_by,
+                    ttl_seconds,
+                )
+                .await;
+        }
         channel::create_channel(
             &self.pool,
             community_id,
@@ -2829,7 +2842,12 @@ impl Db {
         channel_id: Uuid,
         updates: channel::ChannelUpdate,
     ) -> Result<channel::ChannelRecord> {
-        channel::update_channel(&self.pool, community_id, channel_id, updates).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_channel(community_id, channel_id, updates)
+                .await;
+        }
+        channel::update_channel(&self.postgres().pool, community_id, channel_id, updates).await
     }
 
     /// Sets the topic for a channel.
@@ -2841,7 +2859,19 @@ impl Db {
         topic: &str,
         set_by: &[u8],
     ) -> Result<()> {
-        channel::set_topic(&self.pool, community_id, channel_id, topic, set_by).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_topic(community_id, channel_id, topic, set_by)
+                .await;
+        }
+        channel::set_topic(
+            &self.postgres().pool,
+            community_id,
+            channel_id,
+            topic,
+            set_by,
+        )
+        .await
     }
 
     /// Sets the purpose for a channel.
@@ -2853,13 +2883,28 @@ impl Db {
         purpose: &str,
         set_by: &[u8],
     ) -> Result<()> {
-        channel::set_purpose(&self.pool, community_id, channel_id, purpose, set_by).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_purpose(community_id, channel_id, purpose, set_by)
+                .await;
+        }
+        channel::set_purpose(
+            &self.postgres().pool,
+            community_id,
+            channel_id,
+            purpose,
+            set_by,
+        )
+        .await
     }
 
     /// Archives a channel.
     #[datastore_span(name = "archive_channel", system = "postgresql")]
     pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
-        channel::archive_channel(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.archive_channel(community_id, channel_id).await;
+        }
+        channel::archive_channel(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Unarchives a channel.
@@ -2869,7 +2914,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<()> {
-        channel::unarchive_channel(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unarchive_channel(community_id, channel_id).await;
+        }
+        channel::unarchive_channel(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Soft-delete a channel.
@@ -2879,7 +2927,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<bool> {
-        channel::soft_delete_channel(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.soft_delete_channel(community_id, channel_id).await;
+        }
+        channel::soft_delete_channel(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Returns the count of active members in a channel.
@@ -2889,7 +2940,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<i64> {
-        channel::get_member_count(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_member_count(community_id, channel_id).await;
+        }
+        channel::get_member_count(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Bulk-fetch member counts for a set of channel IDs.
@@ -2899,7 +2953,12 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, i64>> {
-        channel::get_member_counts_bulk(&self.pool, community_id, channel_ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_member_counts_bulk(community_id, channel_ids)
+                .await;
+        }
+        channel::get_member_counts_bulk(&self.postgres().pool, community_id, channel_ids).await
     }
 
     /// Get the active role of a pubkey in a channel.
@@ -2910,7 +2969,12 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<Option<String>> {
-        channel::get_member_role(&self.pool, community_id, channel_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_member_role(community_id, channel_id, pubkey)
+                .await;
+        }
+        channel::get_member_role(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.
@@ -3391,6 +3455,22 @@ impl Db {
         depth: i32,
         broadcast: bool,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .insert_thread_metadata(
+                    community_id,
+                    event_id,
+                    event_created_at,
+                    channel_id,
+                    parent_event_id,
+                    parent_event_created_at,
+                    root_event_id,
+                    root_event_created_at,
+                    depth,
+                    broadcast,
+                )
+                .await;
+        }
         thread::insert_thread_metadata(
             &self.pool,
             community_id,
@@ -3437,6 +3517,11 @@ impl Db {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_thread_replies(community_id, root_event_id, depth_limit, limit, cursor)
+                .await;
+        }
         let (path, predicate): (&'static str, RoutePredicate) = match cursor {
             Some(_) => (
                 "thread_cursor",
@@ -3509,7 +3594,10 @@ impl Db {
         community_id: CommunityId,
         event_id: &[u8],
     ) -> Result<Option<thread::ThreadSummary>> {
-        thread::get_thread_summary(&self.pool, community_id, event_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_thread_summary(community_id, event_id).await;
+        }
+        thread::get_thread_summary(&self.postgres().pool, community_id, event_id).await
     }
 
     /// One channel window: top-level rows + summaries + server `has_more`.
@@ -3524,6 +3612,11 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<thread::ChannelWindow> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_channel_window(community_id, channel_id, limit, cursor, kind_filter)
+                .await;
+        }
         self.get_channel_window_with_session(community_id, channel_id, limit, cursor, kind_filter)
             .await
             .map(|(window, _session)| window)
@@ -3727,7 +3820,12 @@ impl Db {
         community_id: CommunityId,
         event_id: &[u8],
     ) -> Result<Option<thread::ThreadMetadataRecord>> {
-        thread::get_thread_metadata_by_event(&self.pool, community_id, event_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_thread_metadata_by_event(community_id, event_id)
+                .await;
+        }
+        thread::get_thread_metadata_by_event(&self.postgres().pool, community_id, event_id).await
     }
 
     /// Decrement reply counts.
@@ -3738,8 +3836,18 @@ impl Db {
         parent_event_id: &[u8],
         root_event_id: Option<&[u8]>,
     ) -> Result<()> {
-        thread::decrement_reply_count(&self.pool, community_id, parent_event_id, root_event_id)
-            .await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .decrement_reply_count(community_id, parent_event_id, root_event_id)
+                .await;
+        }
+        thread::decrement_reply_count(
+            &self.postgres().pool,
+            community_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
     }
 
     /// Add (or re-activate) a reaction.
@@ -3753,6 +3861,18 @@ impl Db {
         emoji: &str,
         reaction_event_id: Option<&[u8]>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .add_reaction(
+                    community,
+                    event_id,
+                    event_created_at,
+                    pubkey,
+                    emoji,
+                    reaction_event_id,
+                )
+                .await;
+        }
         reaction::add_reaction(
             &self.pool,
             community,
@@ -3775,6 +3895,11 @@ impl Db {
         pubkey: &[u8],
         emoji: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .remove_reaction(community, event_id, event_created_at, pubkey, emoji)
+                .await;
+        }
         reaction::remove_reaction(
             &self.pool,
             community,
@@ -3793,7 +3918,17 @@ impl Db {
         community: CommunityId,
         reaction_event_id: &[u8],
     ) -> Result<bool> {
-        reaction::remove_reaction_by_source_event_id(&self.pool, community, reaction_event_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .remove_reaction_by_source_event_id(community, reaction_event_id)
+                .await;
+        }
+        reaction::remove_reaction_by_source_event_id(
+            &self.postgres().pool,
+            community,
+            reaction_event_id,
+        )
+        .await
     }
 
     /// Look up the active reaction row for one actor + emoji + target tuple.
@@ -3806,6 +3941,11 @@ impl Db {
         pubkey: &[u8],
         emoji: &str,
     ) -> Result<Option<reaction::ActiveReactionRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_active_reaction_record(community, event_id, event_created_at, pubkey, emoji)
+                .await;
+        }
         reaction::get_active_reaction_record(
             &self.pool,
             community,
@@ -3828,6 +3968,18 @@ impl Db {
         emoji: &str,
         reaction_event_id: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .set_reaction_event_id(
+                    community,
+                    event_id,
+                    event_created_at,
+                    pubkey,
+                    emoji,
+                    reaction_event_id,
+                )
+                .await;
+        }
         reaction::set_reaction_event_id(
             &self.pool,
             community,
@@ -3850,6 +4002,11 @@ impl Db {
         limit: u32,
         cursor: Option<&str>,
     ) -> Result<Vec<reaction::ReactionGroup>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_reactions(community, event_id, event_created_at, limit, cursor)
+                .await;
+        }
         reaction::get_reactions(
             &self.pool,
             community,
@@ -3868,7 +4025,10 @@ impl Db {
         community: CommunityId,
         event_ids: &[(&[u8], DateTime<Utc>)],
     ) -> Result<Vec<reaction::BulkReactionEntry>> {
-        reaction::get_reactions_bulk(&self.pool, community, event_ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_reactions_bulk(community, event_ids).await;
+        }
+        reaction::get_reactions_bulk(&self.postgres().pool, community, event_ids).await
     }
 
     /// Find events that @mention the given pubkey.
