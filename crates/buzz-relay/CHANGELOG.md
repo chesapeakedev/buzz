@@ -1,5 +1,12 @@
 # Changelog
 
+## relay-v0.3.0
+
+- Add the SQLite/filesystem single-node embedded relay profile with local
+  coordination, durable `/data` recovery, and relay-only Compose deployment.
+- Preserve PostgreSQL/Redis/S3 as the distributed high-throughput profile.
+- Add embedded startup, restart, backup/restore, and client-connection runbooks.
+
 ## relay-v0.2.1
 
 - fix(sdk): preserve self-mention p tags in message and forum event builders ([#4975](https://github.com/block/buzz/pull/4975)) ([`78c87ae20e`](https://github.com/block/buzz/commit/78c87ae20e182fffdd99744d6c9ff99df82b159c))
@@ -107,7 +114,6 @@
 - fix(relay): publish membership snapshot on provisioning ([#1761](https://github.com/block/buzz/pull/1761)) ([`0950d392b7`](https://github.com/block/buzz/commit/0950d392b7a862694c95cbea1cec45985ee42996))
 - feat(relay): per-community usage metrics ([#1723](https://github.com/block/buzz/pull/1723)) ([`620822899a`](https://github.com/block/buzz/commit/620822899a6373fa3a17a87815cd7cade25ed332))
 - refactor(desktop): remove vestigial MCP toolsets config ([#1776](https://github.com/block/buzz/pull/1776)) ([`dfec75b3c0`](https://github.com/block/buzz/commit/dfec75b3c0b8080529e4d9089d4ed80e3902aaed))
-
 
 ## relay-v0.2.0
 
