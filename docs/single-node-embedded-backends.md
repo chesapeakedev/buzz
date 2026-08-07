@@ -603,7 +603,9 @@ Recommended investigation order:
 
 1. Measure writer-gate wait, transaction duration, SQLite busy/lock errors,
    WAL checkpoint duration, and post-commit fan-out separately. Keep the
-   benchmark's authentication and steady-state write phases separate.
+   benchmark's authentication and steady-state write phases separate. The
+   `buzz_sqlite_writer_wait_seconds` histogram now exposes the first of these
+   measurements without adding high-cardinality labels.
 2. Capture `EXPLAIN QUERY PLAN` for the event insert-adjacent lookup, mention,
    replacement, thread-counter, and feed queries before changing indexes.
    Add only indexes that reduce measured write or read work; every index adds
