@@ -44,6 +44,11 @@ All other fork commits replayed without manual conflict resolution.
 - Helm, mobile, desktop, Sprig, and push-gateway publication are disabled until
   each lane has a ChesapeakeDev owner, secrets inventory, and explicit need.
   Relay container publication is the sole fork-owned release lane.
+- Client CI (desktop, mobile, web, Windows Tauri/mesh builds, Sprig builds)
+  remains restricted to `block/buzz`. The fork's supported client is web,
+  exercised locally against the relay; Actions covers relay lint, unit tests,
+  backend integration, relay E2E, security, cross-compile, and fork-release
+  safety only.
 
 ## Known semantic differences
 
