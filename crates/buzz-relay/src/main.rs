@@ -645,9 +645,10 @@ async fn main() -> anyhow::Result<()> {
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
-    if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
-        .map(|v| v != "false")
-        .unwrap_or(true)
+    if config.git_enabled
+        && std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
+            .map(|v| v != "false")
+            .unwrap_or(true)
     {
         let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
             .ok()
