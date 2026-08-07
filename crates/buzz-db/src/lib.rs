@@ -1577,6 +1577,11 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .insert_event_with_thread_metadata(community_id, event, channel_id, thread_meta)
+                .await;
+        }
         let result = event::insert_event_with_thread_metadata(
             &self.postgres().pool,
             community_id,
@@ -1607,6 +1612,19 @@ impl Db {
         actor_pubkey: &[u8],
         emoji: &str,
     ) -> Result<event::ReactionEventInsertOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .insert_reaction_event_with_thread_metadata(
+                    community_id,
+                    event,
+                    channel_id,
+                    thread_meta,
+                    target_event_id,
+                    actor_pubkey,
+                    emoji,
+                )
+                .await;
+        }
         let outcome = event::insert_reaction_event_with_thread_metadata(
             &self.postgres().pool,
             community_id,
@@ -3971,6 +3989,11 @@ impl Db {
         status: Option<&str>,
         limit: i64,
     ) -> Result<Vec<moderation::ReportRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_moderation_reports(community, status, limit)
+                .await;
+        }
         moderation::list_reports(&self.postgres().pool, community, status, limit).await
     }
 
@@ -3980,6 +4003,9 @@ impl Db {
         community: CommunityId,
         report_id: Uuid,
     ) -> Result<Option<moderation::ReportRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_moderation_report(community, report_id).await;
+        }
         moderation::get_report(&self.postgres().pool, community, report_id).await
     }
 
@@ -3989,6 +4015,11 @@ impl Db {
         community: CommunityId,
         report_event_id: &[u8],
     ) -> Result<Option<moderation::ReportRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_moderation_report_by_event(community, report_event_id)
+                .await;
+        }
         moderation::get_report_by_event(&self.postgres().pool, community, report_event_id).await
     }
 
@@ -4001,6 +4032,11 @@ impl Db {
         resolved_by: &[u8],
         action_id: Option<Uuid>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .resolve_moderation_report(community, report_id, status, resolved_by, action_id)
+                .await;
+        }
         moderation::resolve_report(
             &self.postgres().pool,
             community,
@@ -4021,6 +4057,11 @@ impl Db {
         reason: Option<&str>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .ban_community_member(community, pubkey, actor, reason, expires_at)
+                .await;
+        }
         moderation::ban_member(
             &self.postgres().pool,
             community,
@@ -4039,6 +4080,9 @@ impl Db {
         pubkey: &[u8],
         actor: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unban_community_member(community, pubkey, actor).await;
+        }
         moderation::unban_member(&self.postgres().pool, community, pubkey, actor).await
     }
 
@@ -4051,6 +4095,11 @@ impl Db {
         muted_until: DateTime<Utc>,
         reason: Option<&str>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .timeout_community_member(community, pubkey, actor, muted_until, reason)
+                .await;
+        }
         moderation::timeout_member(
             &self.postgres().pool,
             community,
@@ -4069,6 +4118,11 @@ impl Db {
         pubkey: &[u8],
         actor: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .untimeout_community_member(community, pubkey, actor)
+                .await;
+        }
         moderation::untimeout_member(&self.postgres().pool, community, pubkey, actor).await
     }
 
@@ -4078,6 +4132,9 @@ impl Db {
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<moderation::RestrictionState> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.moderation_restriction_state(community, pubkey).await;
+        }
         moderation::restriction_state(&self.postgres().pool, community, pubkey).await
     }
 
@@ -4087,6 +4144,9 @@ impl Db {
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<Option<moderation::BanRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_community_ban(community, pubkey).await;
+        }
         moderation::get_ban(&self.postgres().pool, community, pubkey).await
     }
 
@@ -4095,6 +4155,9 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<Vec<moderation::BanRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_community_restrictions(community).await;
+        }
         moderation::list_restricted(&self.postgres().pool, community).await
     }
 
@@ -4104,6 +4167,9 @@ impl Db {
         community: CommunityId,
         action: moderation::NewAction<'_>,
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_moderation_action(community, action).await;
+        }
         moderation::insert_action(&self.postgres().pool, community, action).await
     }
 
@@ -4113,6 +4179,9 @@ impl Db {
         community: CommunityId,
         limit: i64,
     ) -> Result<Vec<moderation::ActionRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_moderation_actions(community, limit).await;
+        }
         moderation::list_actions(&self.postgres().pool, community, limit).await
     }
 
