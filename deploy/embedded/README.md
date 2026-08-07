@@ -53,8 +53,9 @@ raises the per-identity WebSocket event quota for synthetic traffic only; a
 normal Compose deployment retains the production default of 50 events/second.
 The corrected generator's local 20-client, 5-qps-total, 2-second calibration
 recorded 20 accepted writes with no publish errors (p50 about 1.73 ms,
-19.53 MiB). A 50-client, 1-qps-total run recorded 10 publish errors and about
-32.55 MiB, so keep higher-concurrency workloads on the distributed profile.
+19.53 MiB). At 100 and 200 total writes/s, the same host recorded 20 publish
+errors per run, so keep sustained workloads near or above 100 writes/s on the
+distributed profile.
 
 ### SQLite scaling boundary
 
@@ -64,10 +65,10 @@ or shared durable storage is the trigger to deploy PostgreSQL/Redis/S3.
 
 | Profile | Local calibration | Recommendation |
 | --- | --- | --- |
-| 20 clients × 5 writes/s | 100 aggregate writes/s; 0 rejects; p50 ≈1.65 ms | Healthy embedded operating point |
-| 50 clients × 1 write/s | 50 aggregate writes/s; 0 rejects; p50 ≈1.91 ms; ≈22.72 MiB relay memory | Upper single-device calibration point; benchmark target hardware |
-| 20 clients × 10 writes/s | 200 aggregate writes/s; later publishes timed out | Move sustained workloads to distributed storage |
-| 100 clients × 20 writes/s | 2,000 aggregate writes/s; later publishes timed out | Not an embedded target |
+| 20 clients × 5 total writes/s | 0 publish errors; p50 ≈1.73 ms; ≈19.53 MiB relay memory | Healthy corrected calibration |
+| 50 clients × 1 total write/s | 10 publish errors; p50 ≈1.90 ms; ≈32.55 MiB relay memory | Above the reliable tested envelope |
+| 20 clients × 100 total writes/s | 20 publish errors; p50 ≈1.26 ms | Move sustained workloads to distributed storage |
+| 20 clients × 200 total writes/s | 20 publish errors; p50 ≈1.22 ms | Not an embedded target |
 
 These are measurements, not universal SLAs. Move to the distributed profile
 before sustained demand approaches 200 durable writes/s, active connections
