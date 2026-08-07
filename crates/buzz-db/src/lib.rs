@@ -237,7 +237,7 @@ enum UsageMetricsLeaderConnection {
     Postgres(PgConnection),
     Sqlite {
         pool: SqlitePool,
-        _writer: OwnedMutexGuard<()>,
+        _leader: OwnedMutexGuard<()>,
     },
 }
 
@@ -640,7 +640,7 @@ impl Db {
             return Ok(Some(UsageMetricsLeader {
                 connection: UsageMetricsLeaderConnection::Sqlite {
                     pool: store.adapter_pool().clone(),
-                    _writer: store.adapter_writer_gate().lock_owned().await,
+                    _leader: store.adapter_usage_leader_gate().lock_owned().await,
                 },
             }));
         }
