@@ -582,6 +582,7 @@ a capacity-boundary observation, not a passing workload.
 | 50 clients, 1 total write/s, 2 seconds | 40 accepted writes, 10 publish errors, p50 ≈1.90 ms, ≈32.55 MiB | Exceeds the reliable tested envelope; move to distributed storage or reduce concurrency |
 | 20 clients, 100 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.26 ms; restart ≈5.38 s | Above the reliable tested envelope; use PostgreSQL/Redis/S3 for sustained demand |
 | 20 clients, 200 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.22 ms; restart ≈5.38 s | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
+| 100 clients, 100 total writes/s, 1 second | 60 accepted writes, 40 publish errors, p50 ≈1.28 ms, ≈20.67 MiB, `/data` ≈4.83 MiB; restart ≈5.36 s | Resource calibration only; not a reliable write target |
 
 As an operational rule, keep embedded deployments at or below the measured
 single-node envelope unless a target-device benchmark proves otherwise. Move to
