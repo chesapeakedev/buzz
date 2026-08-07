@@ -28,6 +28,28 @@ fn event_timestamp_micros(event: &Event) -> Result<i64> {
 }
 
 impl SqliteStore {
+    /// Soft-delete relay discovery events for one channel and signing key.
+    pub async fn soft_delete_discovery_events(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        relay_pubkey: &[u8],
+    ) -> Result<u64> {
+        let _writer = self.acquire_writer().await;
+        Ok(sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND channel_id = ? AND pubkey = ? \
+               AND deleted_at IS NULL AND kind IN (39000, 39001, 39002)",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .bind(relay_pubkey)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     /// Check the bounded set of creator-signed huddle links for a parent channel.
     pub async fn huddle_started_link_exists(
         &self,
