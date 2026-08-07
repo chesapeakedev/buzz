@@ -527,7 +527,8 @@ Port in vertical slices, keeping each pull request usable:
 4. moderation, archived identities, audit chains, and administration;
 5. workflows, approvals, schedules, reminders, durable push leases/outbox, and
    storage sweeps;
-6. git registry, usage reports, security replay claims, and rate windows.
+6. optional Git registry compatibility, usage reports, security replay claims,
+   and rate windows (Git is not required for the embedded product).
 
 For each slice:
 
@@ -543,7 +544,7 @@ PostgreSQL or Redis available.
 
 Deliver:
 
-- content-addressed filesystem media, with an optional Git backend mapping S3 key prefixes
+- content-addressed filesystem media as the required object-storage path, with an optional Git backend mapping S3 key prefixes
   to subdirectories (`packs/`, `manifests/`, `idx/`, `pointers/`);
 - filesystem git pack/manifest/pointer backend as an opt-in compatibility capability;
 - SQLite `media_objects` and `git_pointers` tables replacing sidecar JSON
@@ -608,7 +609,7 @@ without bypassing tests.
 11. SQLite search/feed slice.
 12. SQLite moderation/audit slice.
 13. SQLite workflow/reminder/push slice.
-14. SQLite git/usage/security slice.
+14. SQLite usage/security slice, with Git registry compatibility kept optional.
 15. Blob/CAS interfaces plus unchanged S3 adapters.
 16. SQLite blob metadata tables (`media_objects`, `git_pointers`) replacing
     sidecar JSON.
@@ -632,7 +633,8 @@ Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
 - Verify NIP-98 replay rejection and rate counters survive relay restarts;
   verify presence and typing state intentionally do not.
 - Stress concurrent event insertion, replaceable events, thread counters,
-  workflow claims, audit-chain appends, and git CAS under SQLite.
+  workflow claims, and audit-chain appends under SQLite. Exercise Git CAS
+  separately only when the opt-in compatibility backend is enabled.
 - Test filesystem traversal rejection, atomic replacement, byte ranges,
   interrupted writes, and restart recovery.
 - Add configuration tests for legacy distributed auto-detection, embedded
