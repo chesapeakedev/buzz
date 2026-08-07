@@ -35,6 +35,19 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
   ./scripts/test-embedded-compose.sh
 ```
 
+The repeatable write benchmark records per-level latency, container memory,
+`/data` growth, and restart recovery. Run the planned 100/1,000/10,000-client
+matrix on a suitably sized host, or override it for a local smoke run:
+
+```bash
+BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
+  BUZZ_BENCH_LEVELS=100:50,1000:100,10000:250 \
+  ./scripts/benchmark-embedded.sh
+```
+
+The benchmark is evidence for capacity planning, not a claim that SQLite or
+filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays.
+
 ## Release notes and known limits
 
 The embedded profile is a fresh-install deployment for this release line.
