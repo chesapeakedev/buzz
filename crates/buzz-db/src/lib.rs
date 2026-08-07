@@ -3547,6 +3547,22 @@ impl Db {
             Some(d_tag.as_bytes()),
         );
 
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_workflow_definition_command(
+                    community_id,
+                    event,
+                    workflow_id,
+                    channel_id,
+                    owner_pubkey,
+                    name,
+                    definition_json,
+                    definition_hash,
+                    &d_tag,
+                )
+                .await;
+        }
+
         let mut tx = self.postgres().pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
