@@ -36,7 +36,8 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
 ```
 
 The repeatable write benchmark records per-level latency, publish and
-connection errors,
+connection errors, and captures a `benchmark_error` when the host stops a
+level before the load generator can emit a summary.
 container memory,
 `/data` growth, and restart recovery. Run the planned 100/1,000/10,000-client
 matrix on a suitably sized host, or override it for a local smoke run:
