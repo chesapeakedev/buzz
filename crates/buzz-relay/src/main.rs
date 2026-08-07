@@ -13,7 +13,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
-use buzz_db::{Db, DbConfig};
+use buzz_db::{DatabaseBackendKind, Db, DbConfig};
 use buzz_pubsub::{LocalCoordination, RedisCoordination};
 use buzz_search::SearchService;
 
@@ -900,7 +900,15 @@ async fn main() -> anyhow::Result<()> {
     // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
     // already disabled without the exact gateway URL, so discovery and runtime
     // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    let push_runtime_enabled = state.config.push_gateway_delivery_url.is_some()
+        && matches!(state.db.backend_kind(), DatabaseBackendKind::Postgres);
+    info!(
+        configured = state.config.push_gateway_delivery_url.is_some(),
+        backend = ?state.db.backend_kind(),
+        enabled = push_runtime_enabled,
+        "NIP-PL push runtime configuration"
+    );
+    if push_runtime_enabled {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,

@@ -1052,6 +1052,7 @@ impl Config {
         let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
+            Err(_) if deployment_mode.is_embedded() => None,
             Err(_) => Some(parse_push_gateway_delivery_url(
                 DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
             )?),
@@ -1789,8 +1790,10 @@ mod tests {
     }
 
     #[test]
-    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
+    fn push_gateway_defaults_to_buzz_for_distributed_and_can_be_disabled() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_mode = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "distributed");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
@@ -1807,6 +1810,34 @@ mod tests {
         assert!(config.push_gateway_delivery_url.is_none());
 
         if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        }
+        if let Some(value) = previous_mode {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
+    }
+
+    #[test]
+    fn push_gateway_is_disabled_by_default_for_embedded() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_mode = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        let previous_url = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+
+        let config = Config::from_env().expect("embedded config");
+        assert!(config.push_gateway_delivery_url.is_none());
+
+        if let Some(value) = previous_mode {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
+        if let Some(value) = previous_url {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
             std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
