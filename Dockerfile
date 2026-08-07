@@ -156,7 +156,7 @@ ENV BUZZ_WEB_DIR=/srv/buzz/web \
 EXPOSE 3000 8080 9102
 
 # deploy/compose mounts a volume here; pre-created so it inherits buzz:buzz.
-RUN mkdir -p /data/git && chown buzz:buzz /data/git
+RUN mkdir -p /data && chown -R buzz:buzz /data
 
 USER buzz:buzz
 WORKDIR /var/lib/buzz
