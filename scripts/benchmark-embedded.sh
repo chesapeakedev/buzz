@@ -71,13 +71,27 @@ for entry in "${matrix[@]}"; do
   fi
   sample="$outdir/latency-${conns}.ms"
   summary="$outdir/summary-${conns}.json"
+  error_log="$outdir/stderr-${conns}.log"
+  set +e
   BENCH_PRIVATE_KEY="$private_key" BUZZ_RELAY_URL="$relay_url" \
     cargo run --quiet -p buzz-test-client --bin wamp_bench -- \
-      auto "$qps" "$duration" "$conns" "$sample" >"$summary"
+      auto "$qps" "$duration" "$conns" "$sample" >"$summary" 2>"$error_log"
+  run_status=$?
+  set -e
+  if ((run_status != 0)); then
+    jq -n \
+      --arg level "$entry" \
+      --arg error "wamp_bench exited with status $run_status" \
+      --argjson conns "$conns" \
+      --argjson qps "$qps" \
+      --argjson duration "$duration" \
+      '{level: $level, conns: $conns, qps_target: $qps, duration_secs: $duration, benchmark_error: $error}' \
+      >"$summary"
+  fi
   jq --arg level "$entry" '. + {level: $level}' "$summary" >>"$outdir/benchmark-levels.jsonl"
-  if jq -e '(.publish_errors + .connection_errors) > 0' "$summary" >/dev/null; then
+  if ((run_status != 0)) || jq -e '(.publish_errors + .connection_errors) > 0' "$summary" >/dev/null; then
     failed_levels=$((failed_levels + 1))
-    echo "benchmark level $entry recorded publish errors" >&2
+    echo "benchmark level $entry recorded an admission/publish error" >&2
   fi
   stats "${conns}c"
 done
