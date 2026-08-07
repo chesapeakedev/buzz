@@ -55,6 +55,24 @@ later writes. Treat that as an operator-facing SQLite capacity boundary until
 another host produces stronger evidence, and keep high-concurrency workloads
 on the distributed profile.
 
+### SQLite scaling boundary
+
+SQLite is the simple, low-throughput single-relay profile. It is not a shared
+coordination layer: needing a second relay node, cross-node fan-out, failover,
+or shared durable storage is the trigger to deploy PostgreSQL/Redis/S3.
+
+| Profile | Local calibration | Recommendation |
+| --- | --- | --- |
+| 20 clients × 5 writes/s | 100 aggregate writes/s; 0 rejects; p50 ≈1.65 ms | Healthy embedded operating point |
+| 50 clients × 1 write/s | 50 aggregate writes/s; 0 rejects; p50 ≈1.91 ms; ≈22.72 MiB relay memory | Upper single-device calibration point; benchmark target hardware |
+| 20 clients × 10 writes/s | 200 aggregate writes/s; later publishes timed out | Move sustained workloads to distributed storage |
+| 100 clients × 20 writes/s | 2,000 aggregate writes/s; later publishes timed out | Not an embedded target |
+
+These are measurements, not universal SLAs. Move to the distributed profile
+before sustained demand approaches 200 durable writes/s, active connections
+require a second relay process, or high availability and cross-node presence
+become requirements.
+
 ## Release notes and known limits
 
 The embedded profile is a fresh-install deployment for this release line.

@@ -560,6 +560,34 @@ concurrent clone/push traffic, large histories, or many repositories must use
 the distributed PostgreSQL/Redis/S3 profile; this plan does not treat a
 filesystem Git store as a scalable object-storage substitute.
 
+#### SQLite scaling boundary
+
+SQLite is the deliberately low-throughput, single-relay deployment profile.
+It is useful when one operator wants the simplest possible Buzz server and can
+keep durable writes on one local filesystem. It is not a horizontally scalable
+coordination layer: the first requirement for a second relay node, cross-node
+fan-out, failover, or shared durable storage is the distributed
+PostgreSQL/Redis/S3 profile.
+
+The following measurements are calibration evidence from the locally built
+relay image, not hardware-independent service-level objectives. The benchmark
+rate is per connected client; aggregate write rate is the useful comparison.
+
+| Profile | Observed result | Deployment guidance |
+| --- | --- | --- |
+| 20 clients × 5 writes/s (100 aggregate writes/s) | 0 rejected writes, p50 ≈ 1.65 ms; restart recovered | Healthy embedded operating point on the tested host |
+| 50 clients × 1 write/s (50 aggregate writes/s) | 0 rejected writes, p50 ≈ 1.91 ms, ≈22.72 MiB relay memory; restart recovered | Reasonable upper single-device calibration point; measure on target hardware |
+| 20 clients × 10 writes/s (200 aggregate writes/s) | Later publishes timed out after authentication | Treat as above the tested SQLite write boundary; move to distributed storage for sustained demand |
+| 100 clients × 20 writes/s (2,000 aggregate writes/s) | Later publishes timed out after authentication | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
+
+As an operational rule, keep embedded deployments at or below the measured
+single-node envelope unless a target-device benchmark proves otherwise. Move to
+the distributed profile before sustained demand approaches 200 durable writes/s,
+before active connections require a second relay process, or whenever a second
+relay node, shared storage, cross-node presence, or failover is desired. This
+keeps the embedded product simple while allowing Buzz's distributed backend to
+serve high-throughput installations.
+
 Exit gate: media E2E tests pass after relay restart with MinIO and external S3
 unavailable. Git storage is tested separately when `BUZZ_GIT_ENABLED=true`.
 Embedded mode must remain usable with Git disabled.

@@ -142,6 +142,10 @@ remains.
       (p50 1.65 ms) and restart recovery. The harness now
       batches authentication and phases writes so connection admission is not
       mistaken for steady-state throughput.
+- [x] A 50-client, 1-qps-per-client resource profile also passes with zero
+      rejected writes (p50 1.91 ms, 22.72 MiB observed container memory) and
+      restart recovery. A 100-client run is not claimed until its admission
+      and write behavior is reproducible.
 - [ ] Capacity follow-up remains open: 20 clients at 10 qps each and a
       100-client, 20-qps run timed out on later writes after authentication
       succeeded. These are recorded as real SQLite write-path capacity signals,
