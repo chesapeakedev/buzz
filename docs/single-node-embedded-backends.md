@@ -588,6 +588,42 @@ relay node, shared storage, cross-node presence, or failover is desired. This
 keeps the embedded product simple while allowing Buzz's distributed backend to
 serve high-throughput installations.
 
+#### SQLite write-scaling investigation
+
+The current adapter already uses WAL mode, `synchronous=NORMAL`, a bounded
+busy timeout, a pooled set of read connections, and one process-local writer
+gate. Each durable event still enters a `BEGIN IMMEDIATE` transaction and
+writes the event row plus its mention/index work before commit. That makes the
+serialized commit path—not connection admission—the first suspected limit.
+The 20-client/10-qps timeout after successful authentication supports that
+hypothesis, but is not enough to attribute all latency to SQLite without
+instrumentation.
+
+Recommended investigation order:
+
+1. Measure writer-gate wait, transaction duration, SQLite busy/lock errors,
+   WAL checkpoint duration, and post-commit fan-out separately. Keep the
+   benchmark's authentication and steady-state write phases separate.
+2. Capture `EXPLAIN QUERY PLAN` for the event insert-adjacent lookup, mention,
+   replacement, thread-counter, and feed queries before changing indexes.
+   Add only indexes that reduce measured write or read work; every index adds
+   commit cost.
+3. Prototype a bounded single-writer queue with explicit admission
+   backpressure. It can smooth bursts and return a clear overload response,
+   but must retain the existing transaction boundaries and never drop durable
+   events silently.
+4. Prototype write-amplification reductions—prepared statements, fewer
+   redundant lookups, and safe batching of independent post-commit work—while
+   keeping the event row, tenant checks, mentions, and thread counters atomic.
+5. Benchmark WAL checkpoint/autocheckpoint and `synchronous` settings on the
+   target disk. Do not weaken durability defaults merely to raise throughput;
+   any relaxed profile must be explicit, documented, and restart-tested.
+
+Do not pursue sharding, multiple SQLite writers, or a shared SQLite file across
+relay processes as an embedded solution. Those approaches conflict with the
+single-process ownership and durability model; reaching that requirement is
+the signal to select PostgreSQL/Redis/S3 instead.
+
 Exit gate: media E2E tests pass after relay restart with MinIO and external S3
 unavailable. Git storage is tested separately when `BUZZ_GIT_ENABLED=true`.
 Embedded mode must remain usable with Git disabled.
