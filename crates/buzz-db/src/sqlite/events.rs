@@ -28,6 +28,55 @@ fn event_timestamp_micros(event: &Event) -> Result<i64> {
 }
 
 impl SqliteStore {
+    /// Atomically soft-delete an event and decrement its thread counters.
+    pub async fn soft_delete_event_and_update_thread(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let deleted = sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if deleted {
+            if let Some(parent) = parent_event_id {
+                sqlx::query(
+                    "UPDATE thread_metadata SET reply_count = max(reply_count - 1, 0) \
+                     WHERE community_id = ? AND event_id = ?",
+                )
+                .bind(community.as_uuid().to_string())
+                .bind(parent)
+                .execute(&mut *tx)
+                .await?;
+                if let Some(root) = root_event_id {
+                    sqlx::query(
+                        "UPDATE thread_metadata \
+                         SET descendant_count = max(descendant_count - 1, 0) \
+                         WHERE community_id = ? AND event_id = ?",
+                    )
+                    .bind(community.as_uuid().to_string())
+                    .bind(root)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
     /// Soft-delete relay discovery events for one channel and signing key.
     pub async fn soft_delete_discovery_events(
         &self,
