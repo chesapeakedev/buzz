@@ -6710,6 +6710,12 @@ impl Db {
         let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
         let pubkey_bytes = relay_keypair.public_key().to_bytes();
 
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .publish_nip43_membership_locked(community_id, relay_keypair)
+                .await;
+        }
+
         let lock_key =
             event_replacement_lock_key(community_id, kind_i32, pubkey_bytes.as_slice(), None);
 
