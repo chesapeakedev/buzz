@@ -132,6 +132,10 @@ remains.
 - [x] Release notes and known embedded limitations documented in
       `deploy/embedded/README.md` (fresh-install SQLite, distributed profile
       boundary, optional low-volume Git, and backup-before-upgrade policy).
+- [x] Focused embedded protocol evidence: NIP-11, subscription-limit handling,
+      SQLite FTS search, and filesystem media upload/download pass against the
+      locally built relay image. The broader capacity matrix and overnight soak
+      remain open below.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
