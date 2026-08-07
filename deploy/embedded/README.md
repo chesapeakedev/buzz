@@ -109,3 +109,5 @@ Before upgrading, stop the relay and take a complete `/data` backup. Restore
 only into an empty volume, then verify `/_readiness` and the relay identity
 before reconnecting clients. The first stable release will publish its exact
 image tag and migration notes alongside the signed `relay-vX.Y.Z` release.
+See [MIGRATIONS.md](MIGRATIONS.md) for the SQLite upgrade contract, rollback
+boundary, and release evidence checklist.

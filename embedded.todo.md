@@ -132,6 +132,10 @@ remains.
 - [x] Release notes and known embedded limitations documented in
       `deploy/embedded/README.md` (fresh-install SQLite, distributed profile
       boundary, optional low-volume Git, and backup-before-upgrade policy).
+- [x] Embedded migration and release evidence notes added in
+      `deploy/embedded/MIGRATIONS.md`, covering additive SQLite upgrades,
+      backup/restore rollback, migration visibility, SBOM, and provenance
+      verification.
 - [x] Focused embedded protocol evidence: NIP-11, subscription-limit handling,
       SQLite FTS search, and filesystem media upload/download pass against the
       locally built relay image. The broader capacity matrix and overnight soak
