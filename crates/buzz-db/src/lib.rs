@@ -2970,7 +2970,10 @@ impl Db {
         now_secs: i64,
         batch_limit: i64,
     ) -> Result<Vec<event::DueReminder>> {
-        event::query_due_reminders(&self.pool, now_secs, batch_limit).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.query_due_reminders(now_secs, batch_limit).await;
+        }
+        event::query_due_reminders(&self.postgres().pool, now_secs, batch_limit).await
     }
 
     /// Atomically claim a due reminder for delivery (cross-pod dedup).
@@ -2981,7 +2984,18 @@ impl Db {
         event_id: &[u8],
         event_created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
-        event::claim_due_reminder(&self.pool, community_id, event_id, event_created_at).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_due_reminder(community_id, event_id, event_created_at)
+                .await;
+        }
+        event::claim_due_reminder(
+            &self.postgres().pool,
+            community_id,
+            event_id,
+            event_created_at,
+        )
+        .await
     }
 
     /// Atomically claim a due reminder using a caller-supplied delivery stamp.
@@ -2993,6 +3007,16 @@ impl Db {
         event_created_at: chrono::DateTime<chrono::Utc>,
         delivery_stamp: i64,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_due_reminder_with_stamp(
+                    community_id,
+                    event_id,
+                    event_created_at,
+                    delivery_stamp,
+                )
+                .await;
+        }
         event::claim_due_reminder_with_stamp(
             &self.pool,
             community_id,
@@ -3012,6 +3036,11 @@ impl Db {
         event_created_at: chrono::DateTime<chrono::Utc>,
         delivery_stamp: i64,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .release_due_reminder(community_id, event_id, event_created_at, delivery_stamp)
+                .await;
+        }
         event::release_due_reminder(
             &self.pool,
             community_id,
