@@ -1,13 +1,15 @@
 //! SQLite direct-message channel operations.
 
 use chrono::{DateTime, Utc};
+use nostr::Event;
 use sqlx::Row as _;
+use sqlx::Transaction;
 use uuid::Uuid;
 
 use super::SqliteStore;
 use crate::channel::ChannelRecord;
 use crate::dm::{compute_participant_hash, DmParticipant, DmRecord};
-use crate::{CommunityId, DbError, Result};
+use crate::{CommandExecution, CommunityId, DbError, Result};
 
 fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(value).ok_or(DbError::InvalidTimestamp(value))
@@ -102,12 +104,35 @@ impl SqliteStore {
         created_by: &[u8],
         unhide_creator: bool,
     ) -> Result<(ChannelRecord, bool)> {
-        let participant_hash = compute_participant_hash(participants);
-        let community_id = community.as_uuid().to_string();
         let _writer = self.acquire_writer().await;
         let mut connection = self.pool.acquire().await?;
         let mut transaction =
             sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (channel_id, created) = Self::open_or_create_dm_tx(
+            &mut transaction,
+            community,
+            participants,
+            created_by,
+            unhide_creator,
+        )
+        .await?;
+        transaction.commit().await?;
+        let channel_id = Uuid::parse_str(&channel_id)
+            .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?;
+        Ok((self.get_channel(community, channel_id).await?, created))
+    }
+
+    /// Open or create a DM inside a caller-owned SQLite transaction.
+    pub(crate) async fn open_or_create_dm_tx(
+        transaction: &mut Transaction<'_, sqlx::Sqlite>,
+        community: CommunityId,
+        participants: &[&[u8]],
+        created_by: &[u8],
+        unhide_creator: bool,
+    ) -> Result<(String, bool)> {
+        validate_participants(participants)?;
+        let participant_hash = compute_participant_hash(participants);
+        let community_id = community.as_uuid().to_string();
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM channels \
              WHERE community_id = ? AND participant_hash = ? \
@@ -115,9 +140,9 @@ impl SqliteStore {
         )
         .bind(&community_id)
         .bind(participant_hash.as_slice())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
-        let (channel_id, created) = if let Some(channel_id) = existing {
+        if let Some(channel_id) = existing {
             if unhide_creator {
                 sqlx::query(
                     "UPDATE channel_members SET hidden_at = NULL \
@@ -127,55 +152,210 @@ impl SqliteStore {
                 .bind(&community_id)
                 .bind(&channel_id)
                 .bind(created_by)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             }
-            (channel_id, false)
+            return Ok((channel_id, false));
+        }
+
+        let channel_id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_micros();
+        let name = if participants.len() == 2 {
+            "DM".to_owned()
         } else {
-            let channel_id = Uuid::new_v4().to_string();
-            let now = Utc::now().timestamp_micros();
-            let name = if participants.len() == 2 {
-                "DM".to_owned()
-            } else {
-                format!("Group DM ({})", participants.len())
-            };
+            format!("Group DM ({})", participants.len())
+        };
+        sqlx::query(
+            "INSERT INTO channels \
+             (community_id, id, name, channel_type, visibility, created_by, \
+              created_at, updated_at, participant_hash) \
+             VALUES (?, ?, ?, 'dm', 'private', ?, ?, ?, ?)",
+        )
+        .bind(&community_id)
+        .bind(&channel_id)
+        .bind(name)
+        .bind(created_by)
+        .bind(now)
+        .bind(now)
+        .bind(participant_hash.as_slice())
+        .execute(&mut **transaction)
+        .await?;
+        for pubkey in participants {
             sqlx::query(
-                "INSERT INTO channels \
-                 (community_id, id, name, channel_type, visibility, created_by, \
-                  created_at, updated_at, participant_hash) \
-                 VALUES (?, ?, ?, 'dm', 'private', ?, ?, ?, ?)",
+                "INSERT INTO channel_members \
+                 (community_id, channel_id, pubkey, role, joined_at, invited_by) \
+                 VALUES (?, ?, ?, 'member', ?, ?) \
+                 ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET \
+                   removed_at = NULL, removed_by = NULL, role = excluded.role",
             )
             .bind(&community_id)
             .bind(&channel_id)
-            .bind(name)
+            .bind(*pubkey)
+            .bind(now)
             .bind(created_by)
-            .bind(now)
-            .bind(now)
-            .bind(participant_hash.as_slice())
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
-            for pubkey in participants {
-                sqlx::query(
-                    "INSERT INTO channel_members \
-                     (community_id, channel_id, pubkey, role, joined_at, invited_by) \
-                     VALUES (?, ?, ?, 'member', ?, ?) \
-                     ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET \
-                       removed_at = NULL, removed_by = NULL, role = excluded.role",
-                )
-                .bind(&community_id)
-                .bind(&channel_id)
-                .bind(*pubkey)
-                .bind(now)
-                .bind(created_by)
-                .execute(&mut *transaction)
+        }
+        Ok((channel_id, true))
+    }
+
+    /// Atomically persist a DM-open command and apply its channel mutation.
+    pub async fn execute_dm_open_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<CommandExecution<(ChannelRecord, bool)>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_OPEN {
+            return Err(DbError::InvalidData(format!(
+                "expected DM open command kind {}, got {}",
+                buzz_core::kind::KIND_DM_OPEN,
+                event.kind.as_u16()
+            )));
+        }
+        let mut participants = pubkeys.to_vec();
+        if !participants.contains(&created_by) {
+            participants.push(created_by);
+        }
+        if participants.len() > 9 {
+            return Err(DbError::InvalidData(
+                "DM supports at most 9 participants".to_owned(),
+            ));
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (_, inserted) =
+            super::events::insert_event_transaction(&mut transaction, community, event, None)
                 .await?;
-            }
-            (channel_id, true)
-        };
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        let (channel_id, created) = Self::open_or_create_dm_tx(
+            &mut transaction,
+            community,
+            &participants,
+            created_by,
+            true,
+        )
+        .await?;
         transaction.commit().await?;
         let channel_id = Uuid::parse_str(&channel_id)
             .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?;
-        Ok((self.get_channel(community, channel_id).await?, created))
+        Ok(CommandExecution::Applied((
+            self.get_channel(community, channel_id).await?,
+            created,
+        )))
+    }
+
+    /// Atomically persist a DM-add-member command and open the expanded DM.
+    pub async fn execute_dm_add_member_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        source_channel_id: Uuid,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<CommandExecution<(ChannelRecord, bool)>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_ADD_MEMBER {
+            return Err(DbError::InvalidData(format!(
+                "expected DM add-member command kind {}, got {}",
+                buzz_core::kind::KIND_DM_ADD_MEMBER,
+                event.kind.as_u16()
+            )));
+        }
+        let mut participants = pubkeys.to_vec();
+        if !participants.contains(&created_by) {
+            participants.push(created_by);
+        }
+        if participants.len() > 9 {
+            return Err(DbError::InvalidData(
+                "DM supports at most 9 participants".to_owned(),
+            ));
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (_, inserted) = super::events::insert_event_transaction(
+            &mut transaction,
+            community,
+            event,
+            Some(source_channel_id),
+        )
+        .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        let (channel_id, created) = Self::open_or_create_dm_tx(
+            &mut transaction,
+            community,
+            &participants,
+            created_by,
+            true,
+        )
+        .await?;
+        transaction.commit().await?;
+        let channel_id = Uuid::parse_str(&channel_id)
+            .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?;
+        Ok(CommandExecution::Applied((
+            self.get_channel(community, channel_id).await?,
+            created,
+        )))
+    }
+
+    /// Atomically persist a DM-hide command and hide the caller's membership.
+    pub async fn execute_dm_hide_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_HIDE {
+            return Err(DbError::InvalidData(format!(
+                "expected DM hide command kind {}, got {}",
+                buzz_core::kind::KIND_DM_HIDE,
+                event.kind.as_u16()
+            )));
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (_, inserted) = super::events::insert_event_transaction(
+            &mut transaction,
+            community,
+            event,
+            Some(channel_id),
+        )
+        .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        let result = sqlx::query(
+            "UPDATE channel_members SET hidden_at = ? \
+             WHERE community_id = ? AND channel_id = ? AND pubkey = ? \
+               AND removed_at IS NULL",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .bind(pubkey)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "no active membership for channel {channel_id}"
+            )));
+        }
+        transaction.commit().await?;
+        Ok(CommandExecution::Applied(()))
     }
 
     /// List visible DMs for one active participant.
