@@ -580,11 +580,12 @@ a capacity-boundary observation, not a passing workload.
 | 2 clients, 5 total writes/s, 1-second corrected smoke | 6 accepted writes, 0 publish errors, p50 ≈ 2.01 ms | Generator sanity check only; not a capacity target |
 | 20 clients, 5 total writes/s, 2 seconds | 20 accepted writes, 0 publish errors, p50 ≈ 1.73 ms, ≈19.53 MiB; restart ≈5.39 s | Healthy corrected calibration on the tested host; extend duration on target hardware |
 | 50 clients, 1 total write/s, 2 seconds | 40 accepted writes, 10 publish errors, p50 ≈1.90 ms, ≈32.55 MiB | Exceeds the reliable tested envelope; move to distributed storage or reduce concurrency |
-| 20 clients, 10 total writes/s | Prior run timed out on later writes; rerun required with corrected accounting | Treat sustained overload as a distributed-profile trigger until reproduced |
+| 20 clients, 100 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.26 ms; restart ≈5.38 s | Above the reliable tested envelope; use PostgreSQL/Redis/S3 for sustained demand |
+| 20 clients, 200 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.22 ms; restart ≈5.38 s | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
 
 As an operational rule, keep embedded deployments at or below the measured
 single-node envelope unless a target-device benchmark proves otherwise. Move to
-the distributed profile before sustained demand approaches 200 durable writes/s,
+the distributed profile before sustained demand approaches 100 durable writes/s,
 before active connections require a second relay process, or whenever a second
 relay node, shared storage, cross-node presence, or failover is desired. This
 keeps the embedded product simple while allowing Buzz's distributed backend to
