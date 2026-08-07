@@ -4091,6 +4091,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<Option<relay_members::RelayMember>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_relay_member(community, pubkey).await;
+        }
         relay_members::get_relay_member(&self.postgres().pool, community, pubkey).await
     }
 
@@ -4099,6 +4102,9 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<Vec<relay_members::RelayMember>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_relay_members(community).await;
+        }
         relay_members::list_relay_members(&self.postgres().pool, community).await
     }
 
@@ -4113,6 +4119,11 @@ impl Db {
         role: &str,
         added_by: Option<&str>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .add_relay_member(community, pubkey, role, added_by)
+                .await;
+        }
         relay_members::add_relay_member(&self.postgres().pool, community, pubkey, role, added_by)
             .await
     }
@@ -4126,6 +4137,11 @@ impl Db {
         role: &str,
         policy_version: Option<&str>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_relay_membership(community, pubkey, role, policy_version)
+                .await;
+        }
         relay_members::claim_relay_membership(
             &self.postgres().pool,
             community,
@@ -4143,6 +4159,11 @@ impl Db {
         pubkey: &str,
         policy_version: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .has_join_policy_acceptance(community, pubkey, policy_version)
+                .await;
+        }
         relay_members::has_join_policy_acceptance(
             &self.postgres().pool,
             community,
@@ -4158,6 +4179,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<relay_members::RemoveResult> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.remove_relay_member(community, pubkey).await;
+        }
         relay_members::remove_relay_member(&self.postgres().pool, community, pubkey).await
     }
 
@@ -4171,6 +4195,11 @@ impl Db {
         pubkey: &str,
         expected_role: &str,
     ) -> Result<relay_members::RemoveResult> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .remove_relay_member_if_role(community, pubkey, expected_role)
+                .await;
+        }
         relay_members::remove_relay_member_if_role(
             &self.postgres().pool,
             community,
@@ -4187,6 +4216,11 @@ impl Db {
         pubkey: &str,
         new_role: &str,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_relay_member_role(community, pubkey, new_role)
+                .await;
+        }
         relay_members::update_relay_member_role(&self.postgres().pool, community, pubkey, new_role)
             .await
     }
@@ -4209,6 +4243,11 @@ impl Db {
         new_owner_pubkey: &str,
         expected_owner_pubkey: &str,
     ) -> Result<relay_members::TransferResult> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .transfer_ownership(community, new_owner_pubkey, expected_owner_pubkey)
+                .await;
+        }
         relay_members::transfer_ownership(
             &self.postgres().pool,
             community,
