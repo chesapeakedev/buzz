@@ -102,6 +102,7 @@ impl Default for SqliteConfig {
 pub struct SqliteStore {
     pool: SqlitePool,
     writer: Arc<Mutex<()>>,
+    usage_leader: Arc<Mutex<()>>,
 }
 
 impl SqliteStore {
@@ -140,6 +141,7 @@ impl SqliteStore {
         Ok(Self {
             pool,
             writer: Arc::new(Mutex::new(())),
+            usage_leader: Arc::new(Mutex::new(())),
         })
     }
 
@@ -164,6 +166,11 @@ impl SqliteStore {
     /// Clone the single writer gate for another SQLite backend adapter.
     pub fn adapter_writer_gate(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.writer)
+    }
+
+    /// Clone the process-local usage-metrics leadership gate.
+    pub fn adapter_usage_leader_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.usage_leader)
     }
 
     /// Acquire the process-local gate that serializes SQLite mutations.
