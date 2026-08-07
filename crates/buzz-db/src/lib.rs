@@ -643,6 +643,20 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Uuid)>,
         limit: i64,
     ) -> Result<Vec<admin_moderation::AdminReport>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .admin_list_reports(
+                    community_id,
+                    status,
+                    report_type,
+                    target_kind,
+                    after,
+                    before,
+                    cursor,
+                    limit,
+                )
+                .await;
+        }
         admin_moderation::list_reports(
             &self.postgres().pool,
             community_id,
@@ -662,6 +676,9 @@ impl Db {
         &self,
         id: Uuid,
     ) -> Result<Option<admin_moderation::AdminReportDetail>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_get_report(id).await;
+        }
         admin_moderation::get_report(&self.postgres().pool, id).await
     }
 
@@ -670,6 +687,9 @@ impl Db {
         &self,
         limit: i64,
     ) -> Result<Vec<admin_moderation::AdminFeedback>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_list_feedback(limit).await;
+        }
         admin_moderation::list_feedback(&self.postgres().pool, limit).await
     }
 
@@ -678,6 +698,9 @@ impl Db {
         &self,
         id: Uuid,
     ) -> Result<Option<admin_moderation::AdminFeedback>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_get_feedback(id).await;
+        }
         admin_moderation::get_feedback(&self.postgres().pool, id).await
     }
 
@@ -4326,6 +4349,9 @@ impl Db {
         community: CommunityId,
         feedback: product_feedback::NewProductFeedback<'_>,
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_product_feedback(community, feedback).await;
+        }
         product_feedback::insert(&self.postgres().pool, community, feedback).await
     }
 
@@ -4334,6 +4360,9 @@ impl Db {
         &self,
         limit: i64,
     ) -> Result<Vec<product_feedback::ProductFeedbackRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_product_feedback(limit).await;
+        }
         product_feedback::list(&self.postgres().pool, limit).await
     }
 
