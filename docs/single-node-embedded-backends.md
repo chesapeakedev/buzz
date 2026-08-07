@@ -578,8 +578,8 @@ a capacity-boundary observation, not a passing workload.
 | Profile | Observed result | Deployment guidance |
 | --- | --- | --- |
 | 2 clients, 5 total writes/s, 1-second corrected smoke | 6 accepted writes, 0 publish errors, p50 ≈ 2.01 ms | Generator sanity check only; not a capacity target |
-| 20 clients, 5 total writes/s | Prior pre-correction run reported 0 rejected writes, p50 ≈ 1.65 ms; rerun required | Do not use as release evidence until reproduced with the corrected timer |
-| 50 clients, 1 total write/s | Prior pre-correction run reported 0 rejected writes, p50 ≈ 1.91 ms; rerun required | Do not use as release evidence until reproduced with the corrected timer |
+| 20 clients, 5 total writes/s, 2 seconds | 20 accepted writes, 0 publish errors, p50 ≈ 1.73 ms, ≈19.53 MiB; restart ≈5.39 s | Healthy corrected calibration on the tested host; extend duration on target hardware |
+| 50 clients, 1 total write/s, 2 seconds | 40 accepted writes, 10 publish errors, p50 ≈1.90 ms, ≈32.55 MiB | Exceeds the reliable tested envelope; move to distributed storage or reduce concurrency |
 | 20 clients, 10 total writes/s | Prior run timed out on later writes; rerun required with corrected accounting | Treat sustained overload as a distributed-profile trigger until reproduced |
 
 As an operational rule, keep embedded deployments at or below the measured
