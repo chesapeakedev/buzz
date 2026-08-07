@@ -209,6 +209,126 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Atomically replace a workflow definition event and its materialized row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_workflow_definition_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        workflow_id: Uuid,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+        d_tag: &str,
+    ) -> Result<CommandExecution<()>> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let kind = buzz_core::kind::event_kind_i32(event);
+        let created_at = event.created_at.as_secs() as i64;
+        let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+               AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(kind)
+        .bind(owner_pubkey)
+        .bind(d_tag)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if existing.as_ref().is_some_and(|(accepted_at, accepted_id)| {
+            created_at < *accepted_at
+                || (created_at == *accepted_at
+                    && event.id.as_bytes().as_slice() >= accepted_id.as_slice())
+        }) {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        if existing.is_some() {
+            sqlx::query(
+                "UPDATE events SET deleted_at = ? \
+                 WHERE community_id = ? AND kind = ? AND pubkey = ? AND d_tag = ? \
+                   AND deleted_at IS NULL",
+            )
+            .bind(Utc::now().timestamp_micros())
+            .bind(community.as_uuid().to_string())
+            .bind(kind)
+            .bind(owner_pubkey)
+            .bind(d_tag)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let (_, inserted) = super::events::insert_event_transaction(
+            &mut transaction,
+            community,
+            event,
+            Some(channel_id),
+        )
+        .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        Self::upsert_workflow_tx(
+            &mut transaction,
+            community,
+            workflow_id,
+            Some(channel_id),
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandExecution::Applied(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_workflow_tx(
+        transaction: &mut Transaction<'_, sqlx::Sqlite>,
+        community: CommunityId,
+        id: Uuid,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_micros();
+        let row = sqlx::query(
+            "INSERT INTO workflows (community_id, id, name, owner_pubkey, channel_id, \
+             definition, definition_hash, status, enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?) \
+             ON CONFLICT (community_id, id) DO UPDATE SET \
+               name = excluded.name, definition = excluded.definition, \
+               definition_hash = excluded.definition_hash, updated_at = excluded.updated_at \
+             WHERE workflows.owner_pubkey = excluded.owner_pubkey \
+               AND workflows.channel_id IS excluded.channel_id RETURNING id",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(id.to_string())
+        .bind(name)
+        .bind(owner_pubkey)
+        .bind(channel_id.map(|id| id.to_string()))
+        .bind(definition_json)
+        .bind(definition_hash)
+        .bind(now)
+        .bind(now)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        if row.is_none() {
+            return Err(DbError::AccessDenied(format!(
+                "workflow {id} belongs to a different owner or channel"
+            )));
+        }
+        Ok(())
+    }
+
     /// Fetch one workflow inside its owning community.
     pub async fn get_workflow(&self, community: CommunityId, id: Uuid) -> Result<WorkflowRecord> {
         let sql = format!(
