@@ -1,7 +1,8 @@
 //! SQLite workflow definitions and execution-run persistence.
 
 use chrono::{DateTime, Utc};
-use sqlx::{sqlite::SqliteRow, Row as _};
+use nostr::Event;
+use sqlx::{sqlite::SqliteRow, Row as _, Sqlite, Transaction};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -12,7 +13,7 @@ use crate::workflow::{
     ScheduledWorkflowFireClaim, WorkflowRecord, WorkflowRunRecord, WorkflowStatus,
     LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT,
 };
-use crate::{DbError, Result};
+use crate::{CommandExecution, DbError, Result};
 
 const WORKFLOW_COLUMNS: &str = "id, community_id, name, owner_pubkey, channel_id, \
     definition, definition_hash, status, enabled, created_at, updated_at";
@@ -103,6 +104,32 @@ fn row_to_approval(row: SqliteRow) -> Result<ApprovalRecord> {
 }
 
 impl SqliteStore {
+    async fn create_workflow_run_tx(
+        transaction: &mut Transaction<'_, Sqlite>,
+        community: CommunityId,
+        workflow_id: Uuid,
+        trigger_event_id: Option<&[u8]>,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        let trigger_context = trigger_context.map(serde_json::to_string).transpose()?;
+        sqlx::query(
+            "INSERT INTO workflow_runs ( \
+                community_id, id, workflow_id, status, trigger_event_id, \
+                current_step, execution_trace, trigger_context, created_at \
+             ) VALUES (?, ?, ?, 'pending', ?, 0, '[]', ?, ?)",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(id.to_string())
+        .bind(workflow_id.to_string())
+        .bind(trigger_event_id)
+        .bind(trigger_context)
+        .bind(Utc::now().timestamp_micros())
+        .execute(&mut **transaction)
+        .await?;
+        Ok(id)
+    }
+
     /// Create an active, enabled workflow with an application-generated ID.
     pub async fn create_workflow(
         &self,
@@ -422,23 +449,62 @@ impl SqliteStore {
         trigger_context: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
         let _writer = self.acquire_writer().await;
-        let id = Uuid::new_v4();
-        let trigger_context = trigger_context.map(serde_json::to_string).transpose()?;
-        sqlx::query(
-            "INSERT INTO workflow_runs ( \
-                community_id, id, workflow_id, status, trigger_event_id, \
-                current_step, execution_trace, trigger_context, created_at \
-             ) VALUES (?, ?, ?, 'pending', ?, 0, '[]', ?, ?)",
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let id = Self::create_workflow_run_tx(
+            &mut transaction,
+            community,
+            workflow_id,
+            trigger_event_id,
+            trigger_context,
         )
-        .bind(community.as_uuid().to_string())
-        .bind(id.to_string())
-        .bind(workflow_id.to_string())
-        .bind(trigger_event_id)
-        .bind(trigger_context)
-        .bind(Utc::now().timestamp_micros())
-        .execute(&self.pool)
         .await?;
+        transaction.commit().await?;
         Ok(id)
+    }
+
+    /// Atomically persist a workflow-trigger event and create its pending run.
+    pub async fn execute_workflow_trigger_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        channel_id: Uuid,
+        workflow_id: Uuid,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<CommandExecution<Uuid>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_TRIGGER {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow trigger command kind {}, got {}",
+                buzz_core::kind::KIND_WORKFLOW_TRIGGER,
+                event.kind.as_u16()
+            )));
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (_, inserted) = super::events::insert_event_transaction(
+            &mut transaction,
+            community,
+            event,
+            Some(channel_id),
+        )
+        .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        let run_id = Self::create_workflow_run_tx(
+            &mut transaction,
+            community,
+            workflow_id,
+            Some(event.id.as_bytes()),
+            trigger_context,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandExecution::Applied(run_id))
     }
 
     /// Fetch one execution run inside its owning community.
