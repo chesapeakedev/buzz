@@ -5207,6 +5207,11 @@ impl Db {
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_workflow_run(community_id, workflow_id, trigger_event_id, trigger_context)
+                .await;
+        }
         workflow::create_workflow_run(
             &self.pool,
             community_id,
@@ -5321,6 +5326,11 @@ impl Db {
         trace: &serde_json::Value,
         failure: Option<workflow::WorkflowRunFailure<'_>>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_workflow_run(community_id, id, status, current_step, trace, error)
+                .await;
+        }
         workflow::update_workflow_run(
             &self.pool,
             community_id,
@@ -5336,7 +5346,10 @@ impl Db {
     /// Create an approval request.
     #[datastore_span(name = "create_approval", system = "postgresql")]
     pub async fn create_approval(&self, params: workflow::CreateApprovalParams<'_>) -> Result<()> {
-        workflow::create_approval(&self.pool, params).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.create_approval(params).await;
+        }
+        workflow::create_approval(&self.postgres().pool, params).await
     }
 
     /// Fetch an approval by raw token.
@@ -5346,7 +5359,10 @@ impl Db {
         community_id: CommunityId,
         token: &str,
     ) -> Result<workflow::ApprovalRecord> {
-        workflow::get_approval(&self.pool, community_id, token).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_approval(community_id, token).await;
+        }
+        workflow::get_approval(&self.postgres().pool, community_id, token).await
     }
 
     /// Fetch an approval by its already-hashed token (no re-hashing).
@@ -5356,7 +5372,12 @@ impl Db {
         community_id: CommunityId,
         token_hash: &[u8],
     ) -> Result<workflow::ApprovalRecord> {
-        workflow::get_approval_by_stored_hash(&self.pool, community_id, token_hash).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_approval_by_stored_hash(community_id, token_hash)
+                .await;
+        }
+        workflow::get_approval_by_stored_hash(&self.postgres().pool, community_id, token_hash).await
     }
 
     /// Fetch all approvals for a workflow run.
@@ -5367,7 +5388,12 @@ impl Db {
         workflow_id: uuid::Uuid,
         run_id: uuid::Uuid,
     ) -> Result<Vec<workflow::ApprovalRecord>> {
-        workflow::get_run_approvals(&self.pool, community_id, workflow_id, run_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_run_approvals(community_id, workflow_id, run_id)
+                .await;
+        }
+        workflow::get_run_approvals(&self.postgres().pool, community_id, workflow_id, run_id).await
     }
 
     /// Update an approval's status.
@@ -5380,6 +5406,11 @@ impl Db {
         approver_pubkey: Option<&[u8]>,
         note: Option<&str>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_approval(community_id, token, status, approver_pubkey, note)
+                .await;
+        }
         workflow::update_approval(
             &self.pool,
             community_id,
@@ -5401,6 +5432,17 @@ impl Db {
         approver_pubkey: Option<&[u8]>,
         note: Option<&str>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_approval_by_stored_hash(
+                    community_id,
+                    token_hash,
+                    status,
+                    approver_pubkey,
+                    note,
+                )
+                .await;
+        }
         workflow::update_approval_by_stored_hash(
             &self.pool,
             community_id,
