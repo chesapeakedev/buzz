@@ -715,6 +715,61 @@ impl SqliteStore {
         Ok(events)
     }
 
+    /// Return the latest non-deleted event timestamp for one channel.
+    pub async fn get_last_message_at(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let row = sqlx::query(
+            "SELECT created_at FROM events \
+             WHERE community_id = ? AND channel_id = ? AND deleted_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(community_id.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| parse_timestamp(row.try_get("created_at")?))
+            .transpose()
+    }
+
+    /// Bulk-return latest non-deleted event timestamps keyed by channel.
+    pub async fn get_last_message_at_bulk(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+            "SELECT channel_id, MAX(created_at) AS last_at FROM events \
+             WHERE community_id = ",
+        );
+        builder
+            .push_bind(community_id.as_uuid().to_string())
+            .push(" AND deleted_at IS NULL AND channel_id IN (");
+        let mut separated = builder.separated(", ");
+        for channel_id in channel_ids {
+            separated.push_bind(channel_id.to_string());
+        }
+        builder.push(") GROUP BY channel_id");
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut result = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let channel_id = row
+                .try_get::<String, _>("channel_id")?
+                .parse::<Uuid>()
+                .map_err(|error| DbError::InvalidData(format!("invalid channel_id: {error}")))?;
+            let last_at = parse_timestamp(row.try_get("last_at")?)?;
+            result.insert(channel_id, last_at);
+        }
+        Ok(result)
+    }
+
     /// Fetch the latest live global replaceable event for an author and kind.
     pub async fn get_latest_global_replaceable(
         &self,
