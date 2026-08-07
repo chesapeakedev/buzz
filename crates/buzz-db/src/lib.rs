@@ -1432,6 +1432,16 @@ impl Db {
         parent_event_id: Option<&[u8]>,
         root_event_id: Option<&[u8]>,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .soft_delete_event_and_update_thread(
+                    community_id,
+                    event_id,
+                    parent_event_id,
+                    root_event_id,
+                )
+                .await;
+        }
         event::soft_delete_event_and_update_thread(
             &self.postgres().pool,
             community_id,
