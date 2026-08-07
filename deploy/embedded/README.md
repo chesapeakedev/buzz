@@ -34,3 +34,21 @@ The image-level regression check is reproducible from the repository root:
 BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
   ./scripts/test-embedded-compose.sh
 ```
+
+## Release notes and known limits
+
+The embedded profile is a fresh-install deployment for this release line.
+SQLite is not an in-place import target for an existing PostgreSQL database;
+keep the distributed profile when migrating an established installation.
+PostgreSQL/Redis/S3 remain the supported profile for high-concurrency relays,
+large media collections, and multi-replica operation.
+
+Git hosting is disabled by default. Enable `BUZZ_GIT_ENABLED=true` only for a
+single-device installation with a few private repositories, infrequent pushes,
+and a bounded disk quota. Git packs and pointer metadata are not a scalable
+replacement for S3-backed object storage.
+
+Before upgrading, stop the relay and take a complete `/data` backup. Restore
+only into an empty volume, then verify `/_readiness` and the relay identity
+before reconnecting clients. The first stable release will publish its exact
+image tag and migration notes alongside the signed `relay-vX.Y.Z` release.
