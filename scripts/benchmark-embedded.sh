@@ -16,6 +16,7 @@ image="${BUZZ_EMBEDDED_IMAGE:-ghcr.io/chesapeakedev/buzz:main}"
 levels="${BUZZ_BENCH_LEVELS:-100:50,1000:100,10000:250}"
 duration="${BUZZ_BENCH_DURATION_SECONDS:-10}"
 soak_seconds="${BUZZ_BENCH_SOAK_SECONDS:-0}"
+rate_limit="${BUZZ_BENCH_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC:-100000}"
 outdir="${BUZZ_BENCH_OUTDIR:-$repo_root/test-results/embedded}"
 project="buzz-embedded-bench-${RANDOM}-${RANDOM}"
 port="${BUZZ_BENCH_PORT:-$((31000 + RANDOM % 1000))}"
@@ -34,6 +35,7 @@ export RELAY_URL="ws://localhost:$port"
 export RELAY_ACCESS=open
 export BUZZ_REQUIRE_AUTH_TOKEN=false
 export BUZZ_GIT_ENABLED=false
+export BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC="$rate_limit"
 
 docker compose --project-name "$project" -f "$compose_file" up -d --wait
 relay_url="ws://localhost:$port"
