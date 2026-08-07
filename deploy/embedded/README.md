@@ -21,6 +21,27 @@ cp .env.example .env
 docker compose --env-file .env -f compose.yml -f compose.caddy.yml up -d --wait
 ```
 
+## Quick start: connect a client
+
+The relay speaks Nostr over WebSocket. After the readiness check succeeds, set
+the relay URL for a client to `ws://127.0.0.1:3000` (or the public `wss://`
+URL configured in `.env`). For a quick CLI smoke test, build the repository's
+agent-first client and provide a test Nostr private key:
+
+```bash
+cargo build -p buzz-cli
+export BUZZ_RELAY_URL=ws://127.0.0.1:3000
+export BUZZ_PRIVATE_KEY=nsec1_replace_with_a_test_key
+./target/debug/buzz channels list | jq .
+```
+
+The command should return JSON (an empty array is valid on a fresh relay). The
+same `BUZZ_RELAY_URL` is the value to enter in the desktop or mobile client's
+community/relay settings. Keep `RELAY_ACCESS=open` only for a loopback-bound
+development relay; for a public relay use the Caddy/TLS command above and
+connect clients with `wss://`. Do not reuse a development private key for a
+real community.
+
 ## Backup and restore
 
 Stop the relay, copy the entire `buzz-data` volume, and record the image tag.
