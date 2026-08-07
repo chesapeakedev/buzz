@@ -67,6 +67,7 @@ mod moderation;
 mod product_feedback;
 mod push;
 mod reactions;
+mod relay_invite;
 mod security_windows;
 mod threads;
 mod usage;
@@ -179,8 +180,10 @@ mod tests {
     use sqlx::Row;
     use tempfile::TempDir;
     use tokio::time::timeout;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::CommunityId;
 
     async fn test_store() -> (TempDir, SqliteStore) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -247,7 +250,7 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("migration count");
-        assert_eq!(applied, 18);
+        assert_eq!(applied, 19);
         store.pool().close().await;
 
         let reopened = SqliteStore::connect(&path, &SqliteConfig::default())
@@ -258,7 +261,7 @@ mod tests {
             .fetch_all(reopened.pool())
             .await
             .expect("persisted migration rows");
-        assert_eq!(row.len(), 18);
+        assert_eq!(row.len(), 19);
         assert_eq!(row[0].get::<i64, _>("version"), 1);
         assert_eq!(row[1].get::<i64, _>("version"), 2);
         assert_eq!(row[2].get::<i64, _>("version"), 3);
@@ -277,6 +280,7 @@ mod tests {
         assert_eq!(row[15].get::<i64, _>("version"), 16);
         assert_eq!(row[16].get::<i64, _>("version"), 17);
         assert_eq!(row[17].get::<i64, _>("version"), 18);
+        assert_eq!(row[18].get::<i64, _>("version"), 19);
         assert!(row.iter().all(|row| row.get::<bool, _>("success")));
     }
 
@@ -300,6 +304,53 @@ mod tests {
             .expect("writer gate must reopen after release")
             .expect("writer task");
         drop(acquired);
+    }
+
+    #[tokio::test]
+    async fn relay_invite_claim_is_tenant_scoped_and_use_limited() {
+        let (_directory, store) = migrated_store().await;
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let now = chrono::Utc::now().timestamp_micros();
+        sqlx::query("INSERT INTO communities (id, host, created_at) VALUES (?, ?, ?)")
+            .bind(community.as_uuid().to_string())
+            .bind("invite-test.example")
+            .bind(now)
+            .execute(store.pool())
+            .await
+            .expect("community fixture");
+
+        let invite = store
+            .mint_relay_invite(community, "owner", 60, Some(1))
+            .await
+            .expect("invite mint");
+        let token_hash = buzz_core::invite::hash_v2_code(&invite.code);
+        let first = store
+            .claim_relay_invite(community, &token_hash, &"a".repeat(64), None)
+            .await
+            .expect("first claim");
+        assert_eq!(
+            first,
+            crate::relay_invite::ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0)
+            }
+        );
+        let retry = store
+            .claim_relay_invite(community, &token_hash, &"a".repeat(64), None)
+            .await
+            .expect("idempotent claim");
+        assert_eq!(
+            retry,
+            crate::relay_invite::ClaimOutcome::AlreadyMember {
+                use_count: 1,
+                uses_remaining: Some(0)
+            }
+        );
+        let other = store
+            .claim_relay_invite(community, &token_hash, &"b".repeat(64), None)
+            .await
+            .expect("exhausted claim");
+        assert_eq!(other, crate::relay_invite::ClaimOutcome::Exhausted);
     }
 
     #[tokio::test]
@@ -353,6 +404,7 @@ mod tests {
             "push_leases".to_owned(),
             "push_match_queue".to_owned(),
             "push_wake_outbox".to_owned(),
+            "relay_invites".to_owned(),
             "relay_members".to_owned(),
             "reactions".to_owned(),
             "thread_metadata".to_owned(),
