@@ -2350,6 +2350,11 @@ impl Db {
         community_id: CommunityId,
         participant_hash: &[u8],
     ) -> Result<Option<channel::ChannelRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .find_dm_by_participants(community_id, participant_hash)
+                .await;
+        }
         dm::find_dm_by_participants(&self.postgres().pool, community_id, participant_hash).await
     }
 
@@ -2360,6 +2365,11 @@ impl Db {
         participants: &[&[u8]],
         created_by: &[u8],
     ) -> Result<channel::ChannelRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_dm(community_id, participants, created_by)
+                .await;
+        }
         dm::create_dm(
             &self.postgres().pool,
             community_id,
@@ -2377,6 +2387,11 @@ impl Db {
         limit: u32,
         cursor: Option<Uuid>,
     ) -> Result<Vec<dm::DmRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_dms_for_user(community_id, pubkey, limit, cursor)
+                .await;
+        }
         dm::list_dms_for_user(&self.postgres().pool, community_id, pubkey, limit, cursor).await
     }
 
@@ -2387,6 +2402,9 @@ impl Db {
         pubkeys: &[&[u8]],
         created_by: &[u8],
     ) -> Result<(channel::ChannelRecord, bool)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.open_dm(community_id, pubkeys, created_by).await;
+        }
         dm::open_dm(&self.postgres().pool, community_id, pubkeys, created_by).await
     }
 
@@ -2476,6 +2494,9 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.hide_dm(community_id, channel_id, pubkey).await;
+        }
         dm::hide_dm(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
@@ -2526,6 +2547,9 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unhide_dm(community_id, channel_id, pubkey).await;
+        }
         dm::unhide_dm(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
