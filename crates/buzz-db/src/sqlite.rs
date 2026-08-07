@@ -175,7 +175,11 @@ impl SqliteStore {
 
     /// Acquire the process-local gate that serializes SQLite mutations.
     pub async fn acquire_writer(&self) -> OwnedMutexGuard<()> {
-        Arc::clone(&self.writer).lock_owned().await
+        let started = std::time::Instant::now();
+        let guard = Arc::clone(&self.writer).lock_owned().await;
+        metrics::histogram!("buzz_sqlite_writer_wait_seconds")
+            .record(started.elapsed().as_secs_f64());
+        guard
     }
 }
 
