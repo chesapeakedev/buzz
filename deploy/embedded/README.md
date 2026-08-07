@@ -70,6 +70,7 @@ or shared durable storage is the trigger to deploy PostgreSQL/Redis/S3.
 | 50 clients × 1 total write/s | 10 publish errors; p50 ≈1.90 ms; ≈32.55 MiB relay memory | Above the reliable tested envelope |
 | 20 clients × 100 total writes/s | 20 publish errors; p50 ≈1.26 ms | Move sustained workloads to distributed storage |
 | 20 clients × 200 total writes/s | 20 publish errors; p50 ≈1.22 ms | Not an embedded target |
+| 100 clients × 100 total writes/s | 40 publish errors; p50 ≈1.28 ms; ≈20.67 MiB | Resource calibration only; not a reliable write target |
 
 These are measurements, not universal SLAs. Move to the distributed profile
 before sustained demand approaches 200 durable writes/s, active connections
