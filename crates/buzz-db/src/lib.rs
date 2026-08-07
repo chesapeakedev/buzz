@@ -5948,7 +5948,19 @@ impl Db {
         ttl_secs: u64,
         max_uses: Option<i32>,
     ) -> Result<relay_invite::MintedInvite> {
-        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .mint_relay_invite(community, created_by, ttl_secs, max_uses)
+                .await;
+        }
+        relay_invite::mint_relay_invite(
+            &self.postgres().pool,
+            community,
+            created_by,
+            ttl_secs,
+            max_uses,
+        )
+        .await
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.
@@ -5957,7 +5969,10 @@ impl Db {
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64> {
-        relay_invite::reap_expired_relay_invites(&self.pool, cutoff).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.reap_expired_relay_invites(cutoff).await;
+        }
+        relay_invite::reap_expired_relay_invites(&self.postgres().pool, cutoff).await
     }
 
     /// Atomically claims a v2 relay invite. The full redemption (membership
@@ -5973,6 +5988,11 @@ impl Db {
         claimer_pubkey: &str,
         policy_version: Option<&str>,
     ) -> Result<relay_invite::ClaimOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_relay_invite(community, token_hash, claimer_pubkey, policy_version)
+                .await;
+        }
         relay_invite::claim_relay_invite(
             &self.pool,
             community,
