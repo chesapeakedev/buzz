@@ -3048,6 +3048,19 @@ impl Db {
         channel_ids: Option<&[Uuid]>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_api_token(
+                    community_id,
+                    token_hash,
+                    owner_pubkey,
+                    name,
+                    scopes,
+                    channel_ids,
+                    expires_at,
+                )
+                .await;
+        }
         api_token::create_api_token(
             &self.postgres().pool,
             *community_id.as_uuid(),
@@ -3073,6 +3086,19 @@ impl Db {
         channel_ids: Option<&[Uuid]>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<Option<Uuid>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_api_token_if_under_limit(
+                    community_id,
+                    token_hash,
+                    owner_pubkey,
+                    name,
+                    scopes,
+                    channel_ids,
+                    expires_at,
+                )
+                .await;
+        }
         api_token::create_api_token_if_under_limit(
             &self.postgres().pool,
             *community_id.as_uuid(),
@@ -3097,6 +3123,9 @@ impl Db {
         community_id: CommunityId,
         hash: &[u8],
     ) -> Result<Option<ApiTokenRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_api_token_by_hash(community_id, hash).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT id, token_hash, owner_pubkey, name, scopes, channel_ids,
@@ -3122,6 +3151,11 @@ impl Db {
         community_id: CommunityId,
         hash: &[u8],
     ) -> Result<Option<ApiTokenRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_api_token_by_hash_including_revoked(community_id, hash)
+                .await;
+        }
         api_token::get_api_token_by_hash_including_revoked(
             &self.postgres().pool,
             *community_id.as_uuid(),
@@ -3132,6 +3166,9 @@ impl Db {
 
     /// Record a token usage (update `last_used_at`), scoped to community.
     pub async fn touch_api_token(&self, community_id: CommunityId, hash: &[u8]) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.touch_api_token(community_id, hash).await;
+        }
         sqlx::query(
             "UPDATE api_tokens SET last_used_at = NOW() WHERE community_id = $1 AND token_hash = $2",
         )
@@ -3153,6 +3190,9 @@ impl Db {
 
     /// List all active (non-revoked) tokens in a community, newest first.
     pub async fn list_active_tokens(&self, community_id: CommunityId) -> Result<Vec<TokenSummary>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_active_tokens(community_id).await;
+        }
         let rows = sqlx::query(
             r#"
             SELECT id, name, owner_pubkey, scopes, created_at, expires_at
@@ -3191,6 +3231,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<ApiTokenRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_tokens_by_owner(community_id, pubkey).await;
+        }
         api_token::list_tokens_by_owner(&self.postgres().pool, *community_id.as_uuid(), pubkey)
             .await
     }
@@ -3203,6 +3246,11 @@ impl Db {
         owner_pubkey: &[u8],
         revoked_by: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .revoke_token(community_id, id, owner_pubkey, revoked_by)
+                .await;
+        }
         api_token::revoke_token(
             &self.postgres().pool,
             *community_id.as_uuid(),
@@ -3220,6 +3268,11 @@ impl Db {
         owner_pubkey: &[u8],
         revoked_by: &[u8],
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .revoke_all_tokens(community_id, owner_pubkey, revoked_by)
+                .await;
+        }
         api_token::revoke_all_tokens(
             &self.postgres().pool,
             *community_id.as_uuid(),
