@@ -605,7 +605,9 @@ Recommended investigation order:
    WAL checkpoint duration, and post-commit fan-out separately. Keep the
    benchmark's authentication and steady-state write phases separate. The
    `buzz_sqlite_writer_wait_seconds` histogram now exposes the first of these
-   measurements without adding high-cardinality labels.
+   measurements without adding high-cardinality labels, and
+   `buzz_sqlite_event_transaction_seconds` measures the successful event/thread
+   transaction after the writer gate is acquired.
 2. Capture `EXPLAIN QUERY PLAN` for the event insert-adjacent lookup, mention,
    replacement, thread-counter, and feed queries before changing indexes.
    Add only indexes that reduce measured write or read work; every index adds

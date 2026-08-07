@@ -151,7 +151,8 @@ remains.
       then prototype bounded backpressure and write-amplification reductions;
       do not weaken durability or introduce multi-process SQLite writers. The
       first signal, `buzz_sqlite_writer_wait_seconds`, is now emitted by the
-      shared SQLite writer gate.
+      shared SQLite writer gate, and successful event transactions emit
+      `buzz_sqlite_event_transaction_seconds`.
 - [ ] Capacity follow-up remains open: 20 clients at 10 qps each and a
       100-client, 20-qps run timed out on later writes after authentication
       succeeded. These are recorded as real SQLite write-path capacity signals,
