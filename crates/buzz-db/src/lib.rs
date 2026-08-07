@@ -1259,6 +1259,20 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Uuid)>,
         limit: i64,
     ) -> Result<Vec<admin_moderation::AdminReport>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .admin_list_reports(
+                    community_id,
+                    status,
+                    report_type,
+                    target_kind,
+                    after,
+                    before,
+                    cursor,
+                    limit,
+                )
+                .await;
+        }
         admin_moderation::list_reports(
             &self.pool,
             community_id,
@@ -1279,7 +1293,10 @@ impl Db {
         &self,
         id: Uuid,
     ) -> Result<Option<admin_moderation::AdminReportDetail>> {
-        admin_moderation::get_report(&self.pool, id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_get_report(id).await;
+        }
+        admin_moderation::get_report(&self.postgres().pool, id).await
     }
 
     /// List feedback for the deployment-global read-only admin plane.
@@ -1288,7 +1305,10 @@ impl Db {
         &self,
         limit: i64,
     ) -> Result<Vec<admin_moderation::AdminFeedback>> {
-        admin_moderation::list_feedback(&self.pool, limit).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_list_feedback(limit).await;
+        }
+        admin_moderation::list_feedback(&self.postgres().pool, limit).await
     }
 
     /// Fetch one feedback submission for the deployment-global admin plane.
@@ -1297,7 +1317,10 @@ impl Db {
         &self,
         id: Uuid,
     ) -> Result<Option<admin_moderation::AdminFeedback>> {
-        admin_moderation::get_feedback(&self.pool, id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.admin_get_feedback(id).await;
+        }
+        admin_moderation::get_feedback(&self.postgres().pool, id).await
     }
 
     /// Return total number of communities on this relay.
@@ -5792,7 +5815,10 @@ impl Db {
         community: CommunityId,
         feedback: product_feedback::NewProductFeedback<'_>,
     ) -> Result<Uuid> {
-        product_feedback::insert(&self.pool, community, feedback).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_product_feedback(community, feedback).await;
+        }
+        product_feedback::insert(&self.postgres().pool, community, feedback).await
     }
 
     /// List product feedback across the deployment, newest first.
@@ -5801,7 +5827,10 @@ impl Db {
         &self,
         limit: i64,
     ) -> Result<Vec<product_feedback::ProductFeedbackRecord>> {
-        product_feedback::list(&self.pool, limit).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_product_feedback(limit).await;
+        }
+        product_feedback::list(&self.postgres().pool, limit).await
     }
 
     /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
