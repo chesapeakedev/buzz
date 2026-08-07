@@ -2542,6 +2542,11 @@ impl Db {
         pubkeys: &[&[u8]],
         created_by: &[u8],
     ) -> Result<CommandExecution<(channel::ChannelRecord, bool)>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_dm_open_command(community_id, event, pubkeys, created_by)
+                .await;
+        }
         if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_OPEN {
             return Err(DbError::InvalidData(format!(
                 "expected DM open command kind {}, got {}",
@@ -2578,6 +2583,17 @@ impl Db {
         pubkeys: &[&[u8]],
         created_by: &[u8],
     ) -> Result<CommandExecution<(channel::ChannelRecord, bool)>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_dm_add_member_command(
+                    community_id,
+                    event,
+                    source_channel_id,
+                    pubkeys,
+                    created_by,
+                )
+                .await;
+        }
         if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_ADD_MEMBER {
             return Err(DbError::InvalidData(format!(
                 "expected DM add-member command kind {}, got {}",
@@ -2634,6 +2650,11 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<CommandExecution<()>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_dm_hide_command(community_id, event, channel_id, pubkey)
+                .await;
+        }
         if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_HIDE {
             return Err(DbError::InvalidData(format!(
                 "expected DM hide command kind {}, got {}",
