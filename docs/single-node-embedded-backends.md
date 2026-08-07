@@ -76,7 +76,7 @@ URL.
    - required conversation resolution;
    - required ChesapeakeDev CI checks;
    - linear history required;
-   - force updates restricted to the reviewed upstream-sync maintainer flow;
+   - force updates restricted to the guarded upstream-sync workflow;
    - branch deletion disabled;
    - signed commits encouraged, with the existing DCO check retained.
 
@@ -89,17 +89,16 @@ URL.
 ### Establish the upstream policy
 
 - Treat `upstream/main` as the base for a maintained, linear fork patch stack.
-- Run a daily scheduled workflow that fetches upstream and opens or refreshes
-  an `upstream-sync` pull request.
-- Rebase the fork-only commit series onto the current `upstream/main` in the
-  fixed `upstream-sync` branch. Keep an `upstream-base` mirror branch so the
-  review PR shows only the fork patch stack.
-- Never auto-apply the rewritten stack to `main`. Require the normal CI matrix
-  and review
-  conflicts in database, pub/sub, storage, deployment, and release files.
-- After approval, update `main` with `--force-with-lease` against the reviewed
-  old tip. Rewriting the fork patch stack is intentional; unrestricted force
-  pushes remain prohibited.
+- Run a daily scheduled workflow that fetches upstream, rebases the fork-only
+  commit series onto the current `upstream/main`, and publishes the resulting
+  linear stack directly to the fork's `main` with `--force-with-lease`.
+- Keep the `upstream-sync` working branch local/ephemeral; it is not an
+  upstream pull-request branch and no pull request is opened against
+  `block/buzz`.
+- Require the normal CI matrix before the guarded publication and record any
+  conflicts in `UPSTREAM.md` and the relevant rebase commit messages.
+- Rewriting the fork patch stack is intentional; unrestricted force pushes
+  remain prohibited. The fork's `main` is the published integration branch.
 - Keep fork-specific changes concentrated behind backend interfaces,
   configuration modules, and deployment assets to minimize recurring conflicts.
 - Add an `UPSTREAM.md` ledger containing:
@@ -107,27 +106,23 @@ URL.
   - intentionally omitted upstream features;
   - known semantic differences;
   - any fork patches that should eventually be proposed upstream.
-- Prefer contributing backend-neutral refactors upstream when they are useful
-  independently of SQLite or the ChesapeakeDev deployment profile.
+- Keep backend-neutral changes compatible with upstream so future rebases stay
+  small, but do not create or require upstream pull requests.
 
 Local and scheduled synchronization use the same commands:
 
 ```bash
 just sync-upstream-status
 just sync-upstream
-just sync-upstream-pr
-just sync-upstream-finalize
+just sync-upstream-publish-main
 ```
 
 `sync-upstream` rebases fork-only commits onto the current upstream base on the
-fixed `upstream-sync` branch without pushing. `sync-upstream-pr` updates the
-review branches with leases and creates or refreshes a PR against the
-`upstream-base` mirror. After approval, `sync-upstream-finalize` verifies the
-review and lease-updates `main` to the reviewed linear history. The daily
-workflow uses the repository
-`GITHUB_TOKEN`; repository administrators must enable the Actions setting that
-allows workflows to create pull requests. CI runs created by that token require
-maintainer approval. If a rebase conflicts, use the repository-scoped
+fixed `upstream-sync` branch without pushing. `sync-upstream-publish-main`
+validates the rebased, signed, merge-free stack and force-with-lease updates the
+fork's `main`; it never contacts GitHub's pull-request API. The daily workflow
+uses the repository `GITHUB_TOKEN` only for the guarded branch update. If a
+rebase conflicts, use the repository-scoped
 `$deliver-embedded-backends` Codex skill to reproduce and resolve it locally.
 
 ### Remove Block-specific release authority
@@ -584,6 +579,7 @@ a capacity-boundary observation, not a passing workload.
 | 20 clients, 200 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.22 ms; restart ≈5.38 s | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
 | 100 clients, 100 total writes/s, 1 second | 60 accepted writes, 40 publish errors, p50 ≈1.28 ms, ≈20.67 MiB, `/data` ≈4.83 MiB; restart ≈5.36 s | Resource calibration only; not a reliable write target |
 | 1,000 clients, 100 total writes/s, 1 second | 1 connection reset, no writes, ≈45.02 MiB, `/data` ≈1.47 MiB; restart ≈5.38 s | Host admission ceiling observed; not an embedded target |
+| 10,000 clients, 100 total writes/s, 1 second | 8,075 connection errors (`EMFILE`/resource-busy), no writes, ≈64.88 MiB, `/data` ≈1.47 MiB; restart ≈5.41 s | Host admission ceiling observed; not an embedded target |
 
 As an operational rule, keep embedded deployments at or below the measured
 single-node envelope unless a target-device benchmark proves otherwise. Move to
@@ -659,7 +655,7 @@ Deliver:
 
 - first `relay-vX.Y.Z` ChesapeakeDev release;
 - SBOM, image attestation, migration notes, and known limitations;
-- daily upstream-sync workflow and first successful sync PR;
+- daily upstream-sync workflow and first successful direct fork-main sync;
 - compatibility policy covering database schema, clients, and Nostr event
   behavior.
 
