@@ -136,6 +136,16 @@ remains.
       SQLite FTS search, and filesystem media upload/download pass against the
       locally built relay image. The broader capacity matrix and overnight soak
       remain open below.
+- [x] Paced benchmark harness calibration: two- and ten-client workloads pass
+      with zero rejected writes (p50 1.80 ms / 1.56 ms respectively), and the
+      20-client workload passes with zero rejected writes (p50 1.66 ms) and
+      restart recovery. The harness now
+      batches authentication and phases writes so connection admission is not
+      mistaken for steady-state throughput.
+- [ ] Capacity follow-up remains open: a 100-client, 20-qps run still timed out
+      on a later write after authentication succeeded. This is recorded as a
+      real SQLite write-path capacity signal, not treated as a passing 100-client
+      gate; investigate before claiming the full 100/1k/10k matrix.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
