@@ -2967,6 +2967,11 @@ impl Db {
         visibility_filter: Option<&str>,
         member_only: Option<bool>,
     ) -> Result<Vec<channel::AccessibleChannel>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_accessible_channels(community_id, pubkey, visibility_filter, member_only)
+                .await;
+        }
         channel::get_accessible_channels(
             &self.pool,
             community_id,
@@ -2983,7 +2988,10 @@ impl Db {
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<channel::BotMemberRecord>> {
-        channel::get_bot_members(&self.pool, community_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_bot_members(community_id).await;
+        }
+        channel::get_bot_members(&self.postgres().pool, community_id).await
     }
 
     /// Bulk-fetch user records by pubkey.

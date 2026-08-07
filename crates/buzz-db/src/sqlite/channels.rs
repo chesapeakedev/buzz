@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use super::SqliteStore;
 use crate::channel::{
-    ChannelRecord, ChannelType, ChannelUpdate, ChannelVisibility, MemberRecord, MemberRole,
-    ReapedEphemeralChannel,
+    AccessibleChannel, BotChannelEntry, BotMemberRecord, ChannelRecord, ChannelType, ChannelUpdate,
+    ChannelVisibility, MemberRecord, MemberRole, ReapedEphemeralChannel,
 };
 use crate::{CommunityId, DbError, Result};
 
@@ -81,6 +81,90 @@ async fn active_role(
 }
 
 impl SqliteStore {
+    /// Return open or actively joined channels visible to one user.
+    pub async fn get_accessible_channels(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        visibility_filter: Option<&str>,
+        member_only: Option<bool>,
+    ) -> Result<Vec<AccessibleChannel>> {
+        let membership_clause = if member_only == Some(true) {
+            "AND cm.channel_id IS NOT NULL"
+        } else {
+            "AND (c.visibility = 'open' OR cm.channel_id IS NOT NULL)"
+        };
+        let visibility_clause = visibility_filter
+            .map(|_| " AND c.visibility = ?")
+            .unwrap_or("");
+        let sql = format!(
+            "SELECT c.*, (cm.channel_id IS NOT NULL) AS is_member \
+             FROM channels c LEFT JOIN channel_members cm \
+               ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+              AND cm.pubkey = ? AND cm.removed_at IS NULL \
+             WHERE c.community_id = ? AND c.deleted_at IS NULL {membership_clause} \
+               AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL){visibility_clause} \
+             ORDER BY CASE c.channel_type WHEN 'stream' THEN 0 WHEN 'forum' THEN 1 ELSE 2 END, c.name \
+             LIMIT 1000"
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(pubkey)
+            .bind(community.as_uuid().to_string());
+        if let Some(visibility) = visibility_filter {
+            query = query.bind(visibility);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                let is_member = row.try_get::<i64, _>("is_member")? != 0;
+                Ok(AccessibleChannel {
+                    channel: parse_channel(row)?,
+                    is_member,
+                })
+            })
+            .collect()
+    }
+
+    /// Return bot members and their active channel memberships.
+    pub async fn get_bot_members(&self, community: CommunityId) -> Result<Vec<BotMemberRecord>> {
+        let rows = sqlx::query(
+            "SELECT cm.pubkey, u.display_name, u.agent_type, u.capabilities, \
+                    c.name AS channel_name, c.id AS channel_id \
+             FROM channel_members cm \
+             LEFT JOIN users u ON cm.community_id = u.community_id AND cm.pubkey = u.pubkey \
+             JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+                AND c.deleted_at IS NULL \
+             WHERE cm.community_id = ? AND cm.role = 'bot' AND cm.removed_at IS NULL \
+             ORDER BY cm.pubkey, c.name LIMIT 1000",
+        )
+        .bind(community.as_uuid().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut members: std::collections::BTreeMap<Vec<u8>, BotMemberRecord> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let entry = members
+                .entry(pubkey.clone())
+                .or_insert_with(|| BotMemberRecord {
+                    pubkey,
+                    display_name: row.try_get("display_name").ok(),
+                    agent_type: row.try_get("agent_type").ok(),
+                    capabilities: row
+                        .try_get::<Option<String>, _>("capabilities")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_str(&value).ok()),
+                    channels: Vec::new(),
+                });
+            entry.channels.push(BotChannelEntry {
+                name: row.try_get("channel_name")?,
+                id: row.try_get("channel_id")?,
+            });
+        }
+        Ok(members.into_values().collect())
+    }
+
     /// Return the owning community for each live channel in a batch.
     pub async fn communities_of_channels(
         &self,
