@@ -2117,7 +2117,18 @@ impl Db {
         kind: i32,
         pubkey_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
-        event::get_latest_global_replaceable(&self.pool, community_id, kind, pubkey_bytes).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_latest_global_replaceable(community_id, kind, pubkey_bytes)
+                .await;
+        }
+        event::get_latest_global_replaceable(
+            &self.postgres().pool,
+            community_id,
+            kind,
+            pubkey_bytes,
+        )
+        .await
     }
 
     /// Fetches a single non-deleted event by its raw ID bytes.
@@ -2212,7 +2223,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<DateTime<Utc>>> {
-        event::get_last_message_at(&self.pool, community_id, channel_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_last_message_at(community_id, channel_id).await;
+        }
+        event::get_last_message_at(&self.postgres().pool, community_id, channel_id).await
     }
 
     /// Bulk-fetch the most recent `created_at` for a set of channel IDs.
@@ -2222,7 +2236,12 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
-        event::get_last_message_at_bulk(&self.pool, community_id, channel_ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_last_message_at_bulk(community_id, channel_ids)
+                .await;
+        }
+        event::get_last_message_at_bulk(&self.postgres().pool, community_id, channel_ids).await
     }
 
     /// Batch-fetch non-deleted events by their raw IDs.
@@ -2232,7 +2251,9 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
-        event::get_events_by_ids(&self.pool, community_id, ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_events_by_ids(community_id, ids).await;
+        }
     }
 
     /// [`Db::get_events_by_ids`] with replica routing — same contract and
