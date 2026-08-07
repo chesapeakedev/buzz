@@ -1,12 +1,12 @@
 # Embedded Backends — Remaining Work
 
 Progress tracker for the ChesapeakeDev single-node embedded backends effort
-(`docs/single-node-embedded-backends.md`). Each PR in the **Pull Request
-Sequence** must keep the PostgreSQL/Redis/S3 path green and deployable.
+(`docs/single-node-embedded-backends.md`). Each dependency-ordered delivery
+slice must keep the PostgreSQL/Redis/S3 path green and deployable.
 
 ## Status snapshot
 
-Completed (on `upstream-sync`, ahead of `main`):
+Completed in the linear fork patch stack (to be published on fork `main`):
 
 - PR 1 — Fork hygiene, upstream policy, non-publishing CI
 - PR 2 — ChesapeakeDev relay image publishing and release guardrails
@@ -171,12 +171,16 @@ remains.
       calibration only, not a reliable write target. A 1k-client/100-qps run
       hit one connection reset before writes, used ≈45.02 MiB and ≈5.38 s
       restart, and is likewise a host-admission ceiling. Complete the 10k
-      resource level before claiming the full gate. Publish and connection
-      errors are recorded per level while later resource evidence continues;
+      resource level before claiming the full gate. A 10k-client/100-qps run
+      recorded 8,075 `EMFILE`/resource-busy connection errors, no writes,
+      ≈64.88 MiB, ≈1.47 MiB `/data`, and ≈5.41 s restart; it confirms the host
+      admission ceiling rather than an embedded capacity target. Publish and
+      connection errors are recorded per level while later resource evidence continues;
       host-terminated levels now emit an explicit `benchmark_error` artifact.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
       size, write/search latency, restart time) and overnight soak with restarts.
 - [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
-- [ ] 21.5 — Daily upstream-sync workflow and first successful sync PR.
+- [ ] 21.5 — Daily upstream-sync workflow and first successful direct
+      fork-main sync (no upstream pull request).

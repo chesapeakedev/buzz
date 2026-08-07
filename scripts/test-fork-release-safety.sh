@@ -37,12 +37,16 @@ require_text .github/workflows/signed-macos-canary.yml \
 require_text .github/workflows/windows-canary.yml \
   "if: github.repository == 'block/buzz'"
 
-# The only write-capable workflow intentionally enabled for ChesapeakeDev in
-# this non-publishing slice is the reviewed upstream-sync branch/PR workflow.
+# The fork-owned write workflow is the guarded upstream rebase/publication
+# workflow; it updates fork main directly and never opens an upstream PR.
 require_text .github/workflows/upstream-sync.yml \
   "if: github.repository == 'chesapeakedev/buzz'"
 require_text .github/workflows/upstream-sync.yml "contents: write"
-require_text .github/workflows/upstream-sync.yml "pull-requests: write"
+if grep -Fq 'pull-requests:' .github/workflows/upstream-sync.yml; then
+  echo "Error: upstream sync must not request pull-request write access" >&2
+  exit 1
+fi
+require_text .github/workflows/upstream-sync.yml "sync-upstream-publish-main"
 
 # Adding another write-capable workflow is a deliberate security decision. This
 # inventory makes new publication or repository-mutation surfaces fail CI until
@@ -50,6 +54,7 @@ require_text .github/workflows/upstream-sync.yml "pull-requests: write"
 expected_write_workflows="$(
   cat <<'EOF'
 .github/workflows/docker.yml
+.github/workflows/embedded-release.yml
 .github/workflows/helm-chart.yml
 .github/workflows/push-gateway-helm-chart.yml
 .github/workflows/release.yml

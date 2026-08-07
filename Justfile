@@ -72,13 +72,9 @@ sync-upstream-status:
 sync-upstream:
     ./scripts/sync-upstream.sh sync
 
-# Lease-update the sync review branches and create or refresh their pull request
-sync-upstream-pr:
-    ./scripts/sync-upstream.sh pr
-
-# Apply an approved upstream-sync review to main with a guarded lease update
-sync-upstream-finalize:
-    ./scripts/sync-upstream.sh finalize
+# Rebase upstream beneath the fork patch stack and publish fork main directly
+sync-upstream-publish-main:
+    ./scripts/sync-upstream.sh publish-main
 
 # Exercise upstream-sync behavior against isolated local Git repositories
 test-sync-upstream:

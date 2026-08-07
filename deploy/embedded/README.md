@@ -73,6 +73,7 @@ or shared durable storage is the trigger to deploy PostgreSQL/Redis/S3.
 | 20 clients × 200 total writes/s | 20 publish errors; p50 ≈1.22 ms | Not an embedded target |
 | 100 clients × 100 total writes/s | 40 publish errors; p50 ≈1.28 ms; ≈20.67 MiB | Resource calibration only; not a reliable write target |
 | 1,000 clients × 100 total writes/s | 1 connection reset; no writes; ≈45.02 MiB | Host admission ceiling; not an embedded target |
+| 10,000 clients × 100 total writes/s | 8,075 connection errors (`EMFILE`/resource-busy); no writes; ≈64.88 MiB | Host admission ceiling; not an embedded target |
 
 These are measurements, not universal SLAs. Move to the distributed profile
 before sustained demand approaches 200 durable writes/s, active connections
