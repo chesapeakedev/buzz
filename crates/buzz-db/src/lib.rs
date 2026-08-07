@@ -2258,7 +2258,10 @@ impl Db {
         limit: i64,
         lease_until: DateTime<Utc>,
     ) -> Result<Option<push::ClaimedMatchBatch>> {
-        push::claim_due_match_batch(&self.pool, limit, lease_until).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.claim_due_push_match_batch(limit, lease_until).await;
+        }
+        push::claim_due_match_batch(&self.postgres().pool, limit, lease_until).await
     }
 
     /// Load active endpoint-enabled leases eligible for push matching.
@@ -2281,7 +2284,12 @@ impl Db {
         claim_id: uuid::Uuid,
         event_ids: &[Vec<u8>],
     ) -> Result<u64> {
-        push::complete_match_batch(&self.pool, community, claim_id, event_ids).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .complete_push_match_batch(community, claim_id, event_ids)
+                .await;
+        }
+        push::complete_match_batch(&self.postgres().pool, community, claim_id, event_ids).await
     }
 
     /// Release fenced matcher claims from one batch for retry.
@@ -2293,7 +2301,12 @@ impl Db {
         event_ids: &[Vec<u8>],
         next: DateTime<Utc>,
     ) -> Result<u64> {
-        push::retry_match_batch(&self.pool, community, claim_id, event_ids, next).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .retry_push_match_batch(community, claim_id, event_ids, next)
+                .await;
+        }
+        push::retry_match_batch(&self.postgres().pool, community, claim_id, event_ids, next).await
     }
 
     /// Delete exhausted matcher jobs (periodic sweep, off the claim path).
@@ -2366,7 +2379,10 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<push::RevalidateWakeOutcome> {
-        push::revalidate_wake_for_send(&self.pool, community, id, claim_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.revalidate_push_wake(community, id, claim_id).await;
+        }
+        push::revalidate_wake_for_send(&self.postgres().pool, community, id, claim_id).await
     }
 
     /// Mark a fenced wake claim delivered.
@@ -2377,7 +2393,10 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<bool> {
-        push::complete_wake(&self.pool, community, id, claim_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.complete_push_wake(community, id, claim_id).await;
+        }
+        push::complete_wake(&self.postgres().pool, community, id, claim_id).await
     }
 
     /// Release a fenced wake claim for retry at the supplied time.
@@ -2389,7 +2408,10 @@ impl Db {
         claim_id: Uuid,
         next: DateTime<Utc>,
     ) -> Result<bool> {
-        push::retry_wake(&self.pool, community, id, claim_id, next).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.retry_push_wake(community, id, claim_id, next).await;
+        }
+        push::retry_wake(&self.postgres().pool, community, id, claim_id, next).await
     }
 
     /// Mark a fenced wake claim terminally failed.
@@ -2400,7 +2422,10 @@ impl Db {
         id: Uuid,
         claim_id: Uuid,
     ) -> Result<bool> {
-        push::fail_wake(&self.pool, community, id, claim_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.fail_push_wake(community, id, claim_id).await;
+        }
+        push::fail_wake(&self.postgres().pool, community, id, claim_id).await
     }
 
     /// Disable an endpoint only if the specified lease generation is current.
@@ -2412,6 +2437,11 @@ impl Db {
         installation_id: &str,
         generation: i64,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .disable_push_endpoint(community, author, installation_id, generation)
+                .await;
+        }
         push::disable_endpoint_generation(
             &self.pool,
             community,
@@ -2434,6 +2464,18 @@ impl Db {
         active: Option<push::ActiveLease<'_>>,
         max_active_leases: i64,
     ) -> Result<push::AcceptLeaseOutcome> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .accept_push_lease_event(
+                    community,
+                    event,
+                    installation_id,
+                    version,
+                    active,
+                    max_active_leases,
+                )
+                .await;
+        }
         push::accept_lease_event(
             &self.pool,
             community,
