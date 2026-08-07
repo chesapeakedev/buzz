@@ -3308,7 +3308,12 @@ impl Db {
         community_id: CommunityId,
         participant_hash: &[u8],
     ) -> Result<Option<channel::ChannelRecord>> {
-        dm::find_dm_by_participants(&self.pool, community_id, participant_hash).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .find_dm_by_participants(community_id, participant_hash)
+                .await;
+        }
+        dm::find_dm_by_participants(&self.postgres().pool, community_id, participant_hash).await
     }
 
     /// Create or return an existing DM channel.
@@ -3319,7 +3324,18 @@ impl Db {
         participants: &[&[u8]],
         created_by: &[u8],
     ) -> Result<channel::ChannelRecord> {
-        dm::create_dm(&self.pool, community_id, participants, created_by).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_dm(community_id, participants, created_by)
+                .await;
+        }
+        dm::create_dm(
+            &self.postgres().pool,
+            community_id,
+            participants,
+            created_by,
+        )
+        .await
     }
 
     /// List all DMs for a user.
@@ -3331,7 +3347,12 @@ impl Db {
         limit: u32,
         cursor: Option<Uuid>,
     ) -> Result<Vec<dm::DmRecord>> {
-        dm::list_dms_for_user(&self.pool, community_id, pubkey, limit, cursor).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_dms_for_user(community_id, pubkey, limit, cursor)
+                .await;
+        }
+        dm::list_dms_for_user(&self.postgres().pool, community_id, pubkey, limit, cursor).await
     }
 
     /// Open or retrieve a DM for the given participants.
@@ -3342,7 +3363,10 @@ impl Db {
         pubkeys: &[&[u8]],
         created_by: &[u8],
     ) -> Result<(channel::ChannelRecord, bool)> {
-        dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.open_dm(community_id, pubkeys, created_by).await;
+        }
+        dm::open_dm(&self.postgres().pool, community_id, pubkeys, created_by).await
     }
 
     /// Atomically persist a DM-open command event and open its conversation.
@@ -3432,7 +3456,10 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<()> {
-        dm::hide_dm(&self.pool, community_id, channel_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.hide_dm(community_id, channel_id, pubkey).await;
+        }
+        dm::hide_dm(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
     /// Atomically persist a DM-hide command event and hide the caller's DM.
@@ -3483,7 +3510,10 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<()> {
-        dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.unhide_dm(community_id, channel_id, pubkey).await;
+        }
+        dm::unhide_dm(&self.postgres().pool, community_id, channel_id, pubkey).await
     }
 
     /// List the channel IDs of all DMs the given user currently has hidden.
