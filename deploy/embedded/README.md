@@ -81,6 +81,8 @@ event row and related index/mention work, so serialized commit time is the
 first suspected limit. Before raising the boundary, measure writer-gate wait,
 transaction/commit time, busy errors, WAL checkpoints, and post-commit fan-out
 independently.
+The `buzz_sqlite_writer_wait_seconds` histogram is the first built-in signal;
+use it with the benchmark results before changing the deployment boundary.
 
 The safe optimization order is: inspect query plans and write amplification;
 prototype bounded writer-queue backpressure; reduce redundant lookups or move
