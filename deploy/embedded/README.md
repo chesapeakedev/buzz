@@ -35,7 +35,8 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
   ./scripts/test-embedded-compose.sh
 ```
 
-The repeatable write benchmark records per-level latency, container memory,
+The repeatable write benchmark records per-level latency, publish errors,
+container memory,
 `/data` growth, and restart recovery. Run the planned 100/1,000/10,000-client
 matrix on a suitably sized host, or override it for a local smoke run:
 
@@ -45,13 +46,14 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
   ./scripts/benchmark-embedded.sh
 ```
 
-The benchmark is evidence for capacity planning, not a claim that SQLite or
+The `QPS` value is the total target across all connections (each connection
+gets an equal share). The benchmark is evidence for capacity planning, not a claim that SQLite or
 filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays. It
 raises the per-identity WebSocket event quota for synthetic traffic only; a
 normal Compose deployment retains the production default of 50 events/second.
-On the current local image, 20 clients at 5 qps each completed with zero
-rejected writes (p50 about 1.65 ms); 20 clients at 10 qps each timed out on
-later writes. Treat that as an operator-facing SQLite capacity boundary until
+On the current local image, 20 clients at a 5-qps total target completed with
+zero rejected writes (p50 about 1.65 ms); 20 clients at a 10-qps total target
+timed out on later writes. Treat that as an operator-facing SQLite capacity boundary until
 another host produces stronger evidence, and keep high-concurrency workloads
 on the distributed profile.
 

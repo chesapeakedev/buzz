@@ -1,7 +1,7 @@
 //! Paced kind:9 load generator for relay write-amplification benchmarking.
 //!
 //! Opens `conns` authenticated WebSocket connections (one shared identity)
-//! and sends kind:9 text events to `channel_uuid` at a total rate of `qps`
+//! and sends kind:9 text events to `channel_uuid` at a total target rate of `qps`
 //! for `duration_secs`. Each connection is synchronous (send -> await OK),
 //! paced by a per-connection tokio interval, so OK latency is measured
 //! end-to-end. Emits a JSON summary on stdout and one raw latency sample
@@ -124,18 +124,31 @@ async fn main() -> anyhow::Result<()> {
             let mut latencies: Vec<f64> = Vec::new();
             let mut sent: u64 = 0;
             let mut rejected: u64 = 0;
+            let mut publish_errors: u64 = 0;
             let mut seq: u64 = 0;
             while Instant::now() < deadline {
                 interval.tick().await;
+                if Instant::now() >= deadline {
+                    break;
+                }
                 seq += 1;
                 let content = format!(
                     "wamp-bench c{conn_idx} m{seq} payload: the quick brown fox jumps over the lazy dog 0123456789"
                 );
                 let start = Instant::now();
-                let ok = client
+                let ok = match client
                     .send_text_message(&keys, &channel_id, &content, 9)
                     .await
-                    .with_context(|| format!("publish benchmark event client {conn_idx} seq {seq}"))?;
+                {
+                    Ok(ok) => ok,
+                    Err(error) => {
+                        publish_errors += 1;
+                        eprintln!(
+                            "PUBLISH_ERROR conn={conn_idx} seq={seq}: {error:#}"
+                        );
+                        break;
+                    }
+                };
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1e3;
                 sent += 1;
                 if ok.accepted {
@@ -146,17 +159,19 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             client.disconnect().await?;
-            Ok::<_, anyhow::Error>((sent, rejected, latencies))
+            Ok::<_, anyhow::Error>((sent, rejected, publish_errors, latencies))
         }));
     }
 
     let mut sent = 0u64;
     let mut rejected = 0u64;
+    let mut publish_errors = 0u64;
     let mut latencies: Vec<f64> = Vec::new();
     for task in tasks {
-        let (s, r, l) = task.await??;
+        let (s, r, e, l) = task.await??;
         sent += s;
         rejected += r;
+        publish_errors += e;
         latencies.extend(l);
     }
     latencies.sort_by(|a, b| a.partial_cmp(b).expect("finite latencies"));
@@ -175,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
             "sent": sent,
             "accepted": sent - rejected,
             "rejected": rejected,
+            "publish_errors": publish_errors,
             "qps_target": qps,
             "duration_secs": duration_secs,
             "conns": conns,
