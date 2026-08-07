@@ -131,7 +131,7 @@ output="$(cd "$fixture/work" && run_sync "$fixture" status 2>&1)"
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
-grep -Fq "expected '$fixture/upstream.git'" <<<"$output"
+grep -Fq "does not point to '$fixture/upstream.git'" <<<"$output"
 
 grep -Fq 'sync-upstream-status:' "$script_dir/../Justfile"
 grep -Fq 'sync-upstream:' "$script_dir/../Justfile"
