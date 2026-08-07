@@ -51,11 +51,10 @@ gets an equal share). The benchmark is evidence for capacity planning, not a cla
 filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays. It
 raises the per-identity WebSocket event quota for synthetic traffic only; a
 normal Compose deployment retains the production default of 50 events/second.
-The corrected generator's local 2-client, 5-qps-total, 1-second smoke recorded
-6 accepted writes with no publish errors (p50 about 2.01 ms). Earlier 20- and
-50-client calibration rows were collected before the deadline fix and must be
-reproduced before they are used as release evidence. Keep high-concurrency
-workloads on the distributed profile until that rerun is complete.
+The corrected generator's local 20-client, 5-qps-total, 2-second calibration
+recorded 20 accepted writes with no publish errors (p50 about 1.73 ms,
+19.53 MiB). A 50-client, 1-qps-total run recorded 10 publish errors and about
+32.55 MiB, so keep higher-concurrency workloads on the distributed profile.
 
 ### SQLite scaling boundary
 

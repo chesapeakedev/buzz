@@ -162,12 +162,12 @@ remains.
       first signal, `buzz_sqlite_writer_wait_seconds`, is now emitted by the
       shared SQLite writer gate, and successful event transactions emit
       `buzz_sqlite_event_transaction_seconds`.
-- [ ] Capacity follow-up remains open: the corrected generator has only a
-      2-client, 5-total-qps sanity result so far. Earlier 20/50/100-client
-      rows used the pre-correction timer and are not release evidence; rerun
-      the matrix with corrected total-QPS semantics. Publish errors are now
-      recorded per level while later resource evidence continues, so overload
-      can be investigated without losing the matrix.
+- [ ] Capacity follow-up remains open: corrected evidence now has 20 clients at
+      5 total qps with 0 publish errors, while 50 clients at 1 total qps
+      recorded 10 publish errors. Rerun 20-client/10-qps and the 100/1k/10k
+      resource levels with the corrected generator before claiming the full
+      matrix. Publish errors are recorded per level while later resource
+      evidence continues.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
