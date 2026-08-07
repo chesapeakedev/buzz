@@ -4584,6 +4584,18 @@ impl Db {
         definition_json: &str,
         definition_hash: &[u8],
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_workflow(
+                    community_id,
+                    channel_id,
+                    owner_pubkey,
+                    name,
+                    definition_json,
+                    definition_hash,
+                )
+                .await;
+        }
         workflow::create_workflow(
             &self.pool,
             community_id,
@@ -4609,6 +4621,19 @@ impl Db {
         definition_json: &str,
         definition_hash: &[u8],
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .upsert_workflow(
+                    community_id,
+                    id,
+                    channel_id,
+                    owner_pubkey,
+                    name,
+                    definition_json,
+                    definition_hash,
+                )
+                .await;
+        }
         workflow::upsert_workflow(
             &self.pool,
             community_id,
@@ -4838,7 +4863,10 @@ impl Db {
     /// List all active, enabled schedule-triggered workflows.
     #[datastore_span(name = "list_all_enabled_workflows", system = "postgresql")]
     pub async fn list_all_enabled_workflows(&self) -> Result<Vec<workflow::WorkflowRecord>> {
-        workflow::list_all_enabled_workflows(&self.pool).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_all_enabled_workflows().await;
+        }
+        workflow::list_all_enabled_workflows(&self.postgres().pool).await
     }
 
     /// Claim a scheduled workflow fire for an authoritative schedule instant.
@@ -4856,6 +4884,11 @@ impl Db {
         workflow_id: Uuid,
         scheduled_for: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<workflow::ScheduledWorkflowFireClaim>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .claim_scheduled_workflow_fire(community_id, workflow_id, scheduled_for)
+                .await;
+        }
         workflow::claim_scheduled_workflow_fire(
             &self.pool,
             community_id,
@@ -4872,7 +4905,13 @@ impl Db {
         community_id: CommunityId,
         workflow_id: Uuid,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-        workflow::latest_scheduled_workflow_fire(&self.pool, community_id, workflow_id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .latest_scheduled_workflow_fire(community_id, workflow_id)
+                .await;
+        }
+        workflow::latest_scheduled_workflow_fire(&self.postgres().pool, community_id, workflow_id)
+            .await
     }
 
     /// Attach the workflow run id created from a won scheduled-fire claim.
@@ -4884,6 +4923,16 @@ impl Db {
         scheduled_for: chrono::DateTime<chrono::Utc>,
         workflow_run_id: Uuid,
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .attach_scheduled_workflow_run(
+                    community_id,
+                    workflow_id,
+                    scheduled_for,
+                    workflow_run_id,
+                )
+                .await;
+        }
         workflow::attach_scheduled_workflow_run(
             &self.pool,
             community_id,
@@ -4900,7 +4949,12 @@ impl Db {
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64> {
-        workflow::prune_scheduled_workflow_fires_before(&self.pool, older_than).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .prune_scheduled_workflow_fires_before(older_than)
+                .await;
+        }
+        workflow::prune_scheduled_workflow_fires_before(&self.postgres().pool, older_than).await
     }
 
     /// Update a workflow's name, definition, and hash.
@@ -4913,6 +4967,11 @@ impl Db {
         definition_json: &str,
         definition_hash: &[u8],
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .update_workflow(community_id, id, name, definition_json, definition_hash)
+                .await;
+        }
         workflow::update_workflow(
             &self.pool,
             community_id,
@@ -4932,7 +4991,10 @@ impl Db {
         id: Uuid,
         status: workflow::WorkflowStatus,
     ) -> Result<()> {
-        workflow::update_workflow_status(&self.pool, community_id, id, status).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.update_workflow_status(community_id, id, status).await;
+        }
+        workflow::update_workflow_status(&self.postgres().pool, community_id, id, status).await
     }
 
     /// Enable or disable a workflow.
@@ -4943,7 +5005,10 @@ impl Db {
         id: Uuid,
         enabled: bool,
     ) -> Result<()> {
-        workflow::set_workflow_enabled(&self.pool, community_id, id, enabled).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.set_workflow_enabled(community_id, id, enabled).await;
+        }
+        workflow::set_workflow_enabled(&self.postgres().pool, community_id, id, enabled).await
     }
 
     /// Disable all of an owner's workflows in a channel (SEC-006, on
@@ -4955,6 +5020,11 @@ impl Db {
         channel_id: Uuid,
         owner_pubkey: &[u8],
     ) -> Result<u64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .disable_workflows_for_owner_in_channel(community_id, channel_id, owner_pubkey)
+                .await;
+        }
         workflow::disable_workflows_for_owner_in_channel(
             &self.pool,
             community_id,
@@ -4967,7 +5037,10 @@ impl Db {
     /// Delete a workflow and all its runs/approvals.
     #[datastore_span(name = "delete_workflow", system = "postgresql")]
     pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
-        workflow::delete_workflow(&self.pool, community_id, id).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.delete_workflow(community_id, id).await;
+        }
+        workflow::delete_workflow(&self.postgres().pool, community_id, id).await
     }
 
     /// Delete a workflow only when it belongs to the provided owner.
@@ -4979,7 +5052,13 @@ impl Db {
         id: Uuid,
         owner_pubkey: &[u8],
     ) -> Result<Option<Uuid>> {
-        workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .delete_workflow_for_owner(community_id, id, owner_pubkey)
+                .await;
+        }
+        workflow::delete_workflow_for_owner(&self.postgres().pool, community_id, id, owner_pubkey)
+            .await
     }
 
     /// Find a workflow by owner pubkey and name within a community. Used for
@@ -4991,7 +5070,13 @@ impl Db {
         owner_pubkey: &[u8],
         name: &str,
     ) -> Result<Option<workflow::WorkflowRecord>> {
-        workflow::find_by_owner_and_name(&self.pool, community_id, owner_pubkey, name).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .find_workflow_by_owner_and_name(community_id, owner_pubkey, name)
+                .await;
+        }
+        workflow::find_by_owner_and_name(&self.postgres().pool, community_id, owner_pubkey, name)
+            .await
     }
 
     /// Create a new workflow run.
