@@ -1320,6 +1320,16 @@ impl Db {
         ephemeral_channel_id: Uuid,
         creator_pubkey: &[u8],
     ) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .huddle_started_link_exists(
+                    community_id,
+                    parent_channel_id,
+                    ephemeral_channel_id,
+                    creator_pubkey,
+                )
+                .await;
+        }
         event::huddle_started_link_exists(
             &self.postgres().pool,
             community_id,
