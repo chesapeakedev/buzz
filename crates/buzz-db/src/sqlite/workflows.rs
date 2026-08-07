@@ -627,6 +627,83 @@ impl SqliteStore {
         Ok(CommandExecution::Applied(run_id))
     }
 
+    /// Atomically persist an approval command and resolve its pending gate.
+    pub async fn execute_approval_command(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        expected_kind: u32,
+        token_hash: &[u8],
+        status: ApprovalStatus,
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != expected_kind {
+            return Err(DbError::InvalidData(format!(
+                "expected approval command kind {expected_kind}, got {}",
+                event.kind.as_u16()
+            )));
+        }
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let (_, inserted) =
+            super::events::insert_event_transaction(&mut transaction, community, event, None)
+                .await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok(CommandExecution::Duplicate);
+        }
+        let updated = Self::resolve_approval_command_tx(
+            &mut transaction,
+            community,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await?;
+        if !updated {
+            transaction.rollback().await?;
+            return Err(DbError::Conflict(
+                "approval already acted on or not found".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(CommandExecution::Applied(()))
+    }
+
+    async fn resolve_approval_command_tx(
+        transaction: &mut Transaction<'_, sqlx::Sqlite>,
+        community: CommunityId,
+        token_hash: &[u8],
+        status: ApprovalStatus,
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let status = status.to_string();
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE workflow_approvals SET status = ?, approver_pubkey = ?, note = ?, \
+             granted_at = CASE WHEN ? = 'granted' THEN ? ELSE granted_at END, \
+             denied_at = CASE WHEN ? = 'denied' THEN ? ELSE denied_at END \
+             WHERE community_id = ? AND token = ? AND status = 'pending'",
+        )
+        .bind(&status)
+        .bind(approver_pubkey)
+        .bind(note)
+        .bind(&status)
+        .bind(now)
+        .bind(&status)
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(token_hash)
+        .execute(&mut **transaction)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Fetch one execution run inside its owning community.
     pub async fn get_workflow_run(
         &self,
