@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_i32, is_ephemeral, KIND_AUTH, KIND_BOOKMARK_SET, KIND_EVENT_REMINDER,
-    KIND_READ_STATE,
+    KIND_HUDDLE_STARTED, KIND_READ_STATE,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -25,6 +25,45 @@ fn event_timestamp_micros(event: &Event) -> Result<i64> {
     seconds
         .checked_mul(1_000_000)
         .ok_or(DbError::InvalidTimestamp(seconds))
+}
+
+impl SqliteStore {
+    /// Check the bounded set of creator-signed huddle links for a parent channel.
+    pub async fn huddle_started_link_exists(
+        &self,
+        community: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        let candidates: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM events \
+         WHERE deleted_at IS NULL AND community_id = ? AND channel_id = ? \
+           AND kind = ? AND pubkey = ? AND length(content) <= ? \
+           AND instr(content, ?) > 0 \
+         ORDER BY created_at DESC, id ASC LIMIT 100",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(parent_channel_id.to_string())
+        .bind(KIND_HUDDLE_STARTED as i32)
+        .bind(creator_pubkey)
+        .bind(8_192_i64)
+        .bind(ephemeral_channel_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(candidates.iter().any(|content| {
+            serde_json::from_str::<serde_json::Value>(content)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("ephemeral_channel_id")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .and_then(|id| Uuid::parse_str(&id).ok())
+                .is_some_and(|id| id == ephemeral_channel_id)
+        }))
+    }
 }
 
 async fn insert_mentions(
