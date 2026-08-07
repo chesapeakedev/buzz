@@ -168,8 +168,10 @@ remains.
       is therefore below 100 durable writes/s on this host; rerun the matrix on
       target hardware. A 100-client/100-qps run recorded 40 publish errors,
       ≈20.67 MiB, ≈4.83 MiB `/data`, and ≈5.36 s restart; it is resource
-      calibration only, not a reliable write target. Complete the 1k/10k
-      resource levels before claiming the full gate. Publish and connection
+      calibration only, not a reliable write target. A 1k-client/100-qps run
+      hit one connection reset before writes, used ≈45.02 MiB and ≈5.38 s
+      restart, and is likewise a host-admission ceiling. Complete the 10k
+      resource level before claiming the full gate. Publish and connection
       errors are recorded per level while later resource evidence continues;
       host-terminated levels now emit an explicit `benchmark_error` artifact.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
