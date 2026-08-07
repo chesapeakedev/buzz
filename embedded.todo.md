@@ -162,12 +162,13 @@ remains.
       first signal, `buzz_sqlite_writer_wait_seconds`, is now emitted by the
       shared SQLite writer gate, and successful event transactions emit
       `buzz_sqlite_event_transaction_seconds`.
-- [ ] Capacity follow-up remains open: corrected evidence now has 20 clients at
-      5 total qps with 0 publish errors, while 50 clients at 1 total qps
-      recorded 10 publish errors. Rerun 20-client/10-qps and the 100/1k/10k
-      resource levels with the corrected generator before claiming the full
-      matrix. Publish errors are recorded per level while later resource
-      evidence continues.
+- [ ] Capacity follow-up remains open: corrected evidence has 20 clients at 5
+      total qps with 0 publish errors, but 20 clients at both 100 and 200 total
+      qps recorded 20 publish errors. The practical distributed-profile trigger
+      is therefore below 100 durable writes/s on this host; rerun the matrix on
+      target hardware and complete the 100/1k/10k resource levels before
+      claiming the full gate. Publish errors are recorded per level while later
+      resource evidence continues.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
