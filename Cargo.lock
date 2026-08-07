@@ -954,6 +954,7 @@ dependencies = [
  "buzz-media",
  "chrono",
  "hex",
+ "metrics",
  "nostr",
  "rand 0.10.1",
  "serde",
