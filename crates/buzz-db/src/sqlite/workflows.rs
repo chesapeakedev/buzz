@@ -628,6 +628,7 @@ impl SqliteStore {
     }
 
     /// Atomically persist an approval command and resolve its pending gate.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_approval_command(
         &self,
         community: CommunityId,
