@@ -1,5 +1,12 @@
 # Changelog
 
+## relay-v0.3.0
+
+- Add the SQLite/filesystem single-node embedded relay profile with local
+  coordination, durable `/data` recovery, and relay-only Compose deployment.
+- Preserve PostgreSQL/Redis/S3 as the distributed high-throughput profile.
+- Add embedded startup, restart, backup/restore, and client-connection runbooks.
+
 ## relay-v0.2.0
 
 - feat: relay invite links (mint + claim + landing page + deep link) ([#1668](https://github.com/block/buzz/pull/1668)) ([`2e529aab7`](https://github.com/block/buzz/commit/2e529aab759a18c1bb81e447f3696fe99db53a27))
