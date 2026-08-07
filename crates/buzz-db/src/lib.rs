@@ -1464,6 +1464,11 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .lookup_community_by_host_for_management(normalized_host)
+                .await;
+        }
         let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
             .bind(normalized_host)
             .fetch_optional(&self.pool)
@@ -1487,6 +1492,9 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<Vec<OwnedCommunityRecord>> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_communities_owned_by(&owner_pubkey).await;
+        }
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.host, c.created_at, c.archived_at
@@ -1529,6 +1537,9 @@ impl Db {
     /// is never used to re-derive the community.
     #[datastore_span(name = "lookup_community_host", system = "postgresql")]
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.lookup_community_host(community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT host
@@ -1556,6 +1567,9 @@ impl Db {
     /// validated and size-capped at that write path.
     #[datastore_span(name = "get_community_icon", system = "postgresql")]
     pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_community_icon(community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT icon
@@ -1581,6 +1595,9 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.set_community_icon(community_id, icon).await;
+        }
         sqlx::query(
             r#"
             UPDATE communities
