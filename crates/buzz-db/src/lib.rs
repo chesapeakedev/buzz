@@ -65,8 +65,9 @@ pub use sqlite::media_objects::SqliteBlobMetadata;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
-use sqlx::{Connection, PgPool, QueryBuilder, Row};
+use sqlx::{Connection, PgPool, QueryBuilder, Row, SqlitePool};
 use std::time::Duration;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
@@ -229,7 +230,15 @@ pub enum CommandExecution<T> {
 /// locks must remain bound to this exact physical connection, and the poller
 /// pings it before each leader-only collection tick.
 pub struct UsageMetricsLeader {
-    connection: PgConnection,
+    connection: UsageMetricsLeaderConnection,
+}
+
+enum UsageMetricsLeaderConnection {
+    Postgres(PgConnection),
+    Sqlite {
+        pool: SqlitePool,
+        _writer: OwnedMutexGuard<()>,
+    },
 }
 
 impl UsageMetricsLeader {
@@ -238,9 +247,19 @@ impl UsageMetricsLeader {
     /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
     /// stall the entire poller tick until the OS TCP timeout.
     pub async fn is_live(&mut self) -> bool {
-        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.ping())
+        match &mut self.connection {
+            UsageMetricsLeaderConnection::Postgres(connection) => {
+                tokio::time::timeout(std::time::Duration::from_secs(5), connection.ping())
+                    .await
+                    .is_ok_and(|r| r.is_ok())
+            }
+            UsageMetricsLeaderConnection::Sqlite { pool, .. } => tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sqlx::query("SELECT 1").execute(&*pool),
+            )
             .await
-            .is_ok_and(|r| r.is_ok())
+            .is_ok_and(|r| r.is_ok()),
+        }
     }
 }
 
@@ -616,6 +635,15 @@ impl Db {
         &self,
         lock_key: i64,
     ) -> Result<Option<UsageMetricsLeader>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            let _ = lock_key;
+            return Ok(Some(UsageMetricsLeader {
+                connection: UsageMetricsLeaderConnection::Sqlite {
+                    pool: store.adapter_pool().clone(),
+                    _writer: store.adapter_writer_gate().lock_owned().await,
+                },
+            }));
+        }
         let mut connection = self.postgres().pool.acquire().await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
@@ -623,7 +651,7 @@ impl Db {
             .await?;
         if acquired {
             Ok(Some(UsageMetricsLeader {
-                connection: connection.detach(),
+                connection: UsageMetricsLeaderConnection::Postgres(connection.detach()),
             }))
         } else {
             Ok(None)
@@ -5715,6 +5743,40 @@ mod tests {
         );
         assert!(db.is_community_active(community.id).await.expect("active"));
         assert!(!db.spawn_fence_probe().await.expect("SQLite fence disabled"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_usage_metrics_lock_has_single_process_owner() {
+        let directory = tempfile::tempdir().expect("temporary SQLite directory");
+        let db = Db::new_sqlite(
+            &directory.path().join("buzz.sqlite3"),
+            &sqlite::SqliteConfig::default(),
+        )
+        .await
+        .expect("SQLite facade");
+        let mut leader = db
+            .try_lock_usage_metrics(0x4255_5A5A_4D45_5452)
+            .await
+            .expect("acquire SQLite usage lock")
+            .expect("first SQLite handle becomes leader");
+        assert!(leader.is_live().await);
+
+        let contender = db.clone();
+        let waiting = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                contender.try_lock_usage_metrics(0x4255_5A5A_4D45_5452),
+            )
+            .await
+        });
+        assert!(waiting.await.expect("contender task").is_err());
+
+        drop(leader);
+        assert!(db
+            .try_lock_usage_metrics(0x4255_5A5A_4D45_5452)
+            .await
+            .expect("reacquire SQLite usage lock")
+            .is_some());
     }
 
     #[tokio::test]
