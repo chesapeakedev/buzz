@@ -35,7 +35,8 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
   ./scripts/test-embedded-compose.sh
 ```
 
-The repeatable write benchmark records per-level latency, publish errors,
+The repeatable write benchmark records per-level latency, publish and
+connection errors,
 container memory,
 `/data` growth, and restart recovery. Run the planned 100/1,000/10,000-client
 matrix on a suitably sized host, or override it for a local smoke run:
