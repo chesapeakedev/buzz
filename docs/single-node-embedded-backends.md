@@ -243,11 +243,14 @@ Before enabling Actions with write permissions:
     operations in terms of Buzz behavior: publish events, presence, replay
     claims, rate windows, cache invalidation, and connection control.
 
-- Add filesystem media and git object backends.
+- Add the filesystem media backend and keep Git hosting optional.
   - Introduce backend-neutral blob and compare-and-swap interfaces, retaining
-    the existing S3 implementations.
-  - Map S3 key prefixes directly to filesystem subdirectories, keeping keys
-    identical so objects are portable between S3 and filesystem:
+    the existing S3 implementations. The blob interface is required for media;
+    the Git implementation is an opt-in compatibility adapter only.
+  - Map media keys directly to filesystem subdirectories, keeping keys
+    identical so media objects are portable between S3 and filesystem. When
+    `BUZZ_GIT_ENABLED=true`, apply the same mapping to Git pack/manifest/index
+    objects; Git paths are not part of the default embedded data contract:
 
     | S3 prefix | Filesystem path |
     |-----------|----------------|
@@ -637,7 +640,10 @@ Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
   invalid embedded/distributed combinations.
 - Add a container smoke test that starts from an empty volume with no
   PostgreSQL, Redis, or MinIO network access and exercises channels, messages,
-  search, media, git, workflows, restart, and backup/restore.
+  search, media, workflows, restart, and backup/restore with Git disabled.
+  Run Git hosting tests as a separate opt-in compatibility job with
+  `BUZZ_GIT_ENABLED=true`; failures there must not make the embedded media
+  release gate fail.
 - Run `scripts/test-embedded-compose.sh` against the relay image for the
   startup/readiness, durable-key, restart, and stop-and-copy backup/restore
   portion of that gate; protocol workload coverage remains an explicit E2E
