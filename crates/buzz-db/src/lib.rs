@@ -5289,6 +5289,17 @@ impl Db {
         workflow_id: Uuid,
         trigger_context: Option<&serde_json::Value>,
     ) -> Result<CommandExecution<Uuid>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .execute_workflow_trigger_command(
+                    community_id,
+                    event,
+                    channel_id,
+                    workflow_id,
+                    trigger_context,
+                )
+                .await;
+        }
         if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_TRIGGER {
             return Err(DbError::InvalidData(format!(
                 "expected workflow trigger kind {}, got {}",
