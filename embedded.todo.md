@@ -136,6 +136,11 @@ remains.
       `deploy/embedded/MIGRATIONS.md`, covering additive SQLite upgrades,
       backup/restore rollback, migration visibility, SBOM, and provenance
       verification.
+- [x] Two-image embedded upgrade smoke harness added at
+      `scripts/test-embedded-upgrade.sh`; it refuses same-image false positives
+      and checks readiness plus durable relay identity across one `/data`
+      volume. A real run remains open until an older immutable image is
+      available.
 - [x] Focused embedded protocol evidence: NIP-11, subscription-limit handling,
       SQLite FTS search, and filesystem media upload/download pass against the
       locally built relay image. The broader capacity matrix and overnight soak
