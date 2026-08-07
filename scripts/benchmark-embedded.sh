@@ -57,9 +57,11 @@ stats() {
 }
 
 : >"$outdir/container-stats.txt"
+: >"$outdir/benchmark-levels.jsonl"
 stats idle
 
 IFS=',' read -ra matrix <<<"$levels"
+failed_levels=0
 for entry in "${matrix[@]}"; do
   conns="${entry%%:*}"
   qps="${entry#*:}"
@@ -72,6 +74,11 @@ for entry in "${matrix[@]}"; do
   BENCH_PRIVATE_KEY="$private_key" BUZZ_RELAY_URL="$relay_url" \
     cargo run --quiet -p buzz-test-client --bin wamp_bench -- \
       auto "$qps" "$duration" "$conns" "$sample" >"$summary"
+  jq --arg level "$entry" '. + {level: $level}' "$summary" >>"$outdir/benchmark-levels.jsonl"
+  if jq -e '.publish_errors > 0' "$summary" >/dev/null; then
+    failed_levels=$((failed_levels + 1))
+    echo "benchmark level $entry recorded publish errors" >&2
+  fi
   stats "${conns}c"
 done
 
@@ -93,3 +100,7 @@ end_ms=$(date +%s%3N)
 printf '%s\n' "$((end_ms - start_ms))" >"$outdir/restart-time.ms"
 
 echo "embedded benchmark complete: image=$image output=$outdir"
+if ((failed_levels > 0)); then
+  echo "embedded benchmark recorded publish errors in $failed_levels level(s)" >&2
+  exit 3
+fi

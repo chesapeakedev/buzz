@@ -570,15 +570,17 @@ fan-out, failover, or shared durable storage is the distributed
 PostgreSQL/Redis/S3 profile.
 
 The following measurements are calibration evidence from the locally built
-relay image, not hardware-independent service-level objectives. The benchmark
-rate is per connected client; aggregate write rate is the useful comparison.
+relay image, not hardware-independent service-level objectives. The
+benchmark's `qps` target is shared across all connected clients; the aggregate
+target is therefore the useful comparison. A run that records publish errors is
+a capacity-boundary observation, not a passing workload.
 
 | Profile | Observed result | Deployment guidance |
 | --- | --- | --- |
-| 20 clients × 5 writes/s (100 aggregate writes/s) | 0 rejected writes, p50 ≈ 1.65 ms; restart recovered | Healthy embedded operating point on the tested host |
-| 50 clients × 1 write/s (50 aggregate writes/s) | 0 rejected writes, p50 ≈ 1.91 ms, ≈22.72 MiB relay memory; restart recovered | Reasonable upper single-device calibration point; measure on target hardware |
-| 20 clients × 10 writes/s (200 aggregate writes/s) | Later publishes timed out after authentication | Treat as above the tested SQLite write boundary; move to distributed storage for sustained demand |
-| 100 clients × 20 writes/s (2,000 aggregate writes/s) | Later publishes timed out after authentication | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
+| 20 clients, 5 total writes/s | 0 rejected writes, p50 ≈ 1.65 ms; restart recovered | Healthy embedded operating point on the tested host |
+| 50 clients, 1 total write/s | 0 rejected writes, p50 ≈ 1.91 ms, ≈22.72 MiB relay memory; restart recovered | Connection/resource calibration point; measure on target hardware |
+| 20 clients, 10 total writes/s | Later publishes timed out after authentication | Treat as above the tested SQLite write boundary; move to distributed storage for sustained demand |
+| 100 clients, 20 total writes/s | Later publishes timed out after authentication | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
 
 As an operational rule, keep embedded deployments at or below the measured
 single-node envelope unless a target-device benchmark proves otherwise. Move to
