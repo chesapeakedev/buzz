@@ -1,7 +1,7 @@
 //! SQLite event insertion and direct lifecycle operations.
 
 use chrono::{DateTime, Utc};
-use nostr::Event;
+use nostr::{Event, EventBuilder, Kind, Tag};
 use sqlx::{QueryBuilder, Row as _};
 use uuid::Uuid;
 
@@ -28,6 +28,66 @@ fn event_timestamp_micros(event: &Event) -> Result<i64> {
 }
 
 impl SqliteStore {
+    /// Publish the relay-authored NIP-43 membership snapshot atomically.
+    pub async fn publish_nip43_membership_locked(
+        &self,
+        community: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, usize)> {
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT pubkey, role FROM relay_members \
+             WHERE community_id = ? ORDER BY created_at ASC",
+        )
+        .bind(community.as_uuid().to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut tags = Vec::with_capacity(rows.len() + 1);
+        tags.push(
+            Tag::parse(["-"]).map_err(|error| {
+                DbError::InvalidData(format!("failed to build '-' tag: {error}"))
+            })?,
+        );
+        for row in &rows {
+            let pubkey: String = row.try_get("pubkey")?;
+            let role: String = row.try_get("role")?;
+            tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|error| {
+                DbError::InvalidData(format!("failed to build member tag: {error}"))
+            })?);
+        }
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as u16),
+            "",
+        )
+        .tags(tags)
+        .sign_with_keys(relay_keypair)
+        .map_err(|error| {
+            DbError::InvalidData(format!("failed to sign membership snapshot: {error}"))
+        })?;
+        sqlx::query(
+            "UPDATE events SET deleted_at = ? \
+             WHERE community_id = ? AND kind = ? AND pubkey = ? \
+               AND channel_id IS NULL AND deleted_at IS NULL",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(community.as_uuid().to_string())
+        .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+        .bind(relay_keypair.public_key().to_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        let (stored, inserted) =
+            insert_event_transaction(&mut transaction, community, &event, None).await?;
+        if !inserted {
+            transaction.rollback().await?;
+            return Ok((stored, false, rows.len()));
+        }
+        transaction.commit().await?;
+        Ok((stored, true, rows.len()))
+    }
+
     /// Atomically soft-delete an event and decrement its thread counters.
     pub async fn soft_delete_event_and_update_thread(
         &self,
