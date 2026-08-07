@@ -540,14 +540,21 @@ PostgreSQL or Redis available.
 
 Deliver:
 
-- content-addressed filesystem media and git backends mapping S3 key prefixes
+- content-addressed filesystem media, with an optional Git backend mapping S3 key prefixes
   to subdirectories (`packs/`, `manifests/`, `idx/`, `pointers/`);
-- filesystem git pack/manifest/pointer backend as an opt-in capability;
+- filesystem git pack/manifest/pointer backend as an opt-in compatibility capability;
 - SQLite `media_objects` and `git_pointers` tables replacing sidecar JSON
   for ACID blob metadata;
 - atomic writes, per-repository CAS, recovery, ranges, streaming, quotas, and
   traversal protection;
 - S3/filesystem shared behavior tests and key-format compatibility.
+
+Git is not on the embedded server critical path or its acceptance gate. It is
+only justified for a single-device owner with a few private repositories,
+infrequent pushes, and a bounded disk quota. A relay with significant
+concurrent clone/push traffic, large histories, or many repositories must use
+the distributed PostgreSQL/Redis/S3 profile; this plan does not treat a
+filesystem Git store as a scalable object-storage substitute.
 
 Exit gate: media E2E tests pass after relay restart with MinIO and external S3
 unavailable. Git storage is tested separately when `BUZZ_GIT_ENABLED=true`.
@@ -603,7 +610,7 @@ without bypassing tests.
 16. SQLite blob metadata tables (`media_objects`, `git_pointers`) replacing
     sidecar JSON.
 17. Filesystem media backend.
-18. Filesystem git backend.
+18. Optional filesystem git backend (non-blocking compatibility lane).
 19. Embedded config, data layout, locking, and recovery.
 20. Relay-only container, Compose/Caddy example, and operational docs.
 21. Embedded release candidate, resource benchmarks, soak test, and stable
