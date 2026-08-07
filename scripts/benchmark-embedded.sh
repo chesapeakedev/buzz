@@ -75,7 +75,7 @@ for entry in "${matrix[@]}"; do
     cargo run --quiet -p buzz-test-client --bin wamp_bench -- \
       auto "$qps" "$duration" "$conns" "$sample" >"$summary"
   jq --arg level "$entry" '. + {level: $level}' "$summary" >>"$outdir/benchmark-levels.jsonl"
-  if jq -e '.publish_errors > 0' "$summary" >/dev/null; then
+  if jq -e '(.publish_errors + .connection_errors) > 0' "$summary" >/dev/null; then
     failed_levels=$((failed_levels + 1))
     echo "benchmark level $entry recorded publish errors" >&2
   fi

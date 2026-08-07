@@ -11,14 +11,16 @@
 //! Env:   BUZZ_RELAY_URL (default ws://localhost:3000), BENCH_PRIVATE_KEY (hex)
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
 use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
-use tokio::{sync::Barrier, time::MissedTickBehavior};
+use tokio::{sync::Notify, time::MissedTickBehavior};
 
 async fn create_channel(url: &str, keys: &Keys) -> anyhow::Result<String> {
     let channel_id = uuid::Uuid::new_v4().to_string();
@@ -90,14 +92,18 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(100);
-    let connected = Arc::new(Barrier::new(conns));
+    let connected_count = Arc::new(AtomicUsize::new(0));
+    let connection_failed = Arc::new(AtomicBool::new(false));
+    let connection_notify = Arc::new(Notify::new());
 
     let mut tasks = Vec::new();
     for conn_idx in 0..conns {
         let url = url.clone();
         let keys = keys.clone();
         let channel_id = channel_id.clone();
-        let connected = Arc::clone(&connected);
+        let connected_count = Arc::clone(&connected_count);
+        let connection_failed = Arc::clone(&connection_failed);
+        let connection_notify = Arc::clone(&connection_notify);
         tasks.push(tokio::spawn(async move {
             let batch = conn_idx / connect_batch_size;
             if batch > 0 {
@@ -106,13 +112,29 @@ async fn main() -> anyhow::Result<()> {
                 ))
                 .await;
             }
-            let mut client = BuzzTestClient::connect(&url, &keys)
-                .await
-                .with_context(|| format!("connect benchmark client {conn_idx}"))?;
+            let mut client = match BuzzTestClient::connect(&url, &keys).await {
+                Ok(client) => client,
+                Err(error) => {
+                    connection_failed.store(true, Ordering::Release);
+                    connection_notify.notify_waiters();
+                    eprintln!("CONNECT_ERROR conn={conn_idx}: {error:#}");
+                    return Ok::<_, anyhow::Error>((0, 0, 0, 1, Vec::new()));
+                }
+            };
             // Do not start the measurement window until every requested client
             // has authenticated. This separates connection-admission behavior
             // from the steady-state write workload.
-            connected.wait().await;
+            connected_count.fetch_add(1, Ordering::AcqRel);
+            connection_notify.notify_waiters();
+            while connected_count.load(Ordering::Acquire) < conns
+                && !connection_failed.load(Ordering::Acquire)
+            {
+                connection_notify.notified().await;
+            }
+            if connection_failed.load(Ordering::Acquire) {
+                client.disconnect().await?;
+                return Ok::<_, anyhow::Error>((0, 0, 0, 0, Vec::new()));
+            }
             // Phase the first write across one interval. Without this ramp,
             // every connection publishes on the same tick and the benchmark
             // measures an avoidable SQLite writer stampede instead of qps.
@@ -159,19 +181,21 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             client.disconnect().await?;
-            Ok::<_, anyhow::Error>((sent, rejected, publish_errors, latencies))
+            Ok::<_, anyhow::Error>((sent, rejected, publish_errors, 0, latencies))
         }));
     }
 
     let mut sent = 0u64;
     let mut rejected = 0u64;
     let mut publish_errors = 0u64;
+    let mut connection_errors = 0u64;
     let mut latencies: Vec<f64> = Vec::new();
     for task in tasks {
-        let (s, r, e, l) = task.await??;
+        let (s, r, e, c, l) = task.await??;
         sent += s;
         rejected += r;
         publish_errors += e;
+        connection_errors += c;
         latencies.extend(l);
     }
     latencies.sort_by(|a, b| a.partial_cmp(b).expect("finite latencies"));
@@ -191,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
             "accepted": sent - rejected,
             "rejected": rejected,
             "publish_errors": publish_errors,
+            "connection_errors": connection_errors,
             "qps_target": qps,
             "duration_secs": duration_secs,
             "conns": conns,
