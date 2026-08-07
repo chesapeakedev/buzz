@@ -4131,6 +4131,17 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_mentions(
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await;
+        }
         feed::query_mentions(
             &self.pool,
             community,
@@ -4214,6 +4225,17 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_needs_action(
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await;
+        }
         feed::query_needs_action(
             &self.pool,
             community,
@@ -4292,7 +4314,11 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        feed::query_activity(&self.pool, community, accessible_channel_ids, since, limit).await
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_activity(community, accessible_channel_ids, since, limit)
+                .await;
+        }
     }
 
     /// [`Db::query_feed_activity`] with replica routing — BOUNDED arm only;
