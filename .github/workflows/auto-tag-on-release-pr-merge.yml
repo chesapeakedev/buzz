@@ -19,6 +19,8 @@ name: Auto-tag on Release PR Merge
 # buzz-release-bot GitHub App. GitHub attributes the ref creation to that
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
+# The same reviewed lane is enabled for the ChesapeakeDev fork once its
+# BUZZ_RELEASE_TAGGER_* credentials are installed there.
 #
 # Mobile is manual-only by infosec necessity: OSS `block/buzz` CI must
 # not trigger CI in the private `buzz-releases` repo. A human feeds the exact
@@ -41,7 +43,7 @@ jobs:
       checks: read
       statuses: read
     if: >
-      github.repository == 'block/buzz' &&
+      (github.repository == 'block/buzz' || github.repository == 'chesapeakedev/buzz') &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest

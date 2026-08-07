@@ -29,7 +29,7 @@ require_text .github/workflows/release.yml \
 require_text .github/workflows/mobile-release-candidate.yml \
   "if: github.repository == 'block/buzz'"
 require_text .github/workflows/auto-tag-on-release-pr-merge.yml \
-  "github.repository == 'block/buzz' &&"
+  "(github.repository == 'block/buzz' || github.repository == 'chesapeakedev/buzz') &&"
 require_text .github/workflows/linux-canary.yml \
   "if: github.repository == 'block/buzz'"
 require_text .github/workflows/signed-macos-canary.yml \

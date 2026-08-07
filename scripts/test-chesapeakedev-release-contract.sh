@@ -24,6 +24,7 @@ require_text "gh attestation verify oci://\${IMAGE_NAME}@\${MERGED_DIGEST} --own
 require_text "type=ref,event=branch"
 require_text "type=sha,prefix=sha-"
 require_text "type=semver,pattern={{version}}"
+require_text "sbom: true"
 grep -Fq 'repository = "https://github.com/chesapeakedev/buzz"' "$repo_root/Cargo.toml"
 grep -Fq 'org.opencontainers.image.source="https://github.com/chesapeakedev/buzz"' \
   "$repo_root/Dockerfile"
