@@ -166,6 +166,7 @@ impl SqliteStore {
         thread_meta: Option<ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
         let _writer = self.acquire_writer().await;
+        let transaction_started = std::time::Instant::now();
         let mut connection = self.pool.acquire().await?;
         let mut transaction =
             sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
@@ -192,6 +193,8 @@ impl SqliteStore {
             }
         }
         transaction.commit().await?;
+        metrics::histogram!("buzz_sqlite_event_transaction_seconds")
+            .record(transaction_started.elapsed().as_secs_f64());
         Ok(result)
     }
 
