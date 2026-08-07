@@ -1198,6 +1198,13 @@ impl Db {
     /// Internal relay producers use this to derive tenant context from the row
     /// they are acting on, rather than falling back to an implicit default.
     pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return Ok(store
+                .communities_of_channels(&[channel_id])
+                .await?
+                .get(&channel_id)
+                .copied());
+        }
         let row = sqlx::query(
             r#"
             SELECT community_id
@@ -2041,6 +2048,9 @@ impl Db {
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
     ) -> Result<Vec<channel::UserRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_users_bulk(community_id, pubkeys).await;
+        }
         channel::get_users_bulk(&self.postgres().pool, community_id, pubkeys).await
     }
 
