@@ -13,8 +13,40 @@
 use std::time::{Duration, Instant};
 
 use buzz_test_client::BuzzTestClient;
-use nostr::Keys;
+use nostr::{EventBuilder, Keys, Kind, Tag};
 use tokio::time::MissedTickBehavior;
+
+async fn create_channel(url: &str, keys: &Keys) -> anyhow::Result<String> {
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags([
+            Tag::parse(["h", &channel_id])?,
+            Tag::parse(["name", &format!("embedded-bench-{channel_id}")])?,
+            Tag::parse(["channel_type", "stream"])?,
+            Tag::parse(["visibility", "open"])?,
+        ])
+        .sign_with_keys(keys)?;
+    let http_url = url
+        .replace("wss://", "https://")
+        .replace("ws://", "http://");
+    let response = reqwest::Client::new()
+        .post(format!("{http_url}/events"))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .json(&event)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "channel creation HTTP status: {}",
+        response.status()
+    );
+    let body: serde_json::Value = response.json().await?;
+    anyhow::ensure!(
+        body["accepted"].as_bool() == Some(true),
+        "channel creation rejected: {body}"
+    );
+    Ok(channel_id)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Usage: wamp-bench <channel_uuid> <qps> <duration_secs> <conns> <latency_out>");
         std::process::exit(1);
     }
-    let channel_id = args[1].clone();
+    let channel_arg = args[1].clone();
     let qps: f64 = args[2].parse()?;
     let duration_secs: u64 = args[3].parse()?;
     let conns: usize = args[4].parse()?;
@@ -36,6 +68,12 @@ async fn main() -> anyhow::Result<()> {
     let keys = match std::env::var("BENCH_PRIVATE_KEY") {
         Ok(hex) => Keys::parse(&hex)?,
         Err(_) => anyhow::bail!("BENCH_PRIVATE_KEY is required (channel member secret key)"),
+    };
+
+    let channel_id = if channel_arg == "auto" {
+        create_channel(&url, &keys).await?
+    } else {
+        channel_arg
     };
 
     let per_conn_interval = Duration::from_secs_f64(conns as f64 / qps);
