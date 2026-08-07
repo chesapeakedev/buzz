@@ -46,7 +46,9 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:main \
 ```
 
 The benchmark is evidence for capacity planning, not a claim that SQLite or
-filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays.
+filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays. It
+raises the per-identity WebSocket event quota for synthetic traffic only; a
+normal Compose deployment retains the production default of 50 events/second.
 
 ## Release notes and known limits
 
