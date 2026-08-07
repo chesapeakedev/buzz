@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   sync:
@@ -35,8 +34,5 @@ jobs:
       - name: Rebase fork patch stack onto canonical upstream
         run: just sync-upstream
 
-      - name: Push branch and create or update PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUZZ_GITHUB_REPOSITORY: ${{ github.repository }}
-        run: just sync-upstream-pr
+      - name: Rebase upstream beneath fork patches and publish main
+        run: just sync-upstream-publish-main

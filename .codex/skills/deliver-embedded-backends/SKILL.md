@@ -7,8 +7,9 @@ description: Deliver the ChesapeakeDev Buzz single-node embedded-backends progra
 
 Treat `docs/single-node-embedded-backends.md` as the versioned source of truth
 for a long-running delivery goal. Advance it in reviewable slices while keeping
-the distributed PostgreSQL/Redis/S3 deployment green and fork changes suitable
-for upstream contribution.
+the distributed PostgreSQL/Redis/S3 deployment green and the fork's final
+`main` branch publishable. This fork does not open pull requests against
+`block/buzz`.
 
 ## Establish the Goal
 
@@ -29,7 +30,7 @@ for upstream contribution.
 
 1. Derive progress from the plan, merged code, tests, and repository history;
    do not assume a numbered item is complete because scaffolding exists.
-2. Select the earliest incomplete dependency-safe item from the pull-request
+2. Select the earliest incomplete dependency-safe item from the delivery
    sequence. Keep the slice small enough for one focused PR and leave the
    repository deployable.
 3. State the slice, acceptance evidence, and relevant checks in the working
@@ -38,13 +39,14 @@ for upstream contribution.
    introduce backend-neutral seams, keep current adapters intact, and use
    shared contract tests.
 5. Separate generally useful refactors from ChesapeakeDev branding, release
-   authority, or embedded-default policy whenever they can be reviewed
-   independently upstream.
+   authority, or embedded-default policy whenever practical; all slices remain
+   in the fork's linear publication stack.
 6. Run focused tests during iteration and the quality gates required by
    `AGENTS.md` for the affected subsystem. Record concrete results.
-7. Finish each verified PR slice with well-defended local commits unless the
+7. Finish each verified delivery slice with well-defended local commits unless the
    user explicitly requests no commits. A skill invocation for implementation
-   authorizes these local commits, but never authorizes a push or PR mutation.
+   authorizes these local commits. A push is authorized only when the user
+   explicitly requests fork publication.
 
 ## Build a Defended Linear History
 
@@ -62,9 +64,8 @@ Make the fork history read as a linear, reviewable hill climb toward the plan:
    “work in progress.”
 4. Defend non-trivial commits in the message body: explain why the change is
    needed, identify the compatibility or security invariants it preserves, and
-   record the exact tests run. The diff and message together must give an
-   upstream reviewer enough evidence to evaluate the patch without relying on
-   fork-only context.
+   record the exact tests run. The diff and message together must defend the
+   patch without relying on unstated fork-only context.
 5. Follow `CONTRIBUTING.md`'s “Sign Your Commits” rule for every fork commit:
    create it with DCO sign-off (`git commit -s`) so its message contains a
    `Signed-off-by: Name <email>` trailer matching the contributor identity.
@@ -76,27 +77,19 @@ Make the fork history read as a linear, reviewable hill climb toward the plan:
    feature merge commits, and do not disturb user-owned commits.
 7. Rebase the fork-owned patch stack onto new upstream bases when synchronizing
    the fork. Rewritten fork commit IDs are expected; release tags remain stable.
-   Update remote branches only with explicit `--force-with-lease` protection
-   after confirming the expected old tip.
+   Publish the resulting linear stack directly to fork `main` only with
+   explicit `--force-with-lease` protection after confirming the expected old
+   tip.
 8. Before handoff or publication, audit every commit in the proposed range,
    not only `HEAD`. Fail the slice if any commit lacks a valid sign-off or uses
    an unexpected identity. Repair a private unsigned series with
    `git rebase --signoff <base>` and re-run the audit; never claim DCO
    compliance from the hook configuration alone.
 
-For every candidate upstream contribution:
-
-1. Create its topic branch directly from the current `upstream/main`, never
-   from ChesapeakeDev `main` or `upstream-sync`.
-2. Cherry-pick or reimplement only the dependency-complete, backend-neutral
-   commits that upstream should receive. Exclude branding, release authority,
-   deployment defaults, and fork policy.
-3. Keep that topic branch linear and rebase it onto updated `upstream/main`
-   before publication when it is still private. After review begins, add
-   fixup commits unless the upstream maintainer requests a rebase.
-4. Open the pull request with `block/buzz:main` as the base and the fork topic
-   branch as the head. Verify the PR commit list and diff contain no fork-sync
-   merges or ChesapeakeDev-only changes.
+Keep backend-neutral changes compatible with upstream so future rebases stay
+small, but do not create upstream topic branches or pull requests. The
+publication target is the complete linear `chesapeakedev/buzz:main` stack; the
+eventual embedded release is a GitHub release from that fork.
 
 ## Match Repository Norms
 
@@ -159,8 +152,7 @@ introduces a new seam:
 ## Resolve Upstream Sync Conflicts
 
 The fork maintains its changes as a linear patch stack rebased onto
-`upstream/main`. The `upstream-base` mirror makes the review diff show only
-fork-owned patches.
+`upstream/main`; the final publication is always the fork's `main` branch.
 
 1. Start from a clean `main` aligned with `origin/main`.
 2. Run `just sync-upstream`. If it reports conflicts, remain on
@@ -174,18 +166,17 @@ fork-owned patches.
    `git rebase --signoff` or `git commit --amend -s`; do not add a blanket
    trailer without verifying that the committer has the right to certify it.
 5. Run checks for every conflicted subsystem plus the sync contract test.
-6. Run `just sync-upstream-pr` to lease-update the review branches and create
-   or refresh the PR. Never merge that review PR into `upstream-base`.
-7. After approval, run `just sync-upstream-finalize`; it must verify the
-   reviewed tips and use `--force-with-lease` to update `main`.
-8. Update `UPSTREAM.md` when it exists with the upstream base commit,
-   intentional omissions, semantic differences, and upstreamable fork patches.
+6. Run `just sync-upstream-publish-main`; it must validate the complete
+   rebased, signed, merge-free stack and use `--force-with-lease` to update
+   fork `main`. It must never call the GitHub pull-request API.
+7. Update `UPSTREAM.md` when it exists with the upstream base commit,
+   intentional omissions, semantic differences, and conflict resolutions.
 
 ## Report Progress
 
 Report the completed slice, evidence, remaining earliest dependency, and any
 new divergence risk. Distinguish the overall program goal from the current
-slice: completing one PR never completes the full goal.
+slice: completing one delivery slice never completes the full goal.
 
 ## Finish Every Response
 

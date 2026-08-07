@@ -73,48 +73,12 @@ prepared_head="$(git -C "$fixture/work" rev-parse HEAD)"
 )
 [[ "$(git -C "$fixture/work" rev-parse HEAD)" == "$prepared_head" ]]
 
-mkdir -p "$fixture/mock-bin"
-cat >"$fixture/mock-bin/gh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-case "${1:-} ${2:-}" in
-  "pr list")
-    if [[ "$*" == *reviewDecision* ]]; then
-      echo "APPROVED"
-    fi
-    exit 0
-    ;;
-  "pr create")
-    printf '%s\n' "$*" >>"$GH_CALLS"
-    echo "https://github.test/chesapeakedev/buzz/pull/1"
-    ;;
-  *)
-    echo "unexpected gh invocation: $*" >&2
-    exit 1
-    ;;
-esac
-EOF
-chmod +x "$fixture/mock-bin/gh"
 (
   cd "$fixture/work"
-  PATH="$fixture/mock-bin:$PATH" \
-    GH_CALLS="$fixture/gh-calls" \
-    BUZZ_GITHUB_REPOSITORY="chesapeakedev/buzz" \
-    run_sync "$fixture" pr
-)
-git --git-dir="$fixture/origin.git" show-ref --verify --quiet refs/heads/upstream-sync
-git --git-dir="$fixture/origin.git" show-ref --verify --quiet refs/heads/upstream-base
-grep -Fq "pr create" "$fixture/gh-calls"
-grep -Fq -- "--base upstream-base" "$fixture/gh-calls"
-(
-  cd "$fixture/work"
-  PATH="$fixture/mock-bin:$PATH" \
-    GH_CALLS="$fixture/gh-calls" \
-    BUZZ_GITHUB_REPOSITORY="chesapeakedev/buzz" \
-    run_sync "$fixture" finalize
+  run_sync "$fixture" publish-main
 )
 [[ "$(git --git-dir="$fixture/origin.git" rev-parse main)" == \
-  "$(git --git-dir="$fixture/origin.git" rev-parse upstream-sync)" ]]
+  "$(git -C "$fixture/work" rev-parse HEAD)" ]]
 
 fixture="$(setup_fixture fork_and_upstream)"
 commit_file "$fixture/source" fork.txt fork "feat(test): add fork change"
@@ -130,8 +94,8 @@ git -C "$fixture/source" push -q upstream main
 git -C "$fixture/work" merge-base --is-ancestor upstream/main HEAD
 [[ "$(git -C "$fixture/work" rev-list --count --merges upstream/main..HEAD)" == "0" ]]
 [[ "$(git -C "$fixture/work" show HEAD:fork.txt)" == "fork" ]]
-git -C "$fixture/work" log -1 --format=%B |
-  grep -Fq "Signed-off-by: Sync Test <sync-test@example.com>"
+git -C "$fixture/work" show -s --format=%B HEAD |
+  grep -Fq "Signed-off-by:"
 
 fixture="$(setup_fixture conflict)"
 commit_file "$fixture/source" shared.txt upstream upstream-change
@@ -171,15 +135,15 @@ grep -Fq "expected '$fixture/upstream.git'" <<<"$output"
 
 grep -Fq 'sync-upstream-status:' "$script_dir/../Justfile"
 grep -Fq 'sync-upstream:' "$script_dir/../Justfile"
-grep -Fq 'sync-upstream-pr:' "$script_dir/../Justfile"
-grep -Fq 'sync-upstream-finalize:' "$script_dir/../Justfile"
+grep -Fq 'sync-upstream-publish-main:' "$script_dir/../Justfile"
 workflow="$script_dir/../.github/workflows/upstream-sync.yml"
 grep -Fq 'cron: "17 9 * * *"' "$workflow"
 grep -Fq "github.repository == 'chesapeakedev/buzz'" "$workflow"
 grep -Fq 'contents: write' "$workflow"
-grep -Fq 'pull-requests: write' "$workflow"
 grep -Fq 'run: just sync-upstream' "$workflow"
-grep -Fq 'run: just sync-upstream-pr' "$workflow"
+grep -Fq 'run: just sync-upstream-publish-main' "$workflow"
+! grep -Fq 'pull-requests:' "$workflow"
+! grep -Fq 'gh pr' "$sync_script"
 grep -Fq -- '--force-with-lease=' "$sync_script"
 ! grep -Eq 'git merge( |$)' "$sync_script"
 

@@ -3,8 +3,9 @@
 This repository is the public ChesapeakeDev fork of
 [`block/buzz`](https://github.com/block/buzz). Canonical upstream changes remain
 an ongoing input. Fork-only commits are replayed onto the current upstream base
-in a fixed `upstream-sync` branch and reviewed as a linear patch stack before
-the fork's `main` is updated with an explicit lease.
+in a temporary `upstream-sync` branch before the fork's `main` is updated with
+an explicit force-with-lease. This fork does not open pull requests against
+`block/buzz`.
 
 ## Current baseline
 
@@ -12,7 +13,7 @@ the fork's `main` is updated with an explicit lease.
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
-Update the commit above in every upstream-sync pull request.
+Update the commit above in every upstream-sync publication record.
 
 ## Rebase conflict audit
 
@@ -52,24 +53,23 @@ All other fork commits replayed without manual conflict resolution.
 - The planned embedded profile is fresh-install-only for SQLite v1; the
   PostgreSQL/Redis/S3 distributed profile remains supported.
 
-## Candidate upstream contributions
+## Upstream compatibility
 
-- Backend-neutral database, coordination, search, audit, and object-store seams
-  that are independently useful without ChesapeakeDev policy or branding.
-- Shared backend contract tests and backend-neutral readiness reporting.
+Backend-neutral database, coordination, search, audit, object-store seams, and
+shared contract tests remain intentionally compatible with upstream. They are
+maintained in this fork and are not submitted as upstream pull requests.
 
 ## Local synchronization
 
 ```bash
 just sync-upstream-status
 just sync-upstream
-just sync-upstream-pr
-just sync-upstream-finalize
+just sync-upstream-publish-main
 ```
 
 `sync-upstream` prepares the rebased fork patch stack locally without pushing.
-`sync-upstream-pr` lease-updates the `upstream-base` and `upstream-sync` review
-branches and creates or refreshes their pull request. After approval,
-`sync-upstream-finalize` verifies the reviewed tips and lease-updates `main`.
-Conflicts must be resolved file by file, preserving upstream behavior before
-reapplying fork-specific changes behind narrow seams.
+`sync-upstream-publish-main` validates the signed, merge-free stack and
+force-with-lease updates the fork's `main`; it never creates an upstream pull
+request. Conflicts must be resolved file by file, preserving upstream behavior
+before reapplying fork-specific changes behind narrow seams, and recorded in
+this ledger.
