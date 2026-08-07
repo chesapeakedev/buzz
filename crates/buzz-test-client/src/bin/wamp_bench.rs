@@ -10,11 +10,15 @@
 //! Usage: wamp-bench <channel_uuid> <qps> <duration_secs> <conns> <latency_out>
 //! Env:   BUZZ_RELAY_URL (default ws://localhost:3000), BENCH_PRIVATE_KEY (hex)
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use anyhow::Context;
 use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
-use tokio::time::MissedTickBehavior;
+use tokio::{sync::Barrier, time::MissedTickBehavior};
 
 async fn create_channel(url: &str, keys: &Keys) -> anyhow::Result<String> {
     let channel_id = uuid::Uuid::new_v4().to_string();
@@ -77,15 +81,44 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let per_conn_interval = Duration::from_secs_f64(conns as f64 / qps);
-    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+    let connect_batch_size = std::env::var("BENCH_CONNECT_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(conns.max(1));
+    let connect_batch_delay_ms = std::env::var("BENCH_CONNECT_BATCH_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(100);
+    let connected = Arc::new(Barrier::new(conns));
 
     let mut tasks = Vec::new();
     for conn_idx in 0..conns {
         let url = url.clone();
         let keys = keys.clone();
         let channel_id = channel_id.clone();
+        let connected = Arc::clone(&connected);
         tasks.push(tokio::spawn(async move {
-            let mut client = BuzzTestClient::connect(&url, &keys).await?;
+            let batch = conn_idx / connect_batch_size;
+            if batch > 0 {
+                tokio::time::sleep(Duration::from_millis(
+                    connect_batch_delay_ms.saturating_mul(batch as u64),
+                ))
+                .await;
+            }
+            let mut client = BuzzTestClient::connect(&url, &keys)
+                .await
+                .with_context(|| format!("connect benchmark client {conn_idx}"))?;
+            // Do not start the measurement window until every requested client
+            // has authenticated. This separates connection-admission behavior
+            // from the steady-state write workload.
+            connected.wait().await;
+            // Phase the first write across one interval. Without this ramp,
+            // every connection publishes on the same tick and the benchmark
+            // measures an avoidable SQLite writer stampede instead of qps.
+            let phase = Duration::from_secs_f64(conn_idx as f64 / qps);
+            tokio::time::sleep(phase).await;
+            let deadline = Instant::now() + Duration::from_secs(duration_secs);
             let mut interval = tokio::time::interval(per_conn_interval);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             let mut latencies: Vec<f64> = Vec::new();
@@ -101,7 +134,8 @@ async fn main() -> anyhow::Result<()> {
                 let start = Instant::now();
                 let ok = client
                     .send_text_message(&keys, &channel_id, &content, 9)
-                    .await?;
+                    .await
+                    .with_context(|| format!("publish benchmark event client {conn_idx} seq {seq}"))?;
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1e3;
                 sent += 1;
                 if ok.accepted {

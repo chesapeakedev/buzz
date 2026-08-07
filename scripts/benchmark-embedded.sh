@@ -8,6 +8,8 @@
 #
 # Outputs JSON summaries, raw latency samples, container memory snapshots, and
 # a restart-time record under BUZZ_BENCH_OUTDIR (default: test-results/embedded).
+# Connections are authenticated in bounded batches so the benchmark does not
+# turn the relay's challenge path into an artificial connection stampede.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,6 +18,8 @@ image="${BUZZ_EMBEDDED_IMAGE:-ghcr.io/chesapeakedev/buzz:main}"
 levels="${BUZZ_BENCH_LEVELS:-100:50,1000:100,10000:250}"
 duration="${BUZZ_BENCH_DURATION_SECONDS:-10}"
 soak_seconds="${BUZZ_BENCH_SOAK_SECONDS:-0}"
+connect_batch_size="${BUZZ_BENCH_CONNECT_BATCH_SIZE:-25}"
+connect_batch_delay_ms="${BUZZ_BENCH_CONNECT_BATCH_DELAY_MS:-100}"
 rate_limit="${BUZZ_BENCH_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC:-100000}"
 outdir="${BUZZ_BENCH_OUTDIR:-$repo_root/test-results/embedded}"
 project="buzz-embedded-bench-${RANDOM}-${RANDOM}"
@@ -36,6 +40,8 @@ export RELAY_ACCESS=open
 export BUZZ_REQUIRE_AUTH_TOKEN=false
 export BUZZ_GIT_ENABLED=false
 export BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC="$rate_limit"
+export BENCH_CONNECT_BATCH_SIZE="$connect_batch_size"
+export BENCH_CONNECT_BATCH_DELAY_MS="$connect_batch_delay_ms"
 
 docker compose --project-name "$project" -f "$compose_file" up -d --wait
 relay_url="ws://localhost:$port"
