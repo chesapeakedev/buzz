@@ -4,6 +4,7 @@ use chrono::Utc;
 use sqlx::{QueryBuilder, Row as _, Sqlite};
 
 use super::SqliteStore;
+use crate::channel::UserRecord;
 use crate::user::{UserProfile, UserSearchProfile};
 use crate::{CommunityId, Result};
 
@@ -29,6 +30,39 @@ fn parse_profile(row: sqlx::sqlite::SqliteRow) -> Result<UserProfile> {
 }
 
 impl SqliteStore {
+    /// Bulk-fetch user records inside one community.
+    pub async fn get_users_bulk(
+        &self,
+        community: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<UserRecord>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT pubkey, display_name, avatar_url, nip05_handle FROM users \
+             WHERE community_id = ",
+        );
+        query.push_bind(community.as_uuid().to_string());
+        query.push(" AND pubkey IN (");
+        let mut separated = query.separated(", ");
+        for pubkey in pubkeys {
+            separated.push_bind(pubkey);
+        }
+        query.push(")");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(UserRecord {
+                    pubkey: row.try_get("pubkey")?,
+                    display_name: row.try_get("display_name")?,
+                    avatar_url: row.try_get("avatar_url")?,
+                    nip05_handle: row.try_get("nip05_handle")?,
+                })
+            })
+            .collect()
+    }
+
     /// Atomically assign an agent owner when no owner is currently present.
     pub async fn set_agent_owner(
         &self,
