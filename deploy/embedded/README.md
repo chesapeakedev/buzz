@@ -49,6 +49,11 @@ The benchmark is evidence for capacity planning, not a claim that SQLite or
 filesystem storage replaces PostgreSQL/Redis/S3 for high-concurrency relays. It
 raises the per-identity WebSocket event quota for synthetic traffic only; a
 normal Compose deployment retains the production default of 50 events/second.
+On the current local image, 20 clients at 5 qps each completed with zero
+rejected writes (p50 about 1.65 ms); 20 clients at 10 qps each timed out on
+later writes. Treat that as an operator-facing SQLite capacity boundary until
+another host produces stronger evidence, and keep high-concurrency workloads
+on the distributed profile.
 
 ## Release notes and known limits
 
