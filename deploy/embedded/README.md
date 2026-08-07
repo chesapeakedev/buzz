@@ -111,3 +111,16 @@ before reconnecting clients. The first stable release will publish its exact
 image tag and migration notes alongside the signed `relay-vX.Y.Z` release.
 See [MIGRATIONS.md](MIGRATIONS.md) for the SQLite upgrade contract, rollback
 boundary, and release evidence checklist.
+
+When two immutable images are available, run the upgrade smoke explicitly:
+
+```bash
+BUZZ_EMBEDDED_OLD_IMAGE=ghcr.io/chesapeakedev/buzz:<old> \
+BUZZ_EMBEDDED_NEW_IMAGE=ghcr.io/chesapeakedev/buzz:<new> \
+  ./scripts/test-embedded-upgrade.sh
+```
+
+The harness rejects identical image references, reuses one `/data` volume, and
+checks readiness plus relay-key continuity across the image change. It cannot
+prove an upgrade from a rolling `:main` image or when the prior immutable image
+is unavailable.
