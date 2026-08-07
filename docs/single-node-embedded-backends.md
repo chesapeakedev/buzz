@@ -577,10 +577,10 @@ a capacity-boundary observation, not a passing workload.
 
 | Profile | Observed result | Deployment guidance |
 | --- | --- | --- |
-| 20 clients, 5 total writes/s | 0 rejected writes, p50 ≈ 1.65 ms; restart recovered | Healthy embedded operating point on the tested host |
-| 50 clients, 1 total write/s | 0 rejected writes, p50 ≈ 1.91 ms, ≈22.72 MiB relay memory; restart recovered | Connection/resource calibration point; measure on target hardware |
-| 20 clients, 10 total writes/s | Later publishes timed out after authentication | Treat as above the tested SQLite write boundary; move to distributed storage for sustained demand |
-| 100 clients, 20 total writes/s | Later publishes timed out after authentication | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
+| 2 clients, 5 total writes/s, 1-second corrected smoke | 6 accepted writes, 0 publish errors, p50 ≈ 2.01 ms | Generator sanity check only; not a capacity target |
+| 20 clients, 5 total writes/s | Prior pre-correction run reported 0 rejected writes, p50 ≈ 1.65 ms; rerun required | Do not use as release evidence until reproduced with the corrected timer |
+| 50 clients, 1 total write/s | Prior pre-correction run reported 0 rejected writes, p50 ≈ 1.91 ms; rerun required | Do not use as release evidence until reproduced with the corrected timer |
+| 20 clients, 10 total writes/s | Prior run timed out on later writes; rerun required with corrected accounting | Treat sustained overload as a distributed-profile trigger until reproduced |
 
 As an operational rule, keep embedded deployments at or below the measured
 single-node envelope unless a target-device benchmark proves otherwise. Move to
