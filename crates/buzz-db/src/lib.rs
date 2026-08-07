@@ -1292,6 +1292,11 @@ impl Db {
         kind: i32,
         pubkey_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_latest_global_replaceable(community_id, kind, pubkey_bytes)
+                .await;
+        }
         event::get_latest_global_replaceable(
             &self.postgres().pool,
             community_id,
@@ -1384,6 +1389,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<DateTime<Utc>>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_last_message_at(community_id, channel_id).await;
+        }
         event::get_last_message_at(&self.postgres().pool, community_id, channel_id).await
     }
 
@@ -1393,6 +1401,11 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .get_last_message_at_bulk(community_id, channel_ids)
+                .await;
+        }
         event::get_last_message_at_bulk(&self.postgres().pool, community_id, channel_ids).await
     }
 
@@ -1402,6 +1415,9 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_events_by_ids(community_id, ids).await;
+        }
         event::get_events_by_ids(&self.postgres().pool, community_id, ids).await
     }
 
