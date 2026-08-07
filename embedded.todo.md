@@ -167,8 +167,8 @@ remains.
       qps recorded 20 publish errors. The practical distributed-profile trigger
       is therefore below 100 durable writes/s on this host; rerun the matrix on
       target hardware and complete the 100/1k/10k resource levels before
-      claiming the full gate. Publish errors are recorded per level while later
-      resource evidence continues.
+      claiming the full gate. Publish and connection errors are recorded per
+      level while later resource evidence continues.
 - [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
 - [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
