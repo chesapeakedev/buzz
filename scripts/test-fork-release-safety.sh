@@ -37,6 +37,15 @@ require_text .github/workflows/signed-macos-canary.yml \
 require_text .github/workflows/windows-canary.yml \
   "if: github.repository == 'block/buzz'"
 
+# Client CI stays Block-owned. ChesapeakeDev validates web locally and runs
+# relay-focused Actions only (see UPSTREAM.md intentional omissions).
+require_text .github/workflows/ci.yml \
+  "github.repository == 'block/buzz' &&"
+require_text .github/workflows/ci.yml \
+  "name: Relay CI Artifacts"
+require_text .github/workflows/sprig.yml \
+  "if: github.repository == 'block/buzz'"
+
 # The fork-owned write workflow is the guarded upstream rebase/publication
 # workflow; it updates fork main directly and never opens an upstream PR.
 require_text .github/workflows/upstream-sync.yml \

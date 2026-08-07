@@ -31,6 +31,7 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
+    if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

@@ -149,8 +149,12 @@ Before enabling Actions with write permissions:
 
 ### ChesapeakeDev CI and releases
 
-- Start with pull-request CI for Rust formatting, Clippy, unit tests, desktop
-  lint/tests, and embedded backend tests.
+- Pull-request and main CI cover Rust formatting, Clippy, unit tests, backend
+  integration, relay E2E, security, server cross-compile, and fork-release
+  safety. Desktop, mobile, web, Windows Tauri, and Sprig Actions jobs stay
+  Block-owned (`github.repository == 'block/buzz'`).
+- Web is the fork's supported client and is validated locally against a running
+  relay; it is not a ChesapeakeDev GitHub Actions lane.
 - Publish multi-architecture relay images from `main` as `main` and
   `sha-<short>`.
 - Publish stable relay images from `relay-vX.Y.Z` tags as `X.Y.Z` and `latest`;
