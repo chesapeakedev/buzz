@@ -146,6 +146,10 @@ remains.
       rejected writes (p50 1.91 ms, 22.72 MiB observed container memory) and
       restart recovery. A 100-client run is not claimed until its admission
       and write behavior is reproducible.
+- [x] SQLite write-scaling investigation recorded in the plan and operator
+      README: measure writer-gate/transaction/checkpoint/fan-out latency first,
+      then prototype bounded backpressure and write-amplification reductions;
+      do not weaken durability or introduce multi-process SQLite writers.
 - [ ] Capacity follow-up remains open: 20 clients at 10 qps each and a
       100-client, 20-qps run timed out on later writes after authentication
       succeeded. These are recorded as real SQLite write-path capacity signals,

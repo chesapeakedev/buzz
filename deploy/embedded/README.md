@@ -73,6 +73,22 @@ before sustained demand approaches 200 durable writes/s, active connections
 require a second relay process, or high availability and cross-node presence
 become requirements.
 
+### Write-scaling investigation
+
+The embedded adapter uses WAL, bounded busy timeouts, pooled reads, and one
+process-local writer gate. Durable events still use `BEGIN IMMEDIATE` for the
+event row and related index/mention work, so serialized commit time is the
+first suspected limit. Before raising the boundary, measure writer-gate wait,
+transaction/commit time, busy errors, WAL checkpoints, and post-commit fan-out
+independently.
+
+The safe optimization order is: inspect query plans and write amplification;
+prototype bounded writer-queue backpressure; reduce redundant lookups or move
+safe independent work after commit; then benchmark WAL checkpoint and
+durability settings on the target disk. Do not add multiple SQLite writers,
+share one SQLite file across relay processes, or weaken durability silently.
+Those requirements belong on PostgreSQL/Redis/S3.
+
 ## Release notes and known limits
 
 The embedded profile is a fresh-install deployment for this release line.
