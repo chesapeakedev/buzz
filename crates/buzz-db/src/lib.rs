@@ -1034,6 +1034,11 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_community_with_owner(normalized_host, &owner_pubkey)
+                .await;
+        }
         let mut tx = self.postgres().pool.begin().await?;
 
         // Serialize on the owner pubkey so concurrent creates to the same
@@ -1119,6 +1124,15 @@ impl Db {
         owner_pubkey: &str,
         protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .archive_community_owned_by(
+                    normalized_host,
+                    owner_pubkey,
+                    protected_deployment_host,
+                )
+                .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
@@ -1151,6 +1165,11 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<Option<UnarchivedCommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .unarchive_community_owned_by(normalized_host, owner_pubkey)
+                .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = NULL
@@ -4526,6 +4545,9 @@ impl Db {
         community: CommunityId,
         report: moderation::NewReport<'_>,
     ) -> Result<Uuid> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_moderation_report(community, report).await;
+        }
         moderation::insert_report(&self.postgres().pool, community, report).await
     }
 
