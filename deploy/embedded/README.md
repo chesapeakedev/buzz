@@ -135,8 +135,10 @@ replacement for S3-backed object storage.
 
 Before upgrading, stop the relay and take a complete `/data` backup. Restore
 only into an empty volume, then verify `/_readiness` and the relay identity
-before reconnecting clients. The first stable release will publish its exact
-image tag and migration notes alongside the signed `relay-vX.Y.Z` release.
+before reconnecting clients. The first stable release is
+[`relay-v0.3.0`](https://github.com/chesapeakedev/buzz/releases/tag/relay-v0.3.0);
+its image tag, migration notes, and embedded distribution archive are published
+together. Verify the checksum before installing the archive.
 See [MIGRATIONS.md](MIGRATIONS.md) for the SQLite upgrade contract, rollback
 boundary, and release evidence checklist.
 

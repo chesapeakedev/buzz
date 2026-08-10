@@ -177,8 +177,11 @@ remains.
       admission ceiling rather than an embedded capacity target. Publish and
       connection errors are recorded per level while later resource evidence continues;
       host-terminated levels now emit an explicit `benchmark_error` artifact.
-- [ ] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag.
-- [ ] 21.2 — SBOM, image attestation, migration notes, known limitations.
+- [x] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag. Published
+      `relay-v0.3.0` from fork `main` with the embedded distribution archive.
+- [x] 21.2 — SBOM, image attestation, migration notes, known limitations.
+      The tag workflow published the multi-architecture image and the release
+      archive/checksum; migration and limitation notes ship in the archive.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
       size, write/search latency, restart time) and overnight soak with restarts.
 - [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.

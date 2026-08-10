@@ -15,6 +15,10 @@ an explicit force-with-lease. This fork does not open pull requests against
 
 Update the commit above in every upstream-sync publication record.
 
+The latest attempted sync target is
+`5bf78671f45178f8de02ba18d3d321cbbf19cd1f`. It has not replaced the fork
+baseline because the semantic rebase is not yet complete.
+
 ## Rebase conflict audit
 
 The rebase from `137185e056c469ff613efc16f88044bc036a9dc6` to
@@ -33,6 +37,17 @@ resolutions:
   replayed as `42d85da35`.
 
 All other fork commits replayed without manual conflict resolution.
+
+The 2026-08-09 attempt from fork tip `f933e18b0` to upstream
+`5bf78671f45178f8de02ba18d3d321cbbf19cd1f` first conflicted in `README.md`
+while replaying `chore(fork): establish linear upstream maintenance`. The
+working resolution preserved upstream's current client-package table and
+added the fork relay URL note. The next conflict was
+`crates/buzz-db/src/lib.rs` while replaying
+`refactor(db): introduce explicit backend dispatch`: upstream's newer
+replica-fence/session layout overlaps the fork's backend-dispatch facade. The
+rebase was aborted without publishing; this conflict still requires a semantic
+resolution and must not be handled with an ours/theirs strategy.
 
 ## Intentional omissions
 
