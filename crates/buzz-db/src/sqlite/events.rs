@@ -785,7 +785,7 @@ impl SqliteStore {
             }
             builder.push(")");
         }
-        if let Some(reader) = &query.persona_reader {
+        if let Some(reader) = &query.shared_gated_reader {
             builder
                 .push(format!(" AND ({prefix}kind != 30175 OR {prefix}pubkey = "))
                 .push_bind(reader.clone())
