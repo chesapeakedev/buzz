@@ -453,8 +453,10 @@ storage dependency.
 
 For a reproducible Compose deployment, see
 [`deploy/embedded/README.md`](../deploy/embedded/README.md). It includes the
-relay-only stack, the Caddy override, and the stop-and-copy backup/restore
-procedure. Keep the distributed stack under `deploy/compose/` for scaled
+relay-only stack and the Caddy override. The canonical operator runbook and
+empirical scaling ledger is [`docs/embedded-operations.md`](embedded-operations.md);
+it owns backup/restore, troubleshooting, client connection, and capacity
+evidence. Keep the distributed stack under `deploy/compose/` for scaled
 PostgreSQL/Redis/S3 deployments.
 
 ### Access and bootstrap policy

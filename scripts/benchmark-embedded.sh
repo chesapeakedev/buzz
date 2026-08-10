@@ -9,7 +9,9 @@
 # Outputs JSON summaries, raw latency samples, container memory snapshots, and
 # a restart-time record under BUZZ_BENCH_OUTDIR (default: test-results/embedded).
 # Connections are authenticated in bounded batches so the benchmark does not
-# turn the relay's challenge path into an artificial connection stampede.
+# turn the relay's challenge path into an artificial connection stampede. The
+# synthetic identity's WebSocket-event and message quotas are raised separately
+# so a one-minute human-message quota cannot masquerade as storage overload.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,6 +23,7 @@ soak_seconds="${BUZZ_BENCH_SOAK_SECONDS:-0}"
 connect_batch_size="${BUZZ_BENCH_CONNECT_BATCH_SIZE:-25}"
 connect_batch_delay_ms="${BUZZ_BENCH_CONNECT_BATCH_DELAY_MS:-100}"
 rate_limit="${BUZZ_BENCH_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC:-100000}"
+message_rate_limit="${BUZZ_BENCH_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN:-100000}"
 outdir="${BUZZ_BENCH_OUTDIR:-$repo_root/test-results/embedded}"
 project="buzz-embedded-bench-${RANDOM}-${RANDOM}"
 port="${BUZZ_BENCH_PORT:-$((31000 + RANDOM % 1000))}"
@@ -40,6 +43,7 @@ export RELAY_ACCESS=open
 export BUZZ_REQUIRE_AUTH_TOKEN=false
 export BUZZ_GIT_ENABLED=false
 export BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC="$rate_limit"
+export BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN="$message_rate_limit"
 export BENCH_CONNECT_BATCH_SIZE="$connect_batch_size"
 export BENCH_CONNECT_BATCH_DELAY_MS="$connect_batch_delay_ms"
 
