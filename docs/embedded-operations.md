@@ -123,7 +123,11 @@ The search probe also supports a channel-scoped NIP-50 calibration. A local
 three-query run after six synthetic writes completed with p50 0.89 ms, p95
 1.54 ms, and zero errors. This is a smoke calibration only; repeat it beside
 each target-host resource level before treating search latency as a capacity
-claim.
+claim. A 100-client/100-write/s run with five searches recorded write p50 1.36
+ms, write p95 189.47 ms, search p50 4.75 ms, search p95 5.53 ms, 25.08 MiB
+container memory, 6,599 ms restart recovery, and zero publish/connection
+errors. The high write tail is retained as evidence rather than hidden by the
+median.
 
 Latest resource calibration (local Docker host, `buzz-embedded-new:local`,
 2026-08-10; one-second levels) recorded 10.79 MiB idle relay memory and
