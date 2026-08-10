@@ -187,9 +187,10 @@ Each cycle writes, searches, restarts the relay, waits for readiness, and
 records `write_status`, `search_status`, and `restart_recovery_ms` in
 `cycles.jsonl`. A three-cycle 20-client calibration passed both lanes with 60
 accepted writes per cycle, search p50 3.31–3.71 ms, search p95 3.88–3.90 ms,
-and 21.8-second restart recovery. This runner does not claim the required
-overnight messages/replacements/reactions/workflows/media/Git workload;
-preserve that long-run result separately before closing 21.3.
+and 21.8-second restart recovery. This runner does not execute the full
+overnight messages/replacements/reactions/workflows/media/Git workload; run it
+externally when operational evidence is needed. That long-running execution
+is outside this goal.
 
 For a controlled soak, set `BUZZ_BENCH_SOAK_SECONDS`; inspect
 `benchmark-levels.jsonl`, `summary-soak.json`, `stderr-soak.log`, container
@@ -217,8 +218,8 @@ PostgreSQL/Redis/S3 profile.
 ## 6. Evidence and next milestone
 
 The next milestone should extend this document rather than scatter new limits
-through deployment notes. Remaining evidence gates are search-latency coverage
-within the 100/1k/10k matrix and an overnight mixed workload with restarts.
-Upstream sync is also pending semantic reconciliation of the fork's
+through deployment notes. Search-latency coverage and bounded restart evidence
+are complete for this goal; an operator-run overnight mixed workload is an
+external follow-up. Upstream sync is also pending semantic reconciliation of the fork's
 backend-dispatch facade with upstream's newer replica-fence/session
 implementation; see [`UPSTREAM.md`](../UPSTREAM.md).
