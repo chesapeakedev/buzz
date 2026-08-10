@@ -780,8 +780,19 @@ impl Db {
     pub async fn new_sqlite(path: &std::path::Path, config: &sqlite::SqliteConfig) -> Result<Self> {
         let store = sqlite::SqliteStore::connect(path, config).await?;
         store.migrate().await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/embedded-unused")?;
+        let fence = std::sync::Arc::new(replica_fence::ReplicaFence::new());
         Ok(Self {
             backend: std::sync::Arc::new(DatabaseBackend::Sqlite(store)),
+            pool,
+            max_connections: config.max_connections,
+            read_pool: None,
+            read_max_connections: 0,
+            fence,
+            replica_read_max_age: None,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
@@ -2132,6 +2143,7 @@ impl Db {
         if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
             return store.count_events(q).await;
         }
+        event::count_events(&self.postgres().pool, q).await
     }
 
     /// [`Db::count_events`] with replica routing — same contract, rules,
@@ -2282,8 +2294,15 @@ impl Db {
                 .soft_delete_by_coordinate(community_id, kind, pubkey, d_tag)
                 .await;
         }
-        event::soft_delete_by_coordinate(&self.postgres().pool, community_id, kind, pubkey, d_tag)
-            .await
+        event::soft_delete_by_coordinate(
+            &self.postgres().pool,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
     }
 
     /// Atomically soft-delete an event and decrement thread reply counters.
@@ -2353,6 +2372,7 @@ impl Db {
         if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
             return store.get_events_by_ids(community_id, ids).await;
         }
+        event::get_events_by_ids(&self.postgres().pool, community_id, ids).await
     }
 
     /// [`Db::get_events_by_ids`] with replica routing — same contract and
@@ -4492,6 +4512,14 @@ impl Db {
                 .query_feed_activity(community, accessible_channel_ids, since, limit)
                 .await;
         }
+        feed::query_activity(
+            &self.postgres().pool,
+            community,
+            accessible_channel_ids,
+            since,
+            limit,
+        )
+        .await
     }
 
     /// [`Db::query_feed_activity`] with replica routing — BOUNDED arm only;

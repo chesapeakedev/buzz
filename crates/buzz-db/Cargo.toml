@@ -25,7 +25,6 @@ thiserror   = { workspace = true }
 nostr       = { workspace = true }
 async-trait = "0.1"
 rand        = { workspace = true }
-metrics     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

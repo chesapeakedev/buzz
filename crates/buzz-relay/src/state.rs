@@ -798,6 +798,7 @@ impl AppState {
                 &config.media.s3_secret_key,
                 &config.media.s3_bucket,
                 &config.media.s3_region,
+                config.media.s3_addressing_style,
             )
             .expect("media storage was already constructed with this S3 config"),
         );

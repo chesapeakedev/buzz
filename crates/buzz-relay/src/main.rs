@@ -581,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
                     &config.media.s3_secret_key,
                     &config.media.s3_bucket,
                     &config.media.s3_region,
+                    config.media.s3_addressing_style,
                 )
                 .map_err(|e| anyhow::anyhow!("failed to initialize Git storage: {e}"))?,
             )
