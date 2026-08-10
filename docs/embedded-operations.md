@@ -113,12 +113,14 @@ target.
 | 1,000 clients, 100 total writes/s, 1 second | 1 connection reset, no writes, ≈45.02 MiB, `/data` ≈1.47 MiB, restart ≈5.38 s | Host admission ceiling |
 | 10,000 clients, 100 total writes/s, 1 second | 8,075 `EMFILE`/resource-busy errors, no writes, ≈64.88 MiB, `/data` ≈1.47 MiB, restart ≈5.41 s | Host admission ceiling |
 | 20 clients, 5 total writes/s, 5-second soak | 40 accepted, 0 publish/connection errors, restart recovery | Short calibration only |
-| 20 clients, 5 total writes/s, 30-second soak | 40 accepted, 20 timeouts at each connection's third message | Sustained-run failure; overnight gate remains open |
+| 20 clients, 5 total writes/s, 30-second soak (pre-fix) | 40 accepted, 20 timeouts at each connection's third message | Synthetic human-message quota was not passed through Compose; not storage evidence |
+| 20 clients, 5 total writes/s, 30-second soak (corrected) | 160 accepted, 0 publish/connection errors, p50 ≈1.68 ms, p95 ≈2.16 ms; restart recovery | Sustained calibration pass; overnight gate remains open |
 
-The 30-second failure was traced to the benchmark identity exhausting the
-separate 60-messages/minute quota; the harness now raises both synthetic quotas
-and captures soak stderr. Rerun the soak after this correction before
-attributing failures to SQLite.
+The pre-fix 30-second failure was traced to the benchmark identity exhausting
+the separate 60-messages/minute quota because Compose only passed through the
+WebSocket-event override. The harness and Compose bundle now raise both
+synthetic quotas and capture soak stderr. The corrected run passed; retain the
+pre-fix result as an audit trail rather than attributing it to SQLite.
 
 Operational boundary: keep embedded workloads near the validated low-throughput
 envelope. Move to PostgreSQL/Redis/S3 before sustained demand approaches 100

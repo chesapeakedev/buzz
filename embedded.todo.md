@@ -178,7 +178,10 @@ remains.
       connection errors are recorded per level while later resource evidence continues;
       host-terminated levels now emit an explicit `benchmark_error` artifact. A
       5-second, 20-client/5-qps soak completed with 0 publish errors and restart
-      recovery; an earlier 30-second run recorded 20 publish errors, so this is
+      recovery. A pre-fix 30-second run recorded 20 quota-induced timeouts;
+      after passing the synthetic human-message quota through Compose, the
+      corrected 30-second run recorded 160 accepted writes, 0 publish/connection
+      errors, p50 ≈1.68 ms, p95 ≈2.16 ms, and restart recovery. This remains
       calibration evidence rather than the required overnight gate.
 - [x] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag. Published
       `relay-v0.3.0` from fork `main` with the embedded distribution archive.
