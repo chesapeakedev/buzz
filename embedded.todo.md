@@ -197,12 +197,12 @@ remains.
       three `EMFILE` connection errors. Restart was 5,543 ms. The raw ledger
       is in `docs/embedded-operations.md`; search-latency and overnight mixed
       restart evidence remain open.
-- [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
-      The stable `relay-v0.3.0` release is published. The upgrade harness also
-      passes with two distinct immutable local images: the pre-release embedded
-      commit `fc8abc3f0` and `relay-v0.3.0` (`buzz-embedded-prior:local` →
-      `buzz-embedded-new:local`). Publish an immutable prior embedded tag before
-      closing this gate.
+- [x] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
+      The stable `relay-v0.3.0` release and immutable prior
+      `relay-v0.2.1-embedded.1` release are published. GitHub Actions run
+      `31425422178` passed the two-image harness with GHCR-authenticated
+      manifests, readiness, one shared `/data` volume, and relay-key
+      continuity. Distinct local images also passed previously.
 - [ ] 21.5 — Daily upstream-sync workflow and first successful direct
       fork-main sync (no upstream pull request). The workflow is active, but
       the 2026-08-10 target `07a3c768d` still conflicts in

@@ -69,7 +69,10 @@ BUZZ_EMBEDDED_NEW_IMAGE=ghcr.io/chesapeakedev/buzz:0.3.0 \
 The harness rejects identical or rolling image references, reuses one `/data`
 volume, checks readiness, and verifies relay-key continuity. A local gate run
 passed with distinct images built from the pre-release embedded commit
-`fc8abc3f0` and `relay-v0.3.0`.
+`fc8abc3f0` and `relay-v0.3.0`. The published immutable pair was verified by
+GitHub Actions run
+[`31425422178`](https://github.com/chesapeakedev/buzz/actions/runs/31425422178)
+using `relay-v0.2.1-embedded.1` → `relay-v0.3.0`.
 
 ## 3. Troubleshooting
 
@@ -177,8 +180,8 @@ PostgreSQL/Redis/S3 profile.
 ## 6. Evidence and next milestone
 
 The next milestone should extend this document rather than scatter new limits
-through deployment notes. Remaining evidence gates are the full target-host
-100/1k/10k matrix, an overnight mixed workload with restarts, and publication of
-an immutable prior embedded image for the stable upgrade gate. Upstream sync is
-also pending semantic reconciliation of the fork's backend-dispatch facade with
-upstream's newer replica-fence/session implementation; see [`UPSTREAM.md`](../UPSTREAM.md).
+through deployment notes. Remaining evidence gates are search-latency coverage
+within the 100/1k/10k matrix and an overnight mixed workload with restarts.
+Upstream sync is also pending semantic reconciliation of the fork's
+backend-dispatch facade with upstream's newer replica-fence/session
+implementation; see [`UPSTREAM.md`](../UPSTREAM.md).
