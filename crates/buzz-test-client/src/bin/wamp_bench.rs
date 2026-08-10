@@ -77,7 +77,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let channel_id = if channel_arg == "auto" {
-        create_channel(&url, &keys).await?
+        let channel_id = create_channel(&url, &keys).await?;
+        if let Ok(path) = std::env::var("BENCH_CHANNEL_FILE") {
+            std::fs::write(path, &channel_id)?;
+        }
+        channel_id
     } else {
         channel_arg
     };
