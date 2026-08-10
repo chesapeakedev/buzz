@@ -106,11 +106,22 @@ sync_upstream() {
 
 lease_value() { git rev-parse --verify --quiet "refs/remotes/$origin_remote/$1" || true; }
 
+prepared_sync_branch() {
+  local current
+  current="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [[ "$current" == "$sync_branch" ]] || return 1
+  git merge-base --is-ancestor "$upstream_remote/$upstream_branch" HEAD
+}
+
 publish_main() {
   require_clean_tree
   require_identity
   fetch_branches
-  sync_upstream
+  if prepared_sync_branch; then
+    echo "Reusing prepared linear stack on '$sync_branch'."
+  else
+    sync_upstream
+  fi
   [[ "$(git rev-list --count --merges "$upstream_remote/$upstream_branch..HEAD")" == "0" ]] ||
     fail "rebased fork patch stack contains merge commits"
   validate_patch_stack "$upstream_remote/$upstream_branch"
