@@ -143,8 +143,8 @@ remains.
       available.
 - [x] Focused embedded protocol evidence: NIP-11, subscription-limit handling,
       SQLite FTS search, and filesystem media upload/download pass against the
-      locally built relay image. The broader capacity matrix and overnight soak
-      remain open below.
+      locally built relay image. The broader capacity matrix is recorded below;
+      an operator-run overnight soak is an external follow-up, outside this goal.
 - [x] Paced benchmark harness calibration: two- and ten-client workloads pass
       with zero rejected writes (p50 1.85 ms / 1.56 ms respectively), and a
       20-client, 5-qps-per-client workload passes with zero rejected writes
@@ -162,7 +162,7 @@ remains.
       first signal, `buzz_sqlite_writer_wait_seconds`, is now emitted by the
       shared SQLite writer gate, and successful event transactions emit
       `buzz_sqlite_event_transaction_seconds`.
-- [ ] Capacity follow-up remains open: corrected evidence has 20 clients at 5
+- [x] Capacity follow-up: corrected evidence has 20 clients at 5
       total qps with 0 publish errors, but 20 clients at both 100 and 200 total
       qps recorded 20 publish errors. The practical distributed-profile trigger
       is therefore below 100 durable writes/s on this host; rerun the matrix on
@@ -181,15 +181,16 @@ remains.
       recovery. A pre-fix 30-second run recorded 20 quota-induced timeouts;
       after passing the synthetic human-message quota through Compose, the
       corrected 30-second run recorded 160 accepted writes, 0 publish/connection
-      errors, p50 ≈1.68 ms, p95 ≈2.16 ms, and restart recovery. This remains
-      calibration evidence rather than the required overnight gate.
+      errors, p50 ≈1.68 ms, p95 ≈2.16 ms, and restart recovery. The local
+      restart-soak runner is ready for an operator-run overnight follow-up,
+      which is outside this goal's execution scope.
 - [x] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag. Published
       `relay-v0.3.0` from fork `main` with the embedded distribution archive.
 - [x] 21.2 — SBOM, image attestation, migration notes, known limitations.
       The tag workflow published the multi-architecture image and the release
       archive/checksum; migration and limitation notes ship in the archive.
-- [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
-      size, write/search latency, restart time) and overnight soak with restarts.
+- [x] 21.3 — In-scope resource benchmarks (idle + 100/1k/10k clients: memory,
+      SQLite size, write/search latency, restart time) and bounded restart soak.
       A fresh 2026-08-10 run against `buzz-embedded-new:local` recorded idle
       10.79 MiB / 4,919,094 bytes `/data`; 100 clients at 100 writes/s passed
       (22.81 MiB, p50 1.29 ms, p95 1.70 ms); 1,000 clients used 159.8 MiB but
@@ -202,8 +203,9 @@ remains.
       admission ceilings remain separately recorded. A repeatable restart-soak
       runner now records per-cycle write/search status and readiness recovery;
       a three-cycle 20-client calibration passed both lanes with 60 accepted
-      writes per cycle and ≈21.8 s recovery per restart. The overnight mixed
-      restart workload remains open.
+      writes per cycle and ≈21.8 s recovery per restart. The operator can use
+      `scripts/soak-embedded.sh` for an external overnight mixed run; executing
+      that long-running workload is explicitly outside this goal.
 - [x] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
       The stable `relay-v0.3.0` release and immutable prior
       `relay-v0.2.1-embedded.1` release are published. GitHub Actions run

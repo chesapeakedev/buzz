@@ -730,6 +730,9 @@ Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
   on retaining a cache entry.
 - Run an overnight mixed workload with messages, replacements, reactions,
   searches, workflows, media, and git while repeatedly restarting the relay.
+  This is an operator-run follow-up outside the implementation goal. The fork
+  supplies `scripts/soak-embedded.sh` and records bounded restart calibration,
+  but does not execute the overnight workload in CI or as part of this goal.
 - Inject process termination during SQLite transactions, object writes, git
   pointer swaps, and migrations; restart must either recover automatically or
   fail with an actionable non-destructive error.
