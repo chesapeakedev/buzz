@@ -849,7 +849,7 @@ mod tests {
 
         fence.close();
         assert!(fence.verified_through().is_none(), "close() must close");
-        assert!(!fence.covers(stored_ts - chrono::Duration::days(365)));
+        assert!(!fence.covers(ts - chrono::Duration::days(365)));
     }
 
     #[test]

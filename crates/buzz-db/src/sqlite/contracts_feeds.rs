@@ -409,6 +409,8 @@ async fn postgres_feed_contract() {
     let db = Db::new(&crate::DbConfig {
         database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned(),
         read_database_url: None,
+        read_max_connections: None,
+        replica_read_max_age_ms: 0,
         max_connections: 5,
         min_connections: 0,
         acquire_timeout_secs: 5,

@@ -2291,7 +2291,13 @@ impl Db {
     ) -> Result<bool> {
         if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
             return store
-                .soft_delete_by_coordinate(community_id, kind, pubkey, d_tag)
+                .soft_delete_by_coordinate(
+                    community_id,
+                    kind,
+                    pubkey,
+                    d_tag,
+                    deletion_created_at_secs,
+                )
                 .await;
         }
         event::soft_delete_by_coordinate(
