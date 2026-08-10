@@ -24,6 +24,10 @@ require_text .github/workflows/push-gateway-helm-chart.yml \
   "if: github.repository == 'block/buzz' && github.event_name != 'pull_request'"
 require_text .github/workflows/sprig.yml \
   "github.repository == 'block/buzz' &&"
+require_text .github/workflows/promote-oss-desktop-release.yml \
+  "if: github.repository == 'block/buzz'"
+require_text .github/workflows/sprig-image.yml \
+  "if: github.repository == 'block/buzz'"
 require_text .github/workflows/release.yml \
   "if: github.repository == 'block/buzz'"
 require_text .github/workflows/mobile-release-candidate.yml \
@@ -65,9 +69,11 @@ expected_write_workflows="$(
 .github/workflows/docker.yml
 .github/workflows/embedded-release.yml
 .github/workflows/helm-chart.yml
+.github/workflows/promote-oss-desktop-release.yml
 .github/workflows/push-gateway-helm-chart.yml
 .github/workflows/release.yml
 .github/workflows/signed-macos-canary.yml
+.github/workflows/sprig-image.yml
 .github/workflows/sprig.yml
 .github/workflows/upstream-sync.yml
 EOF

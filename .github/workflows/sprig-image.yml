@@ -52,6 +52,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'block/buzz'
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -145,7 +146,7 @@ jobs:
 
   merge:
     name: Merge multi-arch manifest
-    if: github.event_name != 'pull_request'
+    if: github.repository == 'block/buzz' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 15
