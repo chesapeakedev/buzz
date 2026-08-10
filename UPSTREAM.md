@@ -57,6 +57,14 @@ relay URL note, then `crates/buzz-db/src/lib.rs` conflicted while replaying
 evolve replica-fence/session routing since the previous attempt; the rebase was
 aborted cleanly and no fork `main` rewrite was published.
 
+An isolated semantic-resolution experiment based on fork tip `b7777d557`
+successfully replayed the dispatch seam, SQLite storage-runtime commit,
+replica-fence precision test, and Git CAS abstraction. It then reached the
+next overlap at `88b49bf3b` (`feat(db): add SQLite facade construction`), where
+upstream's replica-routing methods and the fork's SQLite dispatch branches
+modify the same `Db` methods. That experiment was aborted without publication;
+it narrows the remaining work but is not a successful sync.
+
 ## Intentional omissions
 
 - Block and Square internal release authority, signing credentials, GitHub
