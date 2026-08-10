@@ -570,30 +570,10 @@ coordination layer: the first requirement for a second relay node, cross-node
 fan-out, failover, or shared durable storage is the distributed
 PostgreSQL/Redis/S3 profile.
 
-The following measurements are calibration evidence from the locally built
-relay image, not hardware-independent service-level objectives. The
-benchmark's `qps` target is shared across all connected clients; the aggregate
-target is therefore the useful comparison. A run that records publish errors is
-a capacity-boundary observation, not a passing workload.
-
-| Profile | Observed result | Deployment guidance |
-| --- | --- | --- |
-| 2 clients, 5 total writes/s, 1-second corrected smoke | 6 accepted writes, 0 publish errors, p50 ≈ 2.01 ms | Generator sanity check only; not a capacity target |
-| 20 clients, 5 total writes/s, 2 seconds | 20 accepted writes, 0 publish errors, p50 ≈ 1.73 ms, ≈19.53 MiB; restart ≈5.39 s | Healthy corrected calibration on the tested host; extend duration on target hardware |
-| 50 clients, 1 total write/s, 2 seconds | 40 accepted writes, 10 publish errors, p50 ≈1.90 ms, ≈32.55 MiB | Exceeds the reliable tested envelope; move to distributed storage or reduce concurrency |
-| 20 clients, 100 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.26 ms; restart ≈5.38 s | Above the reliable tested envelope; use PostgreSQL/Redis/S3 for sustained demand |
-| 20 clients, 200 total writes/s, 2 seconds | 60 accepted writes, 20 publish errors, p50 ≈1.22 ms; restart ≈5.38 s | Not an embedded capacity target; use PostgreSQL/Redis/S3 |
-| 100 clients, 100 total writes/s, 1 second | 60 accepted writes, 40 publish errors, p50 ≈1.28 ms, ≈20.67 MiB, `/data` ≈4.83 MiB; restart ≈5.36 s | Resource calibration only; not a reliable write target |
-| 1,000 clients, 100 total writes/s, 1 second | 1 connection reset, no writes, ≈45.02 MiB, `/data` ≈1.47 MiB; restart ≈5.38 s | Host admission ceiling observed; not an embedded target |
-| 10,000 clients, 100 total writes/s, 1 second | 8,075 connection errors (`EMFILE`/resource-busy), no writes, ≈64.88 MiB, `/data` ≈1.47 MiB; restart ≈5.41 s | Host admission ceiling observed; not an embedded target |
-
-As an operational rule, keep embedded deployments at or below the measured
-single-node envelope unless a target-device benchmark proves otherwise. Move to
-the distributed profile before sustained demand approaches 100 durable writes/s,
-before active connections require a second relay process, or whenever a second
-relay node, shared storage, cross-node presence, or failover is desired. This
-keeps the embedded product simple while allowing Buzz's distributed backend to
-serve high-throughput installations.
+The complete measured capacity table, benchmark methodology, operator runbook,
+and current boundary are maintained in the canonical
+[`docs/embedded-operations.md`](embedded-operations.md). Keep new empirical
+results there so the next milestone has one auditable evidence ledger.
 
 #### SQLite write-scaling investigation
 
