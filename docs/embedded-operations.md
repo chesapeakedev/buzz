@@ -119,6 +119,12 @@ target.
 | 20 clients, 5 total writes/s, 30-second soak (pre-fix) | 40 accepted, 20 timeouts at each connection's third message | Synthetic human-message quota was not passed through Compose; not storage evidence |
 | 20 clients, 5 total writes/s, 30-second soak (corrected) | 160 accepted, 0 publish/connection errors, p50 ≈1.68 ms, p95 ≈2.16 ms; restart recovery | Sustained calibration pass; overnight gate remains open |
 
+The search probe also supports a channel-scoped NIP-50 calibration. A local
+three-query run after six synthetic writes completed with p50 0.89 ms, p95
+1.54 ms, and zero errors. This is a smoke calibration only; repeat it beside
+each target-host resource level before treating search latency as a capacity
+claim.
+
 Latest resource calibration (local Docker host, `buzz-embedded-new:local`,
 2026-08-10; one-second levels) recorded 10.79 MiB idle relay memory and
 4,919,094 bytes of `/data` before workload. The 100-client level accepted all
@@ -153,6 +159,11 @@ BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:0.3.0 \
 BUZZ_BENCH_LEVELS=100:50,1000:100,10000:250 \
 ./scripts/benchmark-embedded.sh
 ```
+
+Add authenticated NIP-50 samples for the last benchmark channel with
+`BUZZ_BENCH_SEARCH_ITERATIONS=20`. The resulting `summary-search.json` and
+`stderr-search.log` are appended to `benchmark-levels.jsonl` and fail the
+benchmark when the search probe cannot complete.
 
 For a controlled soak, set `BUZZ_BENCH_SOAK_SECONDS`; inspect
 `benchmark-levels.jsonl`, `summary-soak.json`, `stderr-soak.log`, container

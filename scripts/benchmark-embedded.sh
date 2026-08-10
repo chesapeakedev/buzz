@@ -12,6 +12,8 @@
 # turn the relay's challenge path into an artificial connection stampede. The
 # synthetic identity's WebSocket-event and message quotas are raised separately
 # so a one-minute human-message quota cannot masquerade as storage overload.
+# Set BUZZ_BENCH_SEARCH_ITERATIONS to add authenticated NIP-50 latency samples
+# against the last successfully created benchmark channel.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,6 +22,7 @@ image="${BUZZ_EMBEDDED_IMAGE:-ghcr.io/chesapeakedev/buzz:main}"
 levels="${BUZZ_BENCH_LEVELS:-100:50,1000:100,10000:250}"
 duration="${BUZZ_BENCH_DURATION_SECONDS:-10}"
 soak_seconds="${BUZZ_BENCH_SOAK_SECONDS:-0}"
+search_iterations="${BUZZ_BENCH_SEARCH_ITERATIONS:-0}"
 connect_batch_size="${BUZZ_BENCH_CONNECT_BATCH_SIZE:-25}"
 connect_batch_delay_ms="${BUZZ_BENCH_CONNECT_BATCH_DELAY_MS:-100}"
 rate_limit="${BUZZ_BENCH_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC:-100000}"
@@ -78,6 +81,7 @@ for entry in "${matrix[@]}"; do
   error_log="$outdir/stderr-${conns}.log"
   set +e
   BENCH_PRIVATE_KEY="$private_key" BUZZ_RELAY_URL="$relay_url" \
+    BENCH_CHANNEL_FILE="$outdir/channel.id" \
     cargo run --quiet -p buzz-test-client --bin wamp_bench -- \
       auto "$qps" "$duration" "$conns" "$sample" >"$summary" 2>"$error_log"
   run_status=$?
@@ -128,6 +132,31 @@ if ((soak_seconds > 0)); then
     echo "benchmark soak recorded an admission/publish error" >&2
   fi
   stats soak
+fi
+
+if ((search_iterations > 0)); then
+  if [[ ! -s "$outdir/channel.id" ]]; then
+    jq -n '{level: "search", benchmark_error: "no benchmark channel was created"}' \
+      >"$outdir/summary-search.json"
+    failed_levels=$((failed_levels + 1))
+  else
+    set +e
+    BENCH_PRIVATE_KEY="$private_key" BUZZ_RELAY_URL="$relay_url" \
+      cargo run --quiet -p buzz-test-client --bin search_bench -- \
+      "$(<"$outdir/channel.id")" "wamp-bench" "$search_iterations" \
+      "$outdir/summary-search.json" >/dev/null 2>"$outdir/stderr-search.log"
+    search_status=$?
+    set -e
+    if ((search_status != 0)); then
+      jq -n \
+        --arg error "search_bench exited with status $search_status" \
+        '{level: "search", benchmark_error: $error}' \
+        >"$outdir/summary-search.json"
+      failed_levels=$((failed_levels + 1))
+    fi
+  fi
+  jq --arg level "search" '. + {level: $level}' \
+    "$outdir/summary-search.json" >>"$outdir/benchmark-levels.jsonl"
 fi
 
 start_ms=$(date +%s%3N)

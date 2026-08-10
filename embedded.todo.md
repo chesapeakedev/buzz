@@ -195,8 +195,10 @@ remains.
       (22.81 MiB, p50 1.29 ms, p95 1.70 ms); 1,000 clients used 159.8 MiB but
       exited during admission/publish; and 10,000 clients used 192.9 MiB with
       three `EMFILE` connection errors. Restart was 5,543 ms. The raw ledger
-      is in `docs/embedded-operations.md`; search-latency and overnight mixed
-      restart evidence remain open.
+      is in `docs/embedded-operations.md`. The new authenticated NIP-50 probe
+      has a three-query smoke calibration (p50 0.89 ms, p95 1.54 ms, zero
+      errors); target-level search measurements and overnight mixed restart
+      evidence remain open.
 - [x] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
       The stable `relay-v0.3.0` release and immutable prior
       `relay-v0.2.1-embedded.1` release are published. GitHub Actions run
