@@ -36,6 +36,7 @@ trait EventLifecycleContract: Sync {
         kind: i32,
         pubkey: &[u8],
         d_tag: &str,
+        deletion_created_at_secs: i64,
     ) -> Result<bool>;
 }
 
@@ -99,9 +100,16 @@ macro_rules! impl_contract {
                 kind: i32,
                 pubkey: &[u8],
                 d_tag: &str,
+                deletion_created_at_secs: i64,
             ) -> Result<bool> {
-                self.soft_delete_by_coordinate(community, kind, pubkey, d_tag)
-                    .await
+                self.soft_delete_by_coordinate(
+                    community,
+                    kind,
+                    pubkey,
+                    d_tag,
+                    deletion_created_at_secs,
+                )
+                .await
             }
         }
     };
@@ -411,6 +419,7 @@ async fn run_contract(store: &impl EventLifecycleContract) {
             30_023,
             parameter_author.public_key().to_bytes().as_slice(),
             coordinate,
+            Utc::now().timestamp(),
         )
         .await
         .expect("parameter coordinate delete"));
@@ -472,6 +481,7 @@ async fn run_contract(store: &impl EventLifecycleContract) {
             30_078,
             parameter_author.public_key().to_bytes().as_slice(),
             &read_state_coordinate,
+            Utc::now().timestamp(),
         )
         .await
         .expect("read-state coordinate delete"));

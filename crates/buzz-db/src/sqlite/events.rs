@@ -1040,7 +1040,9 @@ impl SqliteStore {
         kind: i32,
         pubkey: &[u8],
         d_tag: &str,
+        deletion_created_at_secs: i64,
     ) -> Result<bool> {
+        let _ = deletion_created_at_secs;
         let _writer = self.acquire_writer().await;
         let mut connection = self.pool.acquire().await?;
         let mut transaction =
