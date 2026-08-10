@@ -185,10 +185,11 @@ BUZZ_SOAK_SEARCH_ITERATIONS=3 \
 
 Each cycle writes, searches, restarts the relay, waits for readiness, and
 records `write_status`, `search_status`, and `restart_recovery_ms` in
-`cycles.jsonl`. A two-cycle local calibration passed both lanes with 8,147 ms
-recovery per restart. This runner does not claim the required overnight
-messages/replacements/reactions/workflows/media/Git workload; preserve that
-long-run result separately before closing 21.3.
+`cycles.jsonl`. A three-cycle 20-client calibration passed both lanes with 60
+accepted writes per cycle, search p50 3.31–3.71 ms, search p95 3.88–3.90 ms,
+and 21.8-second restart recovery. This runner does not claim the required
+overnight messages/replacements/reactions/workflows/media/Git workload;
+preserve that long-run result separately before closing 21.3.
 
 For a controlled soak, set `BUZZ_BENCH_SOAK_SECONDS`; inspect
 `benchmark-levels.jsonl`, `summary-soak.json`, `stderr-soak.log`, container
