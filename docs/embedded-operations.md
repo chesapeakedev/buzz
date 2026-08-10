@@ -173,6 +173,23 @@ Add authenticated NIP-50 samples for the last benchmark channel with
 `stderr-search.log` are appended to `benchmark-levels.jsonl` and fail the
 benchmark when the search probe cannot complete.
 
+For repeated restart calibration on one data volume, use:
+
+```bash
+BUZZ_EMBEDDED_IMAGE=ghcr.io/chesapeakedev/buzz:0.3.0 \
+BUZZ_SOAK_CYCLES=3 BUZZ_SOAK_CYCLE_SECONDS=10 \
+BUZZ_SOAK_CONNECTIONS=20 BUZZ_SOAK_QPS=5 \
+BUZZ_SOAK_SEARCH_ITERATIONS=3 \
+./scripts/soak-embedded.sh
+```
+
+Each cycle writes, searches, restarts the relay, waits for readiness, and
+records `write_status`, `search_status`, and `restart_recovery_ms` in
+`cycles.jsonl`. A two-cycle local calibration passed both lanes with 8,147 ms
+recovery per restart. This runner does not claim the required overnight
+messages/replacements/reactions/workflows/media/Git workload; preserve that
+long-run result separately before closing 21.3.
+
 For a controlled soak, set `BUZZ_BENCH_SOAK_SECONDS`; inspect
 `benchmark-levels.jsonl`, `summary-soak.json`, `stderr-soak.log`, container
 memory, `/data` growth, and `restart-time.ms`. A host-terminated level must
