@@ -126,8 +126,12 @@ each target-host resource level before treating search latency as a capacity
 claim. A 100-client/100-write/s run with five searches recorded write p50 1.36
 ms, write p95 189.47 ms, search p50 4.75 ms, search p95 5.53 ms, 25.08 MiB
 container memory, 6,599 ms restart recovery, and zero publish/connection
-errors. The high write tail is retained as evidence rather than hidden by the
-median.
+errors. At 1,000 clients, three searches recorded p50 0.62 ms and p95 0.95 ms
+with 41.35 MiB memory and 5,419 ms restart, while writes hit an admission
+failure. At 10,000 clients, three searches recorded p50 0.68 ms and p95 0.90
+ms with 56.62 MiB memory and 5,501 ms restart, while five connections failed
+at the host ceiling. The high write tail and admission failures are retained
+as evidence rather than hidden by the search median.
 
 Latest resource calibration (local Docker host, `buzz-embedded-new:local`,
 2026-08-10; one-second levels) recorded 10.79 MiB idle relay memory and
