@@ -1,0 +1,51 @@
+name: Embedded upgrade verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      old_image:
+        description: "Immutable prior embedded image"
+        required: true
+        default: "ghcr.io/chesapeakedev/buzz:0.2.1-embedded.1"
+      new_image:
+        description: "Immutable replacement embedded image"
+        required: true
+        default: "ghcr.io/chesapeakedev/buzz:0.3.0"
+
+permissions: {}
+
+jobs:
+  verify:
+    if: github.repository == 'chesapeakedev/buzz'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout fork harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify distinct immutable images
+        env:
+          OLD_IMAGE: ${{ inputs.old_image }}
+          NEW_IMAGE: ${{ inputs.new_image }}
+        run: |
+          test "$OLD_IMAGE" != "$NEW_IMAGE"
+          docker buildx imagetools inspect "$OLD_IMAGE"
+          docker buildx imagetools inspect "$NEW_IMAGE"
+
+      - name: Run in-place upgrade harness
+        env:
+          BUZZ_EMBEDDED_OLD_IMAGE: ${{ inputs.old_image }}
+          BUZZ_EMBEDDED_NEW_IMAGE: ${{ inputs.new_image }}
+        run: ./scripts/test-embedded-upgrade.sh
