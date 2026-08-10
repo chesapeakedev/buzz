@@ -116,6 +116,19 @@ target.
 | 20 clients, 5 total writes/s, 30-second soak (pre-fix) | 40 accepted, 20 timeouts at each connection's third message | Synthetic human-message quota was not passed through Compose; not storage evidence |
 | 20 clients, 5 total writes/s, 30-second soak (corrected) | 160 accepted, 0 publish/connection errors, p50 ≈1.68 ms, p95 ≈2.16 ms; restart recovery | Sustained calibration pass; overnight gate remains open |
 
+Latest resource calibration (local Docker host, `buzz-embedded-new:local`,
+2026-08-10; one-second levels) recorded 10.79 MiB idle relay memory and
+4,919,094 bytes of `/data` before workload. The 100-client level accepted all
+100 writes with p50 1.29 ms and p95 1.70 ms, used 22.81 MiB, and left
+4,919,094 bytes in `/data`. The 1,000-client level used 159.8 MiB and ended
+with a `wamp_bench` admission/publish failure before producing writes. The
+10,000-client level used 192.9 MiB, left 4,919,094 bytes in `/data`, and
+recorded three connection errors; stderr identified `Too many open files`
+(`EMFILE`). Restart recovery was 5,543 ms. These are host-admission and
+resource observations, not throughput promises; preserve the raw artifacts
+(`benchmark-levels.jsonl`, `container-stats.txt`, `stderr-*.log`, and
+`restart-time.ms`) with each target-host run.
+
 The pre-fix 30-second failure was traced to the benchmark identity exhausting
 the separate 60-messages/minute quota because Compose only passed through the
 WebSocket-event override. The harness and Compose bundle now raise both

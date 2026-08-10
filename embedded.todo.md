@@ -190,6 +190,13 @@ remains.
       archive/checksum; migration and limitation notes ship in the archive.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
       size, write/search latency, restart time) and overnight soak with restarts.
+      A fresh 2026-08-10 run against `buzz-embedded-new:local` recorded idle
+      10.79 MiB / 4,919,094 bytes `/data`; 100 clients at 100 writes/s passed
+      (22.81 MiB, p50 1.29 ms, p95 1.70 ms); 1,000 clients used 159.8 MiB but
+      exited during admission/publish; and 10,000 clients used 192.9 MiB with
+      three `EMFILE` connection errors. Restart was 5,543 ms. The raw ledger
+      is in `docs/embedded-operations.md`; search-latency and overnight mixed
+      restart evidence remain open.
 - [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
       The stable `relay-v0.3.0` release is published. The upgrade harness also
       passes with two distinct immutable local images: the pre-release embedded
