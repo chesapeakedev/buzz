@@ -201,8 +201,9 @@ remains.
       p95 5.53/0.95/0.90 ms, respectively, with zero search errors; the write
       admission ceilings remain separately recorded. A repeatable restart-soak
       runner now records per-cycle write/search status and readiness recovery;
-      a two-cycle local calibration passed with 8,147 ms recovery per cycle.
-      The overnight mixed restart workload remains open.
+      a three-cycle 20-client calibration passed both lanes with 60 accepted
+      writes per cycle and ≈21.8 s recovery per restart. The overnight mixed
+      restart workload remains open.
 - [x] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
       The stable `relay-v0.3.0` release and immutable prior
       `relay-v0.2.1-embedded.1` release are published. GitHub Actions run
