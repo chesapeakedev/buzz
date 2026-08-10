@@ -176,7 +176,10 @@ remains.
       ≈64.88 MiB, ≈1.47 MiB `/data`, and ≈5.41 s restart; it confirms the host
       admission ceiling rather than an embedded capacity target. Publish and
       connection errors are recorded per level while later resource evidence continues;
-      host-terminated levels now emit an explicit `benchmark_error` artifact.
+      host-terminated levels now emit an explicit `benchmark_error` artifact. A
+      5-second, 20-client/5-qps soak completed with 0 publish errors and restart
+      recovery; an earlier 30-second run recorded 20 publish errors, so this is
+      calibration evidence rather than the required overnight gate.
 - [x] 21.1 — First `relay-vX.Y.Z` ChesapeakeDev release from a tag. Published
       `relay-v0.3.0` from fork `main` with the embedded distribution archive.
 - [x] 21.2 — SBOM, image attestation, migration notes, known limitations.

@@ -100,10 +100,29 @@ if ((soak_seconds > 0)); then
   last_entry="${matrix[${#matrix[@]}-1]}"
   conns="${last_entry%%:*}"
   qps="${last_entry#*:}"
+  set +e
   BENCH_PRIVATE_KEY="$private_key" BUZZ_RELAY_URL="$relay_url" \
     cargo run --quiet -p buzz-test-client --bin wamp_bench -- \
       auto "$qps" "$soak_seconds" "$conns" "$outdir/latency-soak.ms" \
+      >"$outdir/summary-soak.json" 2>"$outdir/stderr-soak.log"
+  soak_status=$?
+  set -e
+  if ((soak_status != 0)); then
+    jq -n \
+      --arg error "wamp_bench soak exited with status $soak_status" \
+      --argjson conns "$conns" \
+      --argjson qps "$qps" \
+      --argjson duration "$soak_seconds" \
+      '{level: "soak", conns: $conns, qps_target: $qps, duration_secs: $duration, benchmark_error: $error}' \
       >"$outdir/summary-soak.json"
+  fi
+  jq --arg level "soak:${conns}:${qps}" '. + {level: $level}' \
+    "$outdir/summary-soak.json" >>"$outdir/benchmark-levels.jsonl"
+  if ((soak_status != 0)) || jq -e '(.publish_errors + .connection_errors) > 0' \
+    "$outdir/summary-soak.json" >/dev/null; then
+    failed_levels=$((failed_levels + 1))
+    echo "benchmark soak recorded an admission/publish error" >&2
+  fi
   stats soak
 fi
 
