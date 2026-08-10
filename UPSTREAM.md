@@ -9,15 +9,18 @@ an explicit force-with-lease. This fork does not open pull requests against
 
 ## Current baseline
 
-- Current upstream base commit: `ab55fee81896d2b03edf5d2ca5012b715be2b93d`
+- Current upstream base commit: `07a3c768d619db31fee3f0590f9433cdd1213e8f`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest attempted sync target is
-`07a3c768d619db31fee3f0590f9433cdd1213e8f`. It has not replaced the fork
-baseline because the semantic rebase is not yet complete.
+The latest sync target is `07a3c768d619db31fee3f0590f9433cdd1213e8f`. The
+complete fork stack has been semantically rebased onto that base in the
+isolated `upstream-sync-attempt` worktree. It is merge-free, Conventional
+Commit compliant, DCO-signed, and passes the sync and fork-release safety
+contract tests; fork-main publication is intentionally a separate protected
+handoff.
 
 ## Rebase conflict audit
 
@@ -63,7 +66,31 @@ replica-fence precision test, and Git CAS abstraction. It then reached the
 next overlap at `88b49bf3b` (`feat(db): add SQLite facade construction`), where
 upstream's replica-routing methods and the fork's SQLite dispatch branches
 modify the same `Db` methods. That experiment was aborted without publication;
-it narrows the remaining work but is not a successful sync.
+it narrowed the remaining work but is not the successful sync recorded below.
+
+The successful 2026-08-10 rebase from fork tip `f372e1000` to
+`07a3c768d619db31fee3f0590f9433cdd1213e8f` recorded these file-level
+resolutions. Each row names the fork commit being replayed; all other commits
+replayed without conflicts:
+
+| Fork commit(s) | Conflicted file(s) | Resolution |
+| --- | --- | --- |
+| `c444dc339` | `README.md` | Kept upstream package documentation and restored the fork relay note. |
+| `cb406ad14`, `88b49bf3b`, `0a57a0385`, `322ed6cf6`, `f4f9fa681`, `071ee8e49`, `5a494f64d`, `7df93e632`, `a8844e4d8`, `9202e1c22`, `512fe6e03`, `1f8de8107`, `18378f856`, `b676ac5ef`, `9dc772337`, `00c193fba`, `a8c8a8bc3`, `b2707c186`, `033495c64`, `6c44af253`, `c34caff12`, `0ed55a4fe`, `59202cf74` | `crates/buzz-db/src/lib.rs` | Preserved upstream replica-fence/session routing and added SQLite dispatch branches with PostgreSQL fallbacks; transactional command paths use the PostgreSQL pool only after the SQLite early return. |
+| `00114fba2` | `crates/buzz-db/Cargo.toml`, `crates/buzz-db/src/lib.rs`, migration/runtime files | Retained both upstream dependencies and the SQLite runtime/migration additions. |
+| `dbe65fe4b` | `crates/buzz-db/src/replica_fence.rs` | Kept upstream precision assertions and restored the fork regression assertion against the recorded timestamp. |
+| `d9d767f7c` | `crates/buzz-relay/src/api/git/store.rs`, `crates/buzz-relay/src/state.rs` | Kept upstream S3 addressing configuration while preserving the backend-neutral Git storage seam. |
+| `db70b1cce` | `crates/buzz-relay/src/config.rs`, `crates/buzz-relay/src/state.rs` | Kept deployment-mode configuration and injected selected backend services without recreating the Git store. |
+| `b0d7d00bc` | `crates/buzz-relay/src/main.rs` | Combined embedded SQLite startup with upstream read-replica boot diagnostics. |
+| `7b4e5c942` | `crates/buzz-db/src/lib.rs` | Kept the upstream page-limit export and added SQLite blob/pointer exports. |
+| `19361a8e0` | `crates/buzz-relay/src/config.rs` | Preserved read-pool sizing and used the persisted embedded public URL only as the relay URL fallback. |
+| `8c77b18e6` | `Cargo.lock`, `crates/buzz-relay/Cargo.toml`, `crates/buzz-relay/CHANGELOG.md` | Kept upstream changelog history and added the fork's embedded `relay-v0.3.0` section/version. |
+| `f8c252dbf` | `Cargo.lock` | Retained the upstream `metrics-util` dependency. |
+
+Post-rebase compile fixes were committed as `22aa5fbae`, `7bd2921ea`, and
+`96d10959d`; they close upstream signature/configuration gaps and guard the two
+new upstream write-capable workflows (`promote-oss-desktop-release.yml` and
+`sprig-image.yml`) on `block/buzz`.
 
 ## Intentional omissions
 
