@@ -185,5 +185,10 @@ remains.
 - [ ] 21.3 — Resource benchmarks (idle + 100/1k/10k clients: memory, SQLite
       size, write/search latency, restart time) and overnight soak with restarts.
 - [ ] 21.4 — Stable release + in-place upgrade from prior embedded prerelease.
+      The stable `relay-v0.3.0` release is published. The upgrade harness also
+      passes with two distinct immutable local images: the pre-release embedded
+      commit `fc8abc3f0` and `relay-v0.3.0` (`buzz-embedded-prior:local` →
+      `buzz-embedded-new:local`). Publish an immutable prior embedded tag before
+      closing this gate.
 - [ ] 21.5 — Daily upstream-sync workflow and first successful direct
       fork-main sync (no upstream pull request).
