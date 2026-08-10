@@ -204,4 +204,7 @@ remains.
       `buzz-embedded-new:local`). Publish an immutable prior embedded tag before
       closing this gate.
 - [ ] 21.5 — Daily upstream-sync workflow and first successful direct
-      fork-main sync (no upstream pull request).
+      fork-main sync (no upstream pull request). The workflow is active, but
+      the 2026-08-10 target `07a3c768d` still conflicts in
+      `crates/buzz-db/src/lib.rs` while replaying the backend-dispatch seam;
+      the conflict and clean abort are recorded in `UPSTREAM.md`.
