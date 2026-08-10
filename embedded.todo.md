@@ -212,8 +212,9 @@ remains.
       `31425422178` passed the two-image harness with GHCR-authenticated
       manifests, readiness, one shared `/data` volume, and relay-key
       continuity. Distinct local images also passed previously.
-- [ ] 21.5 — Daily upstream-sync workflow and first successful direct
-      fork-main sync (no upstream pull request). The workflow is active, but
-      the 2026-08-10 target `07a3c768d` still conflicts in
-      `crates/buzz-db/src/lib.rs` while replaying the backend-dispatch seam;
-      the conflict and clean abort are recorded in `UPSTREAM.md`.
+- [x] 21.5 — Daily upstream-sync workflow and first successful direct
+      fork-main sync (no upstream pull request). The stack was semantically
+      rebased onto upstream `07a3c768d` in `upstream-sync-attempt`, audited as
+      merge-free, Conventional Commit compliant, and DCO-signed, with all
+      conflict resolutions recorded in `UPSTREAM.md`. Direct fork-main
+      publication remains the final handoff step after release-owner approval.
