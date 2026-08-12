@@ -103,16 +103,22 @@ git -C "$fixture/source" push -q upstream main
 git -C "$fixture/source" reset -q --hard HEAD^
 commit_file "$fixture/source" shared.txt fork "feat(test): add conflicting fork change"
 git -C "$fixture/source" push -q origin main
+conflict_err="$test_root/conflict.err"
 set +e
 (
   cd "$fixture/work"
   git pull -q --ff-only origin main
   run_sync "$fixture" sync
-) >/dev/null 2>&1
+) >/dev/null 2>"$conflict_err"
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
+grep -Fq "upstream rebase failed" "$conflict_err"
+grep -Fq "Sentinel at" "$conflict_err"
 git -C "$fixture/work" rev-parse -q --verify REBASE_HEAD >/dev/null
+sentinel_file="$(git -C "$fixture/work" rev-parse --absolute-git-dir)/upstream-sync-conflict.json"
+[[ -f "$sentinel_file" ]]
+python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d['state']=='rebase-conflict' and d['conflicted_files']==['shared.txt'] else 1)" "$sentinel_file"
 git -C "$fixture/work" rebase --abort
 
 fixture="$(setup_fixture dirty)"
@@ -133,11 +139,42 @@ set -e
 [[ "$status" -ne 0 ]]
 grep -Fq "does not point to '$fixture/upstream.git'" <<<"$output"
 
+# resolve mode errors clearly with no sentinel
+fixture="$(setup_fixture resolve_no_sentinel)"
+set +e
+output="$(cd "$fixture/work" && run_sync "$fixture" resolve 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+grep -Fq "no conflict sentinel" <<<"$output"
+
+# release mode errors when main is not rebased onto upstream
+fixture="$(setup_fixture release_unrebased)"
+commit_file "$fixture/source" upstream.txt upstream upstream-change
+git -C "$fixture/source" push -q upstream main
+set +e
+output="$(cd "$fixture/work" && run_sync "$fixture" release 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]]
+grep -Fq "run 'just sync' first" <<<"$output"
+
 grep -Fq 'sync-upstream-status:' "$script_dir/../Justfile"
 grep -Fq 'sync-upstream:' "$script_dir/../Justfile"
 grep -Fq 'sync-upstream-publish-main:' "$script_dir/../Justfile"
+grep -Eq '^sync:' "$script_dir/../Justfile"
+grep -Eq '^sync-resolve:' "$script_dir/../Justfile"
+grep -Eq '^sync-release:' "$script_dir/../Justfile"
+grep -Fq 'status|sync|resolve|release|publish-main' "$sync_script"
+grep -Fq 'codex exec' "$sync_script"
+grep -Fq 'test-embedded-upgrade.sh' "$sync_script"
+grep -Fq '0.2.1-g' "$sync_script"
+grep -Fq 'BUZZ_LAST_RELEASE_TAG' "$sync_script"
+grep -Fq 'BUZZ_SKIP_SMOKE' "$sync_script"
+grep -Fq 'upstream-sync-conflict.json' "$sync_script"
 workflow="$script_dir/../.github/workflows/upstream-sync.yml"
-grep -Fq 'cron: "17 9 * * *"' "$workflow"
+! grep -Fq 'cron: "17 9 * * *"' "$workflow"
+grep -Fq 'workflow_dispatch:' "$workflow"
 grep -Fq "github.repository == 'chesapeakedev/buzz'" "$workflow"
 grep -Fq 'contents: write' "$workflow"
 grep -Fq 'run: just sync-upstream' "$workflow"
