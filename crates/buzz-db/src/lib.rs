@@ -211,7 +211,6 @@ pub enum DatabaseBackendKind {
 #[derive(Debug)]
 struct PostgresStore {
     pool: PgPool,
-    max_connections: u32,
     read_pool: Option<PgPool>,
     fence: std::sync::Arc<replica_fence::ReplicaFence>,
 }
@@ -750,7 +749,6 @@ impl Db {
         Self {
             backend: std::sync::Arc::new(DatabaseBackend::Postgres(PostgresStore {
                 pool: pool.clone(),
-                max_connections,
                 read_pool: read_pool.clone(),
                 fence: std::sync::Arc::clone(&fence),
             })),
@@ -976,7 +974,10 @@ impl Db {
 
     /// The freshness fence gating replica routing (see [`replica_fence`]).
     pub fn fence(&self) -> &std::sync::Arc<replica_fence::ReplicaFence> {
-        &self.fence
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(store) => &store.fence,
+            DatabaseBackend::Sqlite(_) => &self.fence,
+        }
     }
 
     /// Verify the floor guard end-to-end, then spawn the background fence
@@ -1218,7 +1219,7 @@ impl Db {
             DatabaseBackend::Postgres(store) => DbPoolStats {
                 size: store.pool.size(),
                 idle: store.pool.num_idle() as u32,
-                max: store.max_connections,
+                max: self.max_connections,
             },
             DatabaseBackend::Sqlite(store) => {
                 let pool = store.adapter_pool();
@@ -1244,7 +1245,7 @@ impl Db {
             DatabaseBackend::Postgres(store) => store.read_pool.as_ref().map(|p| DbPoolStats {
                 size: p.size(),
                 idle: p.num_idle() as u32,
-                max: store.max_connections,
+                max: self.read_max_connections,
             }),
             DatabaseBackend::Sqlite(_) => None,
         }
@@ -1270,7 +1271,6 @@ impl Db {
                 },
             }));
         }
-        let mut connection = self.postgres().pool.acquire().await?;
         let mut connection = self.postgres().pool.acquire().await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
@@ -1735,7 +1735,6 @@ impl Db {
                 .create_community_with_owner(normalized_host, &owner_pubkey)
                 .await;
         }
-        let mut tx = self.postgres().pool.begin().await?;
         let mut tx = self.postgres().pool.begin().await?;
 
         // Serialize on the owner pubkey so concurrent creates to the same
@@ -5697,7 +5696,6 @@ impl Db {
                 .await;
         }
 
-        let mut tx = self.postgres().pool.begin().await?;
         let mut tx = self.postgres().pool.begin().await?;
         let (_, inserted) =
             event::insert_event_with_thread_metadata_tx(&mut tx, community_id, event, None, None)
