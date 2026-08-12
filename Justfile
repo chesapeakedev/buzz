@@ -76,6 +76,19 @@ sync-upstream:
 sync-upstream-publish-main:
     ./scripts/sync-upstream.sh publish-main
 
+# Unattended upstream sync: rebase fork onto upstream, then publish main + release + regression smoke.
+# On rebase conflict, exits non-zero with a sentinel at .git/upstream-sync-conflict.json; run 'just sync-resolve'.
+sync:
+    ./scripts/sync-upstream.sh sync && ./scripts/sync-upstream.sh release
+
+# LLM-resolve a rebase-conflict sentinel (codex + deliver-embedded-backends skill), then publish main + release.
+sync-resolve:
+    ./scripts/sync-upstream.sh resolve && ./scripts/sync-upstream.sh release
+
+# Publish the prepared rebased stack (if any), then release + regression smoke.
+sync-release:
+    ./scripts/sync-upstream.sh release
+
 # Exercise upstream-sync behavior against isolated local Git repositories
 test-sync-upstream:
     ./scripts/test-sync-upstream.sh
