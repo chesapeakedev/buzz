@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
-use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::{CommandExecution, DbError};
 use buzz_workflow::executor::TriggerContext;
