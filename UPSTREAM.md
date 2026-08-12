@@ -9,13 +9,13 @@ an explicit force-with-lease. This fork does not open pull requests against
 
 ## Current baseline
 
-- Current upstream base commit: `07a3c768d619db31fee3f0590f9433cdd1213e8f`
+- Current upstream base commit: `8b8445f5ef3338c58825194ebc008b98111a0962`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest sync target is `07a3c768d619db31fee3f0590f9433cdd1213e8f`. The
+The latest sync target is `8b8445f5ef3338c58825194ebc008b98111a0962`. The
 complete fork stack has been semantically rebased onto that base in the
 isolated `upstream-sync-attempt` worktree. It is merge-free, Conventional
 Commit compliant, DCO-signed, and passes the sync and fork-release safety
@@ -23,6 +23,16 @@ contract tests; fork-main publication is intentionally a separate protected
 handoff.
 
 ## Rebase conflict audit
+
+The successful 2026-08-12 rebase from fork tip `4a494673e` to
+`8b8445f5ef3338c58825194ebc008b98111a0962` preserved upstream datastore
+instrumentation, community-deletion fencing, replica-fence routing, and pool
+metrics while replaying the fork's database, coordination, SQLite search/audit,
+filesystem media, Git CAS, embedded configuration, and backend-injection seams.
+Conflicts were resolved in `buzz-db`, `buzz-relay`, `buzz-media`, `buzz-search`,
+`buzz-audit`, and `Cargo.lock`; dependency conflicts retained both dependency
+sets. A signed post-rebase fix removed duplicate PostgreSQL acquisitions and
+reconciled facade/store ownership exposed by warnings-denied Clippy.
 
 The rebase from `137185e056c469ff613efc16f88044bc036a9dc6` to
 `ab55fee81896d2b03edf5d2ca5012b715be2b93d` required these manual
