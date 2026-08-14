@@ -676,8 +676,10 @@ branch; do not open pull requests for fork-only work.
 Ordinary feature development uses the normal agent harness and repository
 practices. It does not require a persistent Codex goal. Keep changes in focused,
 dependency-ordered Conventional Commits, commit with `git commit -s`, preserve a
-linear history, run the narrow owning tests while iterating, and run the
-applicable `just ci` gates before pushing. Preserve the embedded program's core
+linear history, run the narrow owning tests while iterating, and run
+`just fork-ci` before pushing. The fork does not modify desktop, Tauri, web, or
+mobile code, so their checks remain upstream-owned and are not fork gates.
+Preserve the embedded program's core
 invariants when changing fork-owned code:
 
 - Keep PostgreSQL/Redis/S3 behavior supported while maintaining the embedded

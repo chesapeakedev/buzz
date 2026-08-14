@@ -338,6 +338,9 @@ desktop-e2e-pre-push: _ensure-migrations
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
+# Fork-owned gate: relay/backend formatting, lint, units, and sync contracts only
+fork-ci: fmt-check clippy test-unit test-sync-upstream
+
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
 # Run all tests (unit + integration)
