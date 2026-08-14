@@ -1201,7 +1201,13 @@ impl Db {
 
     /// Validate the minimum deletion fence catalog required by serving paths.
     pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
-        self.deletion_store().validate_serving_catalog().await
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(_) => self.deletion_store().validate_serving_catalog().await,
+            // Embedded mode has no distributed whole-community deletion
+            // executor. Its serving predicates are part of the checksum-pinned
+            // SQLite schema applied immediately before this startup check.
+            DatabaseBackend::Sqlite(_) => Ok(()),
+        }
     }
 
     /// Validate the exact live community-deletion tenant catalog for destruction.
@@ -7296,6 +7302,9 @@ mod tests {
             community.id
         );
         assert!(db.is_community_active(community.id).await.expect("active"));
+        db.validate_deletion_serving_catalog()
+            .await
+            .expect("SQLite serving fence schema is migration-owned");
         assert!(!db.spawn_fence_probe().await.expect("SQLite fence disabled"));
     }
 
