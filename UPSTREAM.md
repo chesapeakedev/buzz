@@ -10,8 +10,9 @@ repository does not use pull requests against either `chesapeakedev/buzz` or
 
 Synchronization is initiated manually from the maintained local development
 checkout when useful. There is no scheduled GitHub workflow and no prescribed
-daily or weekly cadence; the repository `just` targets are the authoritative
-preparation, validation, and publication path.
+daily or weekly cadence, and upstream synchronization is never run inside
+GitHub Actions. The repository `just` targets are the authoritative preparation,
+validation, and publication path.
 
 ## Current baseline
 

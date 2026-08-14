@@ -215,7 +215,7 @@ remains.
 - [x] 21.5 — Local manual upstream-sync tooling and first successful direct
       fork-main sync (no upstream pull request). Synchronization is initiated
       from the maintained local development checkout with no prescribed
-      cadence; the stack was semantically rebased onto upstream
+      cadence or GitHub Actions workflow; the stack was semantically rebased onto upstream
       `caa64b5e8f584a740e331887a5dd1cda32bcb958`, audited as merge-free,
       Conventional Commit compliant, and DCO-signed, and published to fork
       `main` as `d9415f79de545abbd102b257a599f13121297e86`. Conflict resolutions
