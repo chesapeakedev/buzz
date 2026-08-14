@@ -79,21 +79,29 @@ jobs:
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-release-ref-contract.sh
       - name: Desktop release candidate contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract
+        if: github.repository == 'block/buzz'
         run: |
           scripts/test-oss-desktop-promotion.sh
           scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
+        if: github.repository == 'block/buzz'
         run: |
           scripts/test-mobile-release-contract.sh
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size policy
         run: just file-size-check
+      - name: File size ratchet unit tests
+        if: github.repository == 'block/buzz'
+        run: node --test scripts/check-file-sizes-core.test.mjs
 
   rust-lint:
     name: Rust Lint
@@ -962,6 +970,7 @@ jobs:
     name: Dead Token Reference Guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.repository == 'block/buzz'
     permissions:
       contents: read
     steps:
