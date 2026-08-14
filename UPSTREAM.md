@@ -23,10 +23,12 @@ validation, and publication path.
 Update the commit above in every upstream-sync publication record.
 
 The latest sync target is `caa64b5e8f584a740e331887a5dd1cda32bcb958`. The
-complete fork stack has been semantically rebased onto that base in the
-fixed `upstream-sync` branch. It is merge-free, Conventional Commit compliant,
+complete fork stack was semantically rebased onto that base in the fixed
+`upstream-sync` branch. It is merge-free, Conventional Commit compliant,
 DCO-signed, passes the sync and fork-release safety contract tests, and was
-published directly to fork `main` as `d9415f79de545abbd102b257a599f13121297e86`.
+published directly to fork `main`. Post-sync compatibility, smoke-harness, and
+maintenance-policy fixes were then fast-forwarded normally; `origin/main` is
+the authoritative current publication tip.
 
 ## Rebase conflict audit
 
@@ -228,10 +230,15 @@ backend?” rather than “which side wins?”
 
 ## Known semantic differences
 
-- No runtime semantic differences have been introduced yet.
+- With no legacy distributed-backend variables, the relay selects the
+  single-process embedded profile: SQLite, local coordination, and filesystem
+  media storage. Explicit or compatibility-selected distributed mode retains
+  PostgreSQL, Redis, and S3 behavior.
+- Embedded Git is opt-in and intended only for bounded low-volume use; it is
+  not part of the default embedded product or compatibility smoke gate.
 - Relay images publish from fork `main` and `relay-v*` tags to
   `ghcr.io/chesapeakedev/buzz`; inherited publication targets remain disabled.
-- The planned embedded profile is fresh-install-only for SQLite v1; the
+- The embedded profile is fresh-install-only for SQLite v1; the
   PostgreSQL/Redis/S3 distributed profile remains supported.
 
 ## Upstream compatibility

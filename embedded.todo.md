@@ -31,10 +31,10 @@ Completed in the linear fork patch stack published on fork `main`:
   access bootstrap, recovery, and backend-neutral readiness
 - PR 20 — Relay-only embedded Compose/Caddy bundle and operational runbook
 
-Remaining:
-
-PR19 and PR20 are complete on `upstream-sync`; the remaining release and
-evidence work is tracked in PR21 below.
+All implementation and in-scope release evidence is complete on the published
+fork `main`. PR21 below preserves the evidence ledger; the operator-run
+overnight workload is an external operational follow-up, not an implementation
+or release gate.
 
 ## PR 16 — SQLite blob metadata tables replacing sidecar JSON
 
@@ -127,8 +127,9 @@ remains.
 
 - [x] Image-level startup/restart/backup smoke harness in
       `scripts/test-embedded-compose.sh`; Docker Compose configurations and a
-      locally built relay image pass the smoke gate. Published-image execution
-      remains a release-candidate follow-up.
+      locally built relay image pass the smoke gate. The published immutable
+      release pair was subsequently exercised by the upgrade workflow recorded
+      in 21.4.
 - [x] Release notes and known embedded limitations documented in
       `deploy/embedded/README.md` (fresh-install SQLite, distributed profile
       boundary, optional low-volume Git, and backup-before-upgrade policy).
@@ -139,8 +140,7 @@ remains.
 - [x] Two-image embedded upgrade smoke harness added at
       `scripts/test-embedded-upgrade.sh`; it refuses same-image false positives
       and checks readiness plus durable relay identity across one `/data`
-      volume. A real run remains open until an older immutable image is
-      available.
+      volume. The real immutable-image run is recorded in 21.4.
 - [x] Focused embedded protocol evidence: NIP-11, subscription-limit handling,
       SQLite FTS search, and filesystem media upload/download pass against the
       locally built relay image. The broader capacity matrix is recorded below;
