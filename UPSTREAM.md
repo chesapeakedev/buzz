@@ -40,6 +40,16 @@ Conflicts were resolved in `buzz-db`, `buzz-relay`, `buzz-media`, `buzz-search`,
 sets. A signed post-rebase fix removed duplicate PostgreSQL acquisitions and
 reconciled facade/store ownership exposed by warnings-denied Clippy.
 
+The same rebase also exposed three non-textual integration conflicts after Git
+had finished replaying commits: upstream changed the Git store field from a
+concrete reference shape to a trait object, raised the default hosted-community
+limit, and added a PostgreSQL migration whose SQLite counterpart increased the
+embedded migrator count. The fixes pass trait objects with `.as_ref()` and make
+tests derive expectations from `MAX_COMMUNITIES_PER_OWNER` and the embedded
+migrator itself. Future fork tests should prefer authoritative constants and
+registries over copied counts; these compile/test conflicts are useful sync
+evidence even though they do not appear in `git diff --diff-filter=U`.
+
 The rebase from `137185e056c469ff613efc16f88044bc036a9dc6` to
 `ab55fee81896d2b03edf5d2ca5012b715be2b93d` required these manual
 resolutions:

@@ -1,4 +1,4 @@
 interface:
-  display_name: "Deliver Embedded Backends"
-  short_description: "Advance the embedded Buzz backend goal"
-  default_prompt: "Use $deliver-embedded-backends to continue the next PR-sized slice of the embedded backend plan."
+  display_name: "Maintain Embedded Backend Fork"
+  short_description: "Rebase and validate the embedded Buzz fork"
+  default_prompt: "Use $deliver-embedded-backends to rebase upstream beneath the fork, resolve conflicts, run compatibility gates, and publish origin/main."
