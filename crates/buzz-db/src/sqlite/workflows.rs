@@ -10,8 +10,8 @@ use buzz_core::CommunityId;
 use super::SqliteStore;
 use crate::workflow::{
     hash_approval_token, ApprovalRecord, ApprovalStatus, CreateApprovalParams, RunStatus,
-    ScheduledWorkflowFireClaim, WorkflowRecord, WorkflowRunRecord, WorkflowStatus,
-    LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT,
+    ScheduledWorkflowFireClaim, WorkflowRecord, WorkflowRunFailure, WorkflowRunRecord,
+    WorkflowStatus, LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT,
 };
 use crate::{CommandExecution, DbError, Result};
 
@@ -22,7 +22,7 @@ const QUALIFIED_WORKFLOW_COLUMNS: &str = "w.id, w.community_id, w.name, \
     w.enabled, w.created_at, w.updated_at";
 const RUN_COLUMNS: &str = "community_id, id, workflow_id, status, trigger_event_id, \
     current_step, execution_trace, trigger_context, started_at, completed_at, \
-    error_message, created_at";
+    error_message, error_code, created_at";
 const APPROVAL_COLUMNS: &str = "token, workflow_id, run_id, step_id, step_index, \
     approver_spec, status, approver_pubkey, note, expires_at, created_at";
 
@@ -83,6 +83,7 @@ fn row_to_run(row: SqliteRow) -> Result<WorkflowRunRecord> {
         started_at: parse_optional_timestamp(row.try_get("started_at")?, "started_at")?,
         completed_at: parse_optional_timestamp(row.try_get("completed_at")?, "completed_at")?,
         error_message: row.try_get("error_message")?,
+        error_code: row.try_get("error_code")?,
         created_at: parse_timestamp(row.try_get("created_at")?, "created_at")?,
     })
 }
@@ -753,16 +754,19 @@ impl SqliteStore {
         status: RunStatus,
         current_step: i32,
         trace: &serde_json::Value,
-        error: Option<&str>,
+        failure: Option<WorkflowRunFailure<'_>>,
     ) -> Result<()> {
         let _writer = self.acquire_writer().await;
         let status = status.to_string();
         let now = Utc::now().timestamp_micros();
         let trace = serde_json::to_string(trace)?;
+        let (error_code, error_message) = failure
+            .map(|failure| (Some(failure.code), Some(failure.message)))
+            .unwrap_or((None, None));
         let affected = sqlx::query(
             "UPDATE workflow_runs SET \
                 status = ?, current_step = ?, execution_trace = ?, \
-                error_message = ?, \
+                error_code = ?, error_message = ?, \
                 started_at = CASE \
                     WHEN ? = 'running' AND started_at IS NULL THEN ? \
                     ELSE started_at END, \
@@ -774,7 +778,8 @@ impl SqliteStore {
         .bind(&status)
         .bind(current_step)
         .bind(trace)
-        .bind(error)
+        .bind(error_code)
+        .bind(error_message)
         .bind(&status)
         .bind(now)
         .bind(&status)

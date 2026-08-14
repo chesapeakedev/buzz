@@ -102,6 +102,98 @@ Post-rebase compile fixes were committed as `22aa5fbae`, `7bd2921ea`, and
 new upstream write-capable workflows (`promote-oss-desktop-release.yml` and
 `sprig-image.yml`) on `block/buzz`.
 
+## Conflict-minimizing design guidance
+
+Some overlap is inherent because the fork replaces concrete distributed
+backends beneath code that upstream continues to evolve. The following patterns
+from the August 2026 rebases identify where code shape can reduce the size and
+semantic risk of future conflicts.
+
+### Keep backend dispatch at stable facade boundaries
+
+Several conflicts in `buzz-db/src/lib.rs` occurred because fork commits copied
+the body of a PostgreSQL method and then inserted an early SQLite return. Later
+upstream changes to the PostgreSQL body therefore overlapped the dispatch patch.
+Prefer a small stable facade method that matches on `DatabaseBackend` and calls
+`PostgresStore::operation` or `SqliteStore::operation`; keep each backend body in
+its adapter module. This turns upstream SQL edits and fork SQLite edits into
+different-file changes.
+
+Likewise, do not retain duplicate compatibility fields on both `Db` and
+`PostgresStore`. During this rebase, replica-fence and pool-limit state existed
+in both places, which produced unused fields and made it unclear which copy was
+authoritative. Each value should have one owner, with facade accessors
+dispatching to that owner.
+
+### Move atomic operations whole, including cross-cutting guards
+
+The DM, workflow-definition, and approval conflicts came from moving SQL
+transactions out of relay handlers while upstream added deletion fencing around
+the old transaction. When transaction ownership moves into `buzz-db`, move its
+full invariant envelope too: event insertion, mutation, deletion/serving guard,
+commit, and idempotency result. A relay handler should call one domain operation
+instead of opening or decorating a backend transaction.
+
+This keeps future upstream guards visible as a single adapter concern and avoids
+the dangerous intermediate shape where SQLite dispatch is correct but the
+PostgreSQL branch silently loses an upstream fence.
+
+### Instrument adapters, not temporary orchestration helpers
+
+Upstream datastore spans conflicted with fork code that removed PostgreSQL-only
+helpers. For backend-neutral public methods, use a neutral span at the facade
+and put `system = "postgresql"` or `system = "sqlite"` instrumentation on the
+adapter method. Avoid attaching a PostgreSQL span to a helper that a later fork
+commit intends to delete. The audit-service resolution followed this pattern:
+neutral dispatch instrumentation remained on `log`, while the datastore span
+moved to `log_postgres`.
+
+### Pass backend traits consistently at call sites
+
+Media and Git conflicts repeatedly differed only between `&state.media_storage`
+and `state.media_storage.as_ref()`. Store selected services as trait objects at
+the state boundary and pass `&dyn Trait` consistently from the first seam
+commit. Avoid a transitional series where some handlers still know the concrete
+S3 type; broad mechanical call-site conversion then collides with unrelated
+upstream safety edits in those handlers.
+
+### Compose readiness and metrics from independent checks
+
+The readiness conflict combined upstream's deletion-catalog gate with the
+fork's optional Redis and backend status reporting. Model each check as a named
+backend capability (`database_ok`, `coordination_ok`, `deletion_catalog_ok`) and
+compose the final result once. Distributed-only checks should explicitly return
+`true` or `not_applicable` in embedded mode rather than being removed from the
+handler. Apply the same pattern to metrics: guard only the Redis pool metrics,
+not adjacent backend-independent deletion metrics.
+
+### Isolate additive exports, dependencies, and tests
+
+Many low-risk conflicts were adjacent-line additions in `Cargo.lock`,
+`Cargo.toml`, `lib.rs` re-export lists, and the end of large inline test modules.
+Keep re-exports one symbol per line, sort workspace dependencies consistently,
+and put backend contract tests in dedicated test files or backend modules.
+These choices let Git merge independent additions and keep lockfile conflicts
+mechanical: regenerate from the already-resolved manifests rather than choosing
+one side.
+
+Schema evolution needs the same pairing discipline. Upstream added
+`workflow_runs.error_code` to the PostgreSQL record while the fork's SQLite
+adapter still accepted only a free-form error string. The conflict compiled
+far enough to expose a missing facade argument and row field. When an upstream
+domain record or method changes, search every backend adapter and add the
+paired SQLite migration in the same semantic-resolution commit.
+
+### Treat safety changes as additive constraints
+
+When upstream adds a fence, validation, metric, or regression test, preserve it
+by default and adapt the fork seam around it. Examples from this rebase include
+retaining community-deletion leases around media upload and Git CAS, keeping the
+exclusive PostgreSQL migration/destruction lock alongside the SQLite migrator,
+and retaining upstream atomic-replacement tests next to fork DM command tests.
+The preferred resolution question is “where does this invariant live for each
+backend?” rather than “which side wins?”
+
 ## Intentional omissions
 
 - Block and Square internal release authority, signing credentials, GitHub

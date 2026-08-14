@@ -1465,6 +1465,13 @@ impl Db {
     pub fn deletion_store(&self) -> deletion::DeletionStore {
         deletion::DeletionStore::new(self.pool.clone())
     }
+
+    #[cfg(test)]
+    pub(crate) async fn begin_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        self.postgres().pool.begin().await.map_err(Into::into)
+    }
     /// Returns the community mapped to a normalized request host, if one exists.
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
@@ -5496,7 +5503,7 @@ impl Db {
     ) -> Result<()> {
         if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
             return store
-                .update_workflow_run(community_id, id, status, current_step, trace, error)
+                .update_workflow_run(community_id, id, status, current_step, trace, failure)
                 .await;
         }
         workflow::update_workflow_run(
