@@ -9,13 +9,13 @@ an explicit force-with-lease. This fork does not open pull requests against
 
 ## Current baseline
 
-- Current upstream base commit: `8b8445f5ef3338c58825194ebc008b98111a0962`
+- Current upstream base commit: `caa64b5e8f584a740e331887a5dd1cda32bcb958`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest sync target is `8b8445f5ef3338c58825194ebc008b98111a0962`. The
+The latest sync target is `caa64b5e8f584a740e331887a5dd1cda32bcb958`. The
 complete fork stack has been semantically rebased onto that base in the
 isolated `upstream-sync-attempt` worktree. It is merge-free, Conventional
 Commit compliant, DCO-signed, and passes the sync and fork-release safety
@@ -24,8 +24,8 @@ handoff.
 
 ## Rebase conflict audit
 
-The successful 2026-08-12 rebase from fork tip `4a494673e` to
-`8b8445f5ef3338c58825194ebc008b98111a0962` preserved upstream datastore
+The successful 2026-08-14 rebase from fork tip `4a494673e` to
+`caa64b5e8f584a740e331887a5dd1cda32bcb958` preserved upstream datastore
 instrumentation, community-deletion fencing, replica-fence routing, and pool
 metrics while replaying the fork's database, coordination, SQLite search/audit,
 filesystem media, Git CAS, embedded configuration, and backend-injection seams.
