@@ -123,9 +123,9 @@ just sync-upstream-publish-main
 `sync-upstream` rebases fork-only commits onto the current upstream base on the
 fixed `upstream-sync` branch without pushing. `sync-upstream-publish-main`
 validates the rebased, signed, merge-free stack and force-with-lease updates the
-fork's `main`; it never contacts GitHub's pull-request API. The daily workflow
-uses the repository `GITHUB_TOKEN` only for the guarded branch update. If a
-rebase conflicts, use the repository-scoped
+fork's `main`; it never contacts GitHub's pull-request API. Synchronization and
+publication run only from the maintained local checkout; no scheduled or
+GitHub-hosted sync is part of the fork workflow. If a rebase conflicts, use the repository-scoped
 `$deliver-embedded-backends` Codex skill to reproduce and resolve it locally.
 
 ### Remove Block-specific release authority

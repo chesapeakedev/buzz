@@ -117,7 +117,7 @@ target.
 | 10,000 clients, 100 total writes/s, 1 second | 8,075 `EMFILE`/resource-busy errors, no writes, ≈64.88 MiB, `/data` ≈1.47 MiB, restart ≈5.41 s | Host admission ceiling |
 | 20 clients, 5 total writes/s, 5-second soak | 40 accepted, 0 publish/connection errors, restart recovery | Short calibration only |
 | 20 clients, 5 total writes/s, 30-second soak (pre-fix) | 40 accepted, 20 timeouts at each connection's third message | Synthetic human-message quota was not passed through Compose; not storage evidence |
-| 20 clients, 5 total writes/s, 30-second soak (corrected) | 160 accepted, 0 publish/connection errors, p50 ≈1.68 ms, p95 ≈2.16 ms; restart recovery | Sustained calibration pass; overnight gate remains open |
+| 20 clients, 5 total writes/s, 30-second soak (corrected) | 160 accepted, 0 publish/connection errors, p50 ≈1.68 ms, p95 ≈2.16 ms; restart recovery | Sustained calibration pass; overnight operation is an external follow-up |
 
 The search probe also supports a channel-scoped NIP-50 calibration. A local
 three-query run after six synthetic writes completed with p50 0.89 ms, p95
