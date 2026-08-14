@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 upstream_ref="${BUZZ_UPSTREAM_SMOKE_REF:-upstream/main}"
 test_root="$(mktemp -d)"
-upstream_tree="$test_root/upstream"
+upstream_tree="$repo_root/target/upstream-smoke-worktree"
 upstream_target="$repo_root/target/upstream-smoke"
 embedded_data="$test_root/embedded-data"
 embedded_port="${BUZZ_FORK_SMOKE_PORT:-3001}"
@@ -60,6 +60,8 @@ git -C "$repo_root" rev-parse --verify "$upstream_ref^{commit}" >/dev/null \
   || fail "missing $upstream_ref; fetch upstream first"
 git -C "$repo_root" merge-base --is-ancestor "$upstream_ref" HEAD \
   || fail "$upstream_ref is not an ancestor of fork HEAD; finish the rebase first"
+[[ ! -e "$upstream_tree" ]] \
+  || fail "stale upstream smoke worktree at $upstream_tree; remove it with git worktree remove"
 
 tests=(
   test_connect_and_authenticate
