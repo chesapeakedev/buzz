@@ -37,8 +37,8 @@ pull-request review gate.
 
 Ordinary changes use a normal fast-forward push. Upstream synchronization is
 the sole intentional history rewrite and is run manually from the local
-development checkout; there is no scheduled GitHub workflow or required sync
-cadence. Prepare it with `just sync-upstream` and publish it with
+development checkout; there is no upstream-sync GitHub Actions workflow or
+required sync cadence. Prepare it with `just sync-upstream` and publish it with
 `just sync-upstream-publish-main`, which validates the complete patch stack and
 uses an exact `--force-with-lease`. Do not open a pull request against either
 the fork or `block/buzz` unless the user explicitly asks for one.

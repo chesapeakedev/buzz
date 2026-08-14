@@ -91,8 +91,8 @@ URL.
 
 - Treat `upstream/main` as the base for a maintained, linear fork patch stack.
 - Run synchronization manually from the maintained local development checkout
-  when the operator chooses; there is no required cadence or scheduled GitHub
-  workflow. Fetch upstream, rebase the fork-only commit series onto the current
+  when the operator chooses; there is no required cadence or upstream-sync
+  GitHub Actions workflow. Fetch upstream, rebase the fork-only commit series onto the current
   `upstream/main`, and publish the resulting linear stack directly to the
   fork's `main` with `--force-with-lease`.
 - Keep the `upstream-sync` working branch local/ephemeral; it is not an

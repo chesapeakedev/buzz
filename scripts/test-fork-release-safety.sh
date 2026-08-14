@@ -50,16 +50,13 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/sprig.yml \
   "if: github.repository == 'block/buzz'"
 
-# The fork-owned write workflow is the guarded upstream rebase/publication
-# workflow; it updates fork main directly and never opens an upstream PR.
-require_text .github/workflows/upstream-sync.yml \
-  "if: github.repository == 'chesapeakedev/buzz'"
-require_text .github/workflows/upstream-sync.yml "contents: write"
-if grep -Fq 'pull-requests:' .github/workflows/upstream-sync.yml; then
-  echo "Error: upstream sync must not request pull-request write access" >&2
+# Upstream synchronization is deliberately local-only. Reintroducing an
+# Actions workflow would spend runner minutes and create an unnecessary
+# repository-write surface.
+if [[ -e .github/workflows/upstream-sync.yml ]]; then
+  echo "Error: upstream synchronization must remain local-only" >&2
   exit 1
 fi
-require_text .github/workflows/upstream-sync.yml "sync-upstream-publish-main"
 
 # Adding another write-capable workflow is a deliberate security decision. This
 # inventory makes new publication or repository-mutation surfaces fail CI until
@@ -75,7 +72,6 @@ expected_write_workflows="$(
 .github/workflows/signed-macos-canary.yml
 .github/workflows/sprig-image.yml
 .github/workflows/sprig.yml
-.github/workflows/upstream-sync.yml
 EOF
 )"
 actual_write_workflows="$(
