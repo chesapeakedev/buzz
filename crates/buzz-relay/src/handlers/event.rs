@@ -705,10 +705,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        match buzz_deletion::store(&state.db)
-            .is_serving_active(conn.tenant.community())
-            .await
-        {
+        match state.db.is_community_active(conn.tenant.community()).await {
             Ok(true) => {}
             Ok(false) => {
                 reject("restricted");
