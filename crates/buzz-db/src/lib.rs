@@ -2093,6 +2093,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.query_events(q).await;
+        }
         let predicate = RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
         match self.route_read(path, predicate).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
@@ -2128,6 +2131,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.query_events(q).await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::query_events_on(&mut tx, q).await {
@@ -7302,6 +7308,14 @@ mod tests {
             community.id
         );
         assert!(db.is_community_active(community.id).await.expect("active"));
+        assert!(db
+            .query_events_routed(
+                "sqlite_constructor",
+                &EventQuery::for_community(community.id),
+            )
+            .await
+            .expect("routed SQLite query")
+            .is_empty());
         db.validate_deletion_serving_catalog()
             .await
             .expect("SQLite serving fence schema is migration-owned");
