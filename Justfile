@@ -93,6 +93,10 @@ sync-release:
 test-sync-upstream:
     ./scripts/test-sync-upstream.sh
 
+# Exercise the same relay protocol workload against upstream distributed and fork embedded tips
+smoke-upstream-fork:
+    ./scripts/test-upstream-fork-smoke.sh
+
 # Verify that fork CI cannot publish through upstream-owned release lanes
 test-fork-release-safety:
     ./scripts/test-fork-release-safety.sh

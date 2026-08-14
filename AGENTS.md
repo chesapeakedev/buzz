@@ -663,3 +663,33 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+---
+
+## ChesapeakeDev Fork Development
+
+This fork is developed and synchronized manually from a local development
+machine. There is no scheduled upstream-sync job and no GitHub Actions workflow
+may perform an upstream sync. Work is committed directly to the fork's `main`
+branch; do not open pull requests for fork-only work.
+
+Ordinary feature development uses the normal agent harness and repository
+practices. It does not require a persistent Codex goal. Keep changes in focused,
+dependency-ordered Conventional Commits, commit with `git commit -s`, preserve a
+linear history, run the narrow owning tests while iterating, and run the
+applicable `just ci` gates before pushing. Preserve the embedded program's core
+invariants when changing fork-owned code:
+
+- Keep PostgreSQL/Redis/S3 behavior supported while maintaining the embedded
+  SQLite/local/filesystem adapters behind narrow backend-neutral seams.
+- Keep tenant predicates, durable security state, thread counters, atomic
+  object writes, traversal protection, and restart recovery intact.
+- Prefer shared backend contract tests and protocol-level regression tests over
+  tests coupled to one adapter's representation.
+- Keep generally useful refactors separate from fork branding, release
+  authority, embedded defaults, and deployment policy when practical.
+
+Use `$deliver-embedded-backends` only for maintaining the fork against a new
+`upstream/main`: rebasing the fork stack, resolving semantic conflicts, running
+the upstream-versus-embedded compatibility smoke, and publishing the validated
+linear stack directly to `origin/main`.
