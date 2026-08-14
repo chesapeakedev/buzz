@@ -65,11 +65,13 @@ Also run:
 
 ```bash
 just test-sync-upstream
-just ci
+just fork-ci
 git diff --check
 ```
 
-Run focused checks for every conflicted subsystem first. Audit every fork-owned
+Run focused checks for every conflicted subsystem first. Do not run desktop,
+Tauri, web, or mobile gates: this fork does not change client code and upstream
+owns those checks. Audit every fork-owned
 commit in the rebased range for a valid DCO trailer, expected identity,
 Conventional Commit subject, and absence of merge commits.
 
