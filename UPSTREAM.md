@@ -4,8 +4,9 @@ This repository is the public ChesapeakeDev fork of
 [`block/buzz`](https://github.com/block/buzz). Canonical upstream changes remain
 an ongoing input. Fork-only commits are replayed onto the current upstream base
 in a temporary `upstream-sync` branch before the fork's `main` is updated with
-an explicit force-with-lease. This fork does not open pull requests against
-`block/buzz`.
+an explicit force-with-lease. Fork changes publish directly to `main`; this
+repository does not use pull requests against either `chesapeakedev/buzz` or
+`block/buzz` unless an operator explicitly requests one.
 
 ## Current baseline
 
@@ -17,10 +18,9 @@ Update the commit above in every upstream-sync publication record.
 
 The latest sync target is `caa64b5e8f584a740e331887a5dd1cda32bcb958`. The
 complete fork stack has been semantically rebased onto that base in the
-isolated `upstream-sync-attempt` worktree. It is merge-free, Conventional
-Commit compliant, DCO-signed, and passes the sync and fork-release safety
-contract tests; fork-main publication is intentionally a separate protected
-handoff.
+fixed `upstream-sync` branch. It is merge-free, Conventional Commit compliant,
+DCO-signed, passes the sync and fork-release safety contract tests, and was
+published directly to fork `main` as `d9415f79de545abbd102b257a599f13121297e86`.
 
 ## Rebase conflict audit
 

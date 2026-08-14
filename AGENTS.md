@@ -23,6 +23,21 @@ against that direction. Scale validation to the change's risk and exercise the
 real workflow for user-visible or integration behavior when practical; green CI
 and runtime evidence answer different questions.
 
+## ChesapeakeDev Fork Workflow
+
+When `origin` is `chesapeakedev/buzz`, changes are committed and pushed
+directly to `main`; this fork does not use pull requests or review approvals as
+a publication gate. Keep the branch linear, create every commit with DCO
+sign-off (`git commit -s`), run the applicable repository checks before
+pushing, and preserve focused, reviewable commits even though there is no PR.
+
+Ordinary changes use a normal fast-forward push. Upstream synchronization is
+the sole intentional history rewrite: prepare it with `just sync-upstream` and
+publish it with `just sync-upstream-publish-main`, which validates the complete
+patch stack and uses an exact `--force-with-lease`. Do not open a pull request
+against either the fork or `block/buzz` unless the user explicitly asks for
+one.
+
 ---
 
 ## Ecosystem

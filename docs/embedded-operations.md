@@ -220,6 +220,6 @@ PostgreSQL/Redis/S3 profile.
 The next milestone should extend this document rather than scatter new limits
 through deployment notes. Search-latency coverage and bounded restart evidence
 are complete for this goal; an operator-run overnight mixed workload is an
-external follow-up. Upstream sync is also pending semantic reconciliation of the fork's
-backend-dispatch facade with upstream's newer replica-fence/session
-implementation; see [`UPSTREAM.md`](../UPSTREAM.md).
+external follow-up. The fork's backend-dispatch facade has been semantically
+reconciled with upstream's replica-fence/session implementation and published
+as a linear direct-to-`main` stack; see [`UPSTREAM.md`](../UPSTREAM.md).

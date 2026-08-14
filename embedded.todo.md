@@ -6,7 +6,7 @@ slice must keep the PostgreSQL/Redis/S3 path green and deployable.
 
 ## Status snapshot
 
-Completed in the linear fork patch stack (to be published on fork `main`):
+Completed in the linear fork patch stack published on fork `main`:
 
 - PR 1 — Fork hygiene, upstream policy, non-publishing CI
 - PR 2 — ChesapeakeDev relay image publishing and release guardrails
@@ -213,8 +213,9 @@ remains.
       manifests, readiness, one shared `/data` volume, and relay-key
       continuity. Distinct local images also passed previously.
 - [x] 21.5 — Daily upstream-sync workflow and first successful direct
-      fork-main sync (no upstream pull request). The stack was semantically
-      rebased onto upstream `07a3c768d` in `upstream-sync-attempt`, audited as
-      merge-free, Conventional Commit compliant, and DCO-signed, with all
-      conflict resolutions recorded in `UPSTREAM.md`. Direct fork-main
-      publication remains the final handoff step after release-owner approval.
+      fork-main sync (no upstream pull request). The daily schedule is restored;
+      the stack was semantically rebased onto upstream
+      `caa64b5e8f584a740e331887a5dd1cda32bcb958`, audited as merge-free,
+      Conventional Commit compliant, and DCO-signed, and published to fork
+      `main` as `d9415f79de545abbd102b257a599f13121297e86`. Conflict resolutions
+      and conflict-minimizing design guidance are recorded in `UPSTREAM.md`.

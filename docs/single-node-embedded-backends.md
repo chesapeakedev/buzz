@@ -70,15 +70,13 @@ URL.
    git fetch upstream --tags
    ```
 
-3. Keep `main` as the default branch. Protect it with:
-   - pull requests required for ordinary feature changes;
-   - at least one approval;
-   - required conversation resolution;
-   - required ChesapeakeDev CI checks;
-   - linear history required;
-   - force updates restricted to the guarded upstream-sync workflow;
-   - branch deletion disabled;
-   - signed commits encouraged, with the existing DCO check retained.
+3. Keep `main` as the default branch and publish fork work directly to it; the
+   ChesapeakeDev fork does not use pull requests or review approvals as a
+   publication gate. Protect the branch against deletion and require linear
+   history. Ordinary updates are fast-forward pushes after local checks.
+   Intentional force updates are reserved by convention for the guarded
+   upstream-sync command, which validates the complete signed stack and uses an
+   exact force-with-lease. Retain the existing DCO check.
 
 4. Create labels for `fork-maintenance`, `embedded`, `sqlite`, `coordination`,
    `filesystem-storage`, `upstream-sync`, and `release`.
@@ -519,7 +517,7 @@ passes fan-out, presence, moderation disconnect, replay, and rate-limit tests.
 
 ### Epic 3: SQLite relational backend
 
-Port in vertical slices, keeping each pull request usable:
+Port in vertical slices, keeping each direct-to-main commit series usable:
 
 1. communities, tenant resolution, relay membership, identities, and API tokens;
 2. event insert/query, replacement rules, channels, DMs, threads, reactions,
