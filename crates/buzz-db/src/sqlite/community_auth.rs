@@ -667,10 +667,11 @@ mod tests {
             CreateCommunityWithOwnerResult::HostExists
         );
 
-        for host in ["two.example.test", "three.example.test"] {
+        for index in 2..=crate::relay_members::MAX_COMMUNITIES_PER_OWNER {
+            let host = format!("{index}.example.test");
             assert!(matches!(
                 store
-                    .create_community_with_owner(host, &owner)
+                    .create_community_with_owner(&host, &owner)
                     .await
                     .expect("within owner limit"),
                 CreateCommunityWithOwnerResult::Created(_)
@@ -678,7 +679,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .create_community_with_owner("four.example.test", &owner)
+                .create_community_with_owner("over-limit.example.test", &owner)
                 .await
                 .expect("owner limit"),
             CreateCommunityWithOwnerResult::LimitReached

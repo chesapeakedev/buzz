@@ -2407,7 +2407,7 @@ mod track_c_tests {
     ) -> PushContext {
         let tenant = TenantContext::resolved(community, host);
         let (hydrated, parent_state) = hydrate_for_write(
-            &state.git_store,
+            state.git_store.as_ref(),
             &tenant,
             &owner,
             &repo,
