@@ -2173,11 +2173,7 @@ async fn ingest_event_inner(
     // external side effects only), so the shared WS/HTTP seam must refuse
     // writes once the community leaves the active lifecycle state. Row churn
     // inside the remaining race window is swept by the destructive DB stage.
-    map_serving_fence_state(
-        buzz_deletion::store(&state.db)
-            .is_serving_active(tenant.community())
-            .await,
-    )?;
+    map_serving_fence_state(state.db.is_community_active(tenant.community()).await)?;
 
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(

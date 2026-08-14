@@ -1220,22 +1220,26 @@ async fn main() -> anyhow::Result<()> {
                     metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
                 }
 
-                let deletion_store = pool_state.db.deletion_store();
-                match deletion_store.reap_expired_serving_write_leases(1000).await {
-                    Ok(reaped) => metrics::counter!("buzz_deletion_serving_leases_reaped_total")
-                        .increment(reaped),
-                    Err(error) => tracing::warn!(%error, "serving-lease reaper failed"),
-                }
-                match deletion_store.serving_lease_stats().await {
-                    Ok(stats) => {
-                        metrics::gauge!("buzz_deletion_serving_leases_active")
-                            .set(stats.active as f64);
-                        metrics::gauge!("buzz_deletion_serving_leases_expired")
-                            .set(stats.expired as f64);
-                        metrics::gauge!("buzz_deletion_serving_leases_dead_tuples")
-                            .set(stats.dead_tuples as f64);
+                if pool_state.db.backend_kind() == buzz_db::DatabaseBackendKind::Postgres {
+                    let deletion_store = pool_state.db.deletion_store();
+                    match deletion_store.reap_expired_serving_write_leases(1000).await {
+                        Ok(reaped) => {
+                            metrics::counter!("buzz_deletion_serving_leases_reaped_total")
+                                .increment(reaped)
+                        }
+                        Err(error) => tracing::warn!(%error, "serving-lease reaper failed"),
                     }
-                    Err(error) => tracing::warn!(%error, "serving-lease metrics failed"),
+                    match deletion_store.serving_lease_stats().await {
+                        Ok(stats) => {
+                            metrics::gauge!("buzz_deletion_serving_leases_active")
+                                .set(stats.active as f64);
+                            metrics::gauge!("buzz_deletion_serving_leases_expired")
+                                .set(stats.expired as f64);
+                            metrics::gauge!("buzz_deletion_serving_leases_dead_tuples")
+                                .set(stats.dead_tuples as f64);
+                        }
+                        Err(error) => tracing::warn!(%error, "serving-lease metrics failed"),
+                    }
                 }
             }
         });
