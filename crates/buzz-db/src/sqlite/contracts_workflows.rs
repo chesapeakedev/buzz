@@ -8,7 +8,9 @@ use buzz_core::CommunityId;
 
 use super::{SqliteConfig, SqliteStore};
 use crate::channel::ChannelRecord;
-use crate::workflow::{RunStatus, WorkflowRecord, WorkflowRunRecord, WorkflowStatus};
+use crate::workflow::{
+    RunStatus, WorkflowRecord, WorkflowRunFailure, WorkflowRunRecord, WorkflowStatus,
+};
 use crate::{Db, DbError, EnsuredCommunityRecord, Result};
 
 #[async_trait]
@@ -111,7 +113,7 @@ trait WorkflowContract: Sync {
         status: RunStatus,
         step: i32,
         trace: &serde_json::Value,
-        error: Option<&str>,
+        failure: Option<WorkflowRunFailure<'_>>,
     ) -> Result<()>;
 }
 
@@ -300,9 +302,9 @@ macro_rules! impl_contract {
                 status: RunStatus,
                 step: i32,
                 trace: &serde_json::Value,
-                error: Option<&str>,
+                failure: Option<WorkflowRunFailure<'_>>,
             ) -> Result<()> {
-                self.update_workflow_run(community, id, status, step, trace, error)
+                self.update_workflow_run(community, id, status, step, trace, failure)
                     .await
             }
         }

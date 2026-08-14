@@ -5436,7 +5436,7 @@ impl Db {
     ) -> Result<()> {
         if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
             return store
-                .update_workflow_run(community_id, id, status, current_step, trace, error)
+                .update_workflow_run(community_id, id, status, current_step, trace, failure)
                 .await;
         }
         workflow::update_workflow_run(
