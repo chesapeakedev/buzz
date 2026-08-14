@@ -9,6 +9,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 upstream_ref="${BUZZ_UPSTREAM_SMOKE_REF:-upstream/main}"
 test_root="$(mktemp -d)"
 upstream_tree="$test_root/upstream"
+upstream_target="$repo_root/target/upstream-smoke"
 embedded_data="$test_root/embedded-data"
 embedded_port="${BUZZ_FORK_SMOKE_PORT:-3001}"
 upstream_port="${BUZZ_UPSTREAM_SMOKE_PORT:-3100}"
@@ -118,7 +119,7 @@ INSERT INTO communities (id, host)
 VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:$upstream_port')
 ON CONFLICT (lower(host)) DO NOTHING;
 SQL
-  cargo build -p buzz-relay
+  CARGO_TARGET_DIR="$upstream_target" cargo build -p buzz-relay
 )
 env \
   DATABASE_URL="postgres://buzz:buzz_dev@127.0.0.1:$postgres_port/buzz" \
@@ -134,7 +135,7 @@ env \
   BUZZ_HEALTH_PORT="$((upstream_port + 1))" \
   BUZZ_METRICS_PORT="$((upstream_port + 2))" \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
-  "$upstream_tree/target/debug/buzz-relay" >"$test_root/upstream.log" 2>&1 &
+  "$upstream_target/debug/buzz-relay" >"$test_root/upstream.log" 2>&1 &
 upstream_pid=$!
 for _ in $(seq 1 60); do
   curl --fail --silent "http://127.0.0.1:$upstream_port/_readiness" >/dev/null 2>&1 && break
