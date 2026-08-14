@@ -8,6 +8,11 @@ an explicit force-with-lease. Fork changes publish directly to `main`; this
 repository does not use pull requests against either `chesapeakedev/buzz` or
 `block/buzz` unless an operator explicitly requests one.
 
+Synchronization is initiated manually from the maintained local development
+checkout when useful. There is no scheduled GitHub workflow and no prescribed
+daily or weekly cadence; the repository `just` targets are the authoritative
+preparation, validation, and publication path.
+
 ## Current baseline
 
 - Current upstream base commit: `caa64b5e8f584a740e331887a5dd1cda32bcb958`

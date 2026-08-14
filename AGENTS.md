@@ -30,13 +30,18 @@ directly to `main`; this fork does not use pull requests or review approvals as
 a publication gate. Keep the branch linear, create every commit with DCO
 sign-off (`git commit -s`), run the applicable repository checks before
 pushing, and preserve focused, reviewable commits even though there is no PR.
+The GitHub `CI` workflow runs on every push to `main` as a deterministic
+post-push backstop for formatting, linting, tests, security checks, and other
+repository gates. Treat a failure there as work to fix promptly; it is not a
+pull-request review gate.
 
 Ordinary changes use a normal fast-forward push. Upstream synchronization is
-the sole intentional history rewrite: prepare it with `just sync-upstream` and
-publish it with `just sync-upstream-publish-main`, which validates the complete
-patch stack and uses an exact `--force-with-lease`. Do not open a pull request
-against either the fork or `block/buzz` unless the user explicitly asks for
-one.
+the sole intentional history rewrite and is run manually from the local
+development checkout; there is no scheduled GitHub workflow or required sync
+cadence. Prepare it with `just sync-upstream` and publish it with
+`just sync-upstream-publish-main`, which validates the complete patch stack and
+uses an exact `--force-with-lease`. Do not open a pull request against either
+the fork or `block/buzz` unless the user explicitly asks for one.
 
 ---
 

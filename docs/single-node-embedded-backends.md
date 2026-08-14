@@ -74,6 +74,9 @@ URL.
    ChesapeakeDev fork does not use pull requests or review approvals as a
    publication gate. Protect the branch against deletion and require linear
    history. Ordinary updates are fast-forward pushes after local checks.
+   GitHub CI runs on every `main` push as a deterministic post-push backstop
+   for formatting, linting, tests, security, and release-safety checks; failures
+   are fixed directly on `main`, not routed through a pull request.
    Intentional force updates are reserved by convention for the guarded
    upstream-sync command, which validates the complete signed stack and uses an
    exact force-with-lease. Retain the existing DCO check.
@@ -87,9 +90,11 @@ URL.
 ### Establish the upstream policy
 
 - Treat `upstream/main` as the base for a maintained, linear fork patch stack.
-- Run a daily scheduled workflow that fetches upstream, rebases the fork-only
-  commit series onto the current `upstream/main`, and publishes the resulting
-  linear stack directly to the fork's `main` with `--force-with-lease`.
+- Run synchronization manually from the maintained local development checkout
+  when the operator chooses; there is no required cadence or scheduled GitHub
+  workflow. Fetch upstream, rebase the fork-only commit series onto the current
+  `upstream/main`, and publish the resulting linear stack directly to the
+  fork's `main` with `--force-with-lease`.
 - Keep the `upstream-sync` working branch local/ephemeral; it is not an
   upstream pull-request branch and no pull request is opened against
   `block/buzz`.
@@ -107,7 +112,7 @@ URL.
 - Keep backend-neutral changes compatible with upstream so future rebases stay
   small, but do not create or require upstream pull requests.
 
-Local and scheduled synchronization use the same commands:
+Local synchronization uses these commands:
 
 ```bash
 just sync-upstream-status
@@ -639,7 +644,7 @@ Deliver:
 
 - first `relay-vX.Y.Z` ChesapeakeDev release;
 - SBOM, image attestation, migration notes, and known limitations;
-- daily upstream-sync workflow and first successful direct fork-main sync;
+- local manual upstream-sync tooling and first successful direct fork-main sync;
 - compatibility policy covering database schema, clients, and Nostr event
   behavior.
 
@@ -714,8 +719,8 @@ Each stage must keep the PostgreSQL/Redis/S3 path green and deployable.
 - Verify all fork-owned publication targets resolve under `chesapeakedev`.
 - Verify pull requests from external forks cannot publish packages or access
   release secrets.
-- Test the daily upstream-sync workflow against a temporary branch without
-  mutating `main`.
+- Test the local upstream-sync tooling against temporary repositories without
+  mutating the real fork `main`.
 - Build the relay image from a release tag and verify its OCI source/revision
   labels and GitHub attestation.
 
