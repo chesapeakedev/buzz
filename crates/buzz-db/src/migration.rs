@@ -107,6 +107,11 @@ pub async fn run_sqlite_migrations(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn sqlite_migration_count() -> usize {
+    SQLITE_MIGRATOR.iter().count()
+}
+
 /// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
 /// enforcement. A populated database still on 0001-0006 must not let 0007
 /// irreversibly purge duplicate-tag history. Fail before sqlx starts its
@@ -1314,9 +1319,9 @@ mod tests {
             if *path == this_file {
                 assert_eq!(
                     (macro_hits, run_hits, run_to_hits),
-                    (1, 1, 1),
-                    "migration.rs must embed the migrator once, run it once in production, \
-                     and expose exactly one test-only bounded run"
+                    (2, 2, 1),
+                    "migration.rs must embed and run the PostgreSQL and SQLite migrators, \
+                     while exposing exactly one test-only bounded PostgreSQL run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
