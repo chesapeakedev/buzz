@@ -283,6 +283,9 @@ pub struct ReadSession {
 }
 
 enum ReadSessionInner {
+    /// Embedded reads share one WAL database and do not need replica proof,
+    /// but the session still has to retain the backend identity for aux reads.
+    Sqlite(sqlite::SqliteStore),
     /// The proved replica request transaction (snapshot-anchored), plus the
     /// writer pool so a mid-request replica failure (e.g. a hot-standby
     /// recovery conflict cancelling the held snapshot) degrades the session
@@ -308,6 +311,7 @@ impl ReadSession {
     #[datastore_span(name = "read_session_query_events", system = "postgresql")]
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
+            ReadSessionInner::Sqlite(store) => return store.query_events(q).await,
             ReadSessionInner::Replica { tx, writer } => {
                 match event::query_events_on(tx, q).await {
                     Ok(rows) => return Ok(rows),
@@ -2176,6 +2180,9 @@ impl Db {
     /// the error to the accepted budget `B`.
     #[datastore_span(name = "count_events_routed", system = "postgresql")]
     pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.count_events(q).await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::count_events_on(&mut tx, q).await {
@@ -2413,6 +2420,9 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_events_by_ids(community_id, ids).await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::get_events_by_ids_on(&mut tx, community_id, ids).await {
@@ -3964,6 +3974,17 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<(thread::ChannelWindow, ReadSession)> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            let window = store
+                .get_channel_window(community_id, channel_id, limit, cursor, kind_filter)
+                .await?;
+            return Ok((
+                window,
+                ReadSession {
+                    inner: ReadSessionInner::Sqlite(store.clone()),
+                },
+            ));
+        }
         let path: &'static str = if cursor.is_some() {
             "channel_cursor"
         } else {
@@ -4387,6 +4408,17 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_mentions(
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match feed::query_mentions_on(
@@ -4477,6 +4509,17 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_needs_action(
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match feed::query_needs_action_on(
@@ -4558,6 +4601,11 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .query_feed_activity(community, accessible_channel_ids, since, limit)
+                .await;
+        }
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match feed::query_activity_on(
@@ -5491,6 +5539,11 @@ impl Db {
         before_id: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<workflow::WorkflowRunRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .list_workflow_runs_page(community_id, workflow_id, before, before_id, limit)
+                .await;
+        }
         workflow::list_workflow_runs_page(
             &self.pool,
             community_id,
@@ -6076,6 +6129,9 @@ impl Db {
     /// Returns `true` if any member of `community` holds the `admin` or
     /// `owner` role.
     pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.has_admin_or_owner(community).await;
+        }
         relay_members::has_admin_or_owner(&self.pool, community).await
     }
 
@@ -7315,6 +7371,78 @@ mod tests {
             )
             .await
             .expect("routed SQLite query")
+            .is_empty());
+        let query = EventQuery::for_community(community.id);
+        assert_eq!(
+            db.count_events_routed("sqlite_count", &query)
+                .await
+                .expect("routed SQLite count"),
+            0
+        );
+        let missing_id = [0_u8; 32];
+        assert!(db
+            .get_events_by_ids_routed("sqlite_by_ids", community.id, &[&missing_id])
+            .await
+            .expect("routed SQLite id hydration")
+            .is_empty());
+
+        let channel_id = Uuid::new_v4();
+        let (window, mut session) = db
+            .get_channel_window_with_session(community.id, channel_id, 50, None, None)
+            .await
+            .expect("session-based SQLite channel window");
+        assert!(window.rows.is_empty());
+        assert!(!session.is_replica());
+        assert!(session
+            .query_events(&query)
+            .await
+            .expect("SQLite session aux query")
+            .is_empty());
+
+        let pubkey = [1_u8; 32];
+        assert!(db
+            .query_feed_mentions_routed(
+                "sqlite_feed_mentions",
+                community.id,
+                &pubkey,
+                &[channel_id],
+                None,
+                50,
+            )
+            .await
+            .expect("routed SQLite mention feed")
+            .is_empty());
+        assert!(db
+            .query_feed_needs_action_routed(
+                "sqlite_feed_needs_action",
+                community.id,
+                &pubkey,
+                &[channel_id],
+                None,
+                50,
+            )
+            .await
+            .expect("routed SQLite needs-action feed")
+            .is_empty());
+        assert!(db
+            .query_feed_activity_routed(
+                "sqlite_feed_activity",
+                community.id,
+                &[channel_id],
+                None,
+                50,
+            )
+            .await
+            .expect("routed SQLite activity feed")
+            .is_empty());
+        assert!(!db
+            .has_admin_or_owner(community.id)
+            .await
+            .expect("SQLite admin presence query"));
+        assert!(db
+            .list_workflow_runs_page(community.id, Uuid::new_v4(), None, None, 50,)
+            .await
+            .expect("paginated SQLite workflow runs")
             .is_empty());
         db.validate_deletion_serving_catalog()
             .await
