@@ -11,10 +11,13 @@ docker compose -f compose.yml up -d --wait
 curl -fsS http://127.0.0.1:8080/_readiness
 ```
 
+To publish a relay from a device behind NAT without opening inbound ports, use
+the Cloudflare Tunnel guide for [`buzz.chesapeake.dev`](cloudflare-tunnel.md).
+
 The default `RELAY_ACCESS=open` is appropriate only when the published port is
-bound to loopback. For a public deployment, copy `.env.example`, set a
-64-character owner pubkey, use `RELAY_ACCESS=closed`, and run with the Caddy
-override:
+bound to loopback. For a public deployment, copy `.env.example`, set the
+owner public key as either the `npub` shown by Buzz Desktop or 64-character
+hex, use `RELAY_ACCESS=closed`, and run with the Caddy override:
 
 ```bash
 cp .env.example .env
@@ -37,10 +40,16 @@ export BUZZ_PRIVATE_KEY=nsec1_replace_with_a_test_key
 
 The command should return JSON (an empty array is valid on a fresh relay). The
 same `BUZZ_RELAY_URL` is the value to enter in the desktop or mobile client's
-community/relay settings. Keep `RELAY_ACCESS=open` only for a loopback-bound
-development relay; for a public relay use the Caddy/TLS command above and
-connect clients with `wss://`. Do not reuse a development private key for a
-real community.
+community/relay settings. In Buzz Desktop, use **Join a community** and enter
+the relay URL. **Create a community** and **I own the community** are entry
+points for Block-hosted relay management and open Builderlab; they are not part
+of self-hosted relay setup. Ownership is granted locally when the authenticated
+client key matches `RELAY_OWNER_PUBKEY`.
+
+The embedded image contains the relay and repository web bundle only. It has no
+Builderlab login, API, or runtime dependency. Keep `RELAY_ACCESS=open` only for
+a loopback-bound development relay; for a public relay connect with `wss://`.
+Do not reuse a development private key for a real community.
 
 ## Operations, limits, and troubleshooting
 

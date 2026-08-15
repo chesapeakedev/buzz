@@ -22,7 +22,7 @@ enable the Caddy/TLS override:
 
 ```bash
 cp .env.example .env
-# Set RELAY_URL=wss://..., RELAY_OWNER_PUBKEY, and RELAY_ACCESS=closed.
+# Set RELAY_URL=wss://..., RELAY_OWNER_PUBKEY (npub or hex), and RELAY_ACCESS=closed.
 docker compose --env-file .env -f compose.yml -f compose.caddy.yml up -d --wait
 ```
 
@@ -36,8 +36,12 @@ export BUZZ_PRIVATE_KEY=nsec1_replace_with_a_test_key
 ./target/debug/buzz channels list | jq .
 ```
 
-An empty JSON array is valid on a new relay. Enter the same URL in the desktop
-or mobile client's community settings. Never reuse a development private key
+An empty JSON array is valid on a new relay. In Buzz Desktop, select **Join a
+community** and enter the same URL. The **Create a community** and **I own the
+community** choices manage Block-hosted relays through Builderlab; they do not
+configure a self-hosted relay. A closed self-hosted relay recognizes the client
+as owner when its public key matches `RELAY_OWNER_PUBKEY`. The embedded runtime
+does not contain or contact Builderlab. Never reuse a development private key
 for a real community.
 
 ## 2. Data, backup, restore, and upgrade
@@ -79,7 +83,7 @@ using `relay-v0.2.1-embedded.1` → `relay-v0.3.0`.
 | Symptom | Checks and action |
 | --- | --- |
 | Readiness never becomes `ready` | Run `docker compose logs relay`; check `/data` ownership, writable disk, and that no other process holds `instance.lock`. |
-| Clients cannot connect | Confirm port 3000 or Caddy’s TLS port, use `ws://` locally / `wss://` publicly, and check `RELAY_URL` matches the client URL. |
+| Clients cannot connect | Confirm port 3000 or Caddy’s TLS port, use `ws://` locally / `wss://` publicly, and check `RELAY_URL` matches the client URL. On a closed relay, compare the rejected client pubkey in relay logs with `RELAY_OWNER_PUBKEY` or add it through an owner-issued invite. |
 | Public relay accepts unauthenticated traffic | Set `RELAY_ACCESS=closed`, configure `RELAY_OWNER_PUBKEY`, and use the Caddy override; do not expose the default open mode. |
 | Data disappears after restart | Confirm the named `buzz-data` volume is mounted and never run `docker compose down -v` on the production volume. |
 | Migration or write errors | Stop the relay, preserve `/data`, check disk space/read-only mounts, and restore only into an empty directory. Do not delete SQLite files to force startup. |

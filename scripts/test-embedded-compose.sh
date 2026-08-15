@@ -20,6 +20,16 @@ trap cleanup EXIT
 image="${BUZZ_EMBEDDED_IMAGE:-ghcr.io/chesapeakedev/buzz:main}"
 port="${BUZZ_EMBEDDED_SMOKE_PORT:-$((30000 + RANDOM % 1000))}"
 env_file="$test_root/.env"
+
+# The relay-only artifact must never inherit the desktop app's Block-hosted
+# Builderlab integration. Check the exact runtime binary and bundled web assets,
+# not just source paths, so a packaging regression cannot silently add it.
+if docker run --rm --entrypoint sh "$image" -c \
+  'grep -aiq builderlab /usr/local/bin/buzz-relay || grep -Raiq builderlab /srv/buzz'; then
+  echo "embedded runtime unexpectedly contains a Builderlab reference" >&2
+  exit 1
+fi
+
 cat >"$env_file" <<EOF
 BUZZ_IMAGE=$image
 BUZZ_HTTP_PORT=$port
