@@ -2039,6 +2039,10 @@ impl Db {
             return Err(DbError::EphemeralEventRejected(kind_u16));
         }
 
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.insert_event(community_id, event, channel_id).await;
+        }
+
         let mut tx = self.pool.begin().await?;
         self.deletion_store()
             .guard_transaction_with_serving_lease(&mut tx, lease)

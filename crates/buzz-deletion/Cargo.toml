@@ -26,3 +26,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 sqlx = { workspace = true }
+tempfile = "3"

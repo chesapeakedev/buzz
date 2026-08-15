@@ -51,7 +51,7 @@ pub fn store(db: &Db) -> DeletionStore {
 
 /// Durable, heartbeated lease for a serving-path external side effect.
 pub struct ServingWriteGuard {
-    store: DeletionStore,
+    store: Option<DeletionStore>,
     lease: buzz_db::deletion::ServingWriteLease,
     cancel: CancellationToken,
     lost: CancellationToken,
@@ -67,7 +67,10 @@ impl ServingWriteGuard {
             }
             .into());
         }
-        self.store
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store
             .verify_serving_write_lease(&self.lease)
             .await
             .map_err(|error| ServingWriteLeaseLost {
@@ -125,7 +128,11 @@ impl ServingWriteGuard {
     /// Release the lease after the side effect completes.
     pub async fn finish(mut self) -> Result<()> {
         self.cancel.cancel();
-        let released = self.store.release_serving_write_lease(&self.lease).await?;
+        let Some(store) = &self.store else {
+            self.finished = true;
+            return Ok(());
+        };
+        let released = store.release_serving_write_lease(&self.lease).await?;
         self.finished = true;
         if !released {
             return Err(ServingWriteLeaseLost {
@@ -143,7 +150,9 @@ impl Drop for ServingWriteGuard {
         if self.finished {
             return;
         }
-        let store = self.store.clone();
+        let Some(store) = self.store.clone() else {
+            return;
+        };
         let lease = self.lease.clone();
         tokio::spawn(async move {
             let _ = store.release_serving_write_lease(&lease).await;
@@ -171,6 +180,27 @@ async fn acquire_serving_write_with_heartbeat(
     operation: &str,
     heartbeat_period: Duration,
 ) -> Result<ServingWriteGuard> {
+    if db.backend_kind() == buzz_db::DatabaseBackendKind::Sqlite {
+        let cancel = CancellationToken::new();
+        return Ok(ServingWriteGuard {
+            store: None,
+            lease: buzz_db::deletion::ServingWriteLease {
+                id: Uuid::new_v4(),
+                community_id: community,
+                operation: operation.to_owned(),
+                owner: default_executor_id(),
+                generation: 0,
+                fence_generation: 0,
+                lease_until: chrono::Utc::now()
+                    + chrono::Duration::from_std(DEFAULT_LEASE_DURATION)
+                        .context("serving-write lease duration is out of range")?,
+            },
+            lost: CancellationToken::new(),
+            cancel,
+            finished: false,
+        });
+    }
+
     let store = store(db);
     let owner = default_executor_id();
     let lease = store
@@ -206,7 +236,7 @@ async fn acquire_serving_write_with_heartbeat(
         }
     });
     Ok(ServingWriteGuard {
-        store,
+        store: Some(store),
         lease,
         cancel,
         lost,
@@ -1446,6 +1476,33 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sqlite_serving_guard_does_not_use_the_placeholder_postgres_pool() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db = Db::new_sqlite(
+            &directory.path().join("buzz.sqlite3"),
+            &buzz_db::sqlite::SqliteConfig::default(),
+        )
+        .await
+        .expect("SQLite database");
+        let community = db
+            .ensure_configured_community("embedded.example.test")
+            .await
+            .expect("community")
+            .id;
+
+        let guard = acquire_serving_write(&db, community, "media_upload")
+            .await
+            .expect("SQLite serving guard");
+        assert_eq!(guard.lease().community_id, community);
+        assert_eq!(guard.lease().operation, "media_upload");
+        guard
+            .protect(async { 42 })
+            .await
+            .expect("protected SQLite operation");
+        guard.finish().await.expect("finish SQLite serving guard");
+    }
 
     #[test]
     fn submit_host_prefers_explicit_host() {
