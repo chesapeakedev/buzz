@@ -175,6 +175,8 @@ pub struct Config {
     pub db_read_pool_size: Option<u32>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// Optional public operator contact, advertised in the NIP-11 `contact` field.
+    pub relay_contact: Option<String>,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
@@ -765,6 +767,10 @@ impl Config {
                 .and_then(|server| server.public_url.clone())
                 .unwrap_or_else(|| "ws://localhost:3000".to_string())
         });
+        let relay_contact = std::env::var("RELAY_CONTACT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -1237,6 +1243,7 @@ impl Config {
             sqlite_read_queue_timeout_ms,
             db_read_pool_size,
             relay_url,
+            relay_contact,
             pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
@@ -2104,5 +2111,20 @@ mod tests {
         assert_eq!(config.community_access, CommunityAccess::Open);
         assert!(!config.git_enabled);
         assert_eq!(config.relay_url, "ws://file.example");
+    }
+
+    #[test]
+    fn relay_contact_is_trimmed_and_empty_values_are_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("RELAY_CONTACT", "  owner@example.com  ");
+        let configured = Config::from_env().expect("configured contact");
+        assert_eq!(
+            configured.relay_contact.as_deref(),
+            Some("owner@example.com")
+        );
+        std::env::set_var("RELAY_CONTACT", "   ");
+        let empty = Config::from_env().expect("empty contact");
+        std::env::remove_var("RELAY_CONTACT");
+        assert!(empty.relay_contact.is_none());
     }
 }
