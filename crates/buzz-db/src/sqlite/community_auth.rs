@@ -453,6 +453,18 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Return whether one community has at least one administrator or owner.
+    pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_members \
+             WHERE community_id = ? AND role IN ('admin', 'owner'))",
+        )
+        .bind(community.as_uuid().to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists != 0)
+    }
+
     /// Atomically transfer community ownership after validating the expected owner.
     pub async fn transfer_ownership(
         &self,

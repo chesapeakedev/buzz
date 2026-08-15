@@ -746,6 +746,36 @@ impl SqliteStore {
         rows.into_iter().map(row_to_run).collect()
     }
 
+    /// List workflow runs using a stable newest-first keyset.
+    pub async fn list_workflow_runs_page(
+        &self,
+        community: CommunityId,
+        workflow_id: Uuid,
+        before: Option<DateTime<Utc>>,
+        before_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<WorkflowRunRecord>> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM workflow_runs \
+             WHERE community_id = ? AND workflow_id = ? \
+               AND (? IS NULL OR ? IS NULL OR (created_at, id) < (?, ?)) \
+             ORDER BY created_at DESC, id DESC LIMIT ?"
+        );
+        let before_micros = before.map(|timestamp| timestamp.timestamp_micros());
+        let before_id = before_id.map(|id| id.to_string());
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid().to_string())
+            .bind(workflow_id.to_string())
+            .bind(before_micros)
+            .bind(&before_id)
+            .bind(before_micros)
+            .bind(before_id)
+            .bind(limit.clamp(1, 1000))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_run).collect()
+    }
+
     /// Update run state and stamp first-start and terminal completion times.
     pub async fn update_workflow_run(
         &self,
