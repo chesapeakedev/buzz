@@ -352,6 +352,68 @@ impl SqliteStore {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<ChannelWindow> {
+        metrics::counter!("buzz_sqlite_read_requests_total", "lane" => "channel", "outcome" => "started").increment(1);
+        let mut kinds = kind_filter.unwrap_or_default().to_vec();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let key = super::ChannelWindowCacheKey {
+            community_id,
+            channel_id,
+            limit,
+            cursor_micros: cursor
+                .as_ref()
+                .map(|(timestamp, _)| timestamp.timestamp_micros()),
+            cursor_id: cursor.as_ref().map(|(_, id)| id.clone()),
+            kinds: kinds.clone(),
+        };
+        if let Some(cache) = &self.channel_cache {
+            if let Some(window) = cache.get(&key).await {
+                metrics::counter!("buzz_sqlite_read_cache_total", "lane" => "channel", "outcome" => "hit").increment(1);
+                return Ok(window);
+            }
+            metrics::counter!("buzz_sqlite_read_cache_total", "lane" => "channel", "outcome" => "miss").increment(1);
+            let result = cache
+                .try_get_with(
+                    key,
+                    self.load_channel_window(community_id, channel_id, limit, cursor, kinds),
+                )
+                .await;
+            return result.map_err(|error| DbError::ReadUnavailable(error.to_string()));
+        }
+        self.load_channel_window(community_id, channel_id, limit, cursor, kinds)
+            .await
+    }
+
+    async fn load_channel_window(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        limit: u32,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+        kinds: Vec<u32>,
+    ) -> Result<ChannelWindow> {
+        metrics::gauge!("buzz_sqlite_read_loaders_in_flight", "lane" => "channel").increment(1.0);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.query_channel_window(community_id, channel_id, limit, cursor, kinds),
+        )
+        .await;
+        metrics::gauge!("buzz_sqlite_read_loaders_in_flight", "lane" => "channel").decrement(1.0);
+        metrics::histogram!("buzz_sqlite_read_loader_seconds", "lane" => "channel")
+            .record(started.elapsed().as_secs_f64());
+        result
+            .map_err(|_| DbError::ReadUnavailable("channel loader deadline exceeded".to_owned()))?
+    }
+
+    async fn query_channel_window(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        limit: u32,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+        kinds: Vec<u32>,
+    ) -> Result<ChannelWindow> {
         let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
             "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
              e.sig, e.received_at, e.channel_id, tm.reply_count, \
@@ -383,10 +445,10 @@ impl SqliteStore {
                 .push_bind(event_id.clone())
                 .push("))");
         }
-        if let Some(kinds) = kind_filter.filter(|kinds| !kinds.is_empty()) {
+        if !kinds.is_empty() {
             builder.push(" AND e.kind IN (");
             let mut separated = builder.separated(", ");
-            for kind in kinds {
+            for kind in &kinds {
                 separated.push_bind(i64::from(*kind));
             }
             builder.push(")");
@@ -395,7 +457,22 @@ impl SqliteStore {
             .push(" ORDER BY e.created_at DESC, e.id ASC LIMIT ")
             .push_bind(i64::from(limit) + 1);
 
-        let mut database_rows = builder.build().fetch_all(&self.pool).await?;
+        let acquired = std::time::Instant::now();
+        let mut connection = self.channel_pool.acquire().await.map_err(|error| {
+            metrics::counter!("buzz_sqlite_read_pool_timeouts_total", "lane" => "channel")
+                .increment(1);
+            DbError::ReadUnavailable(error.to_string())
+        })?;
+        let active = self.channel_pool.size() - self.channel_pool.num_idle() as u32;
+        static HIGH_WATER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        HIGH_WATER.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+        metrics::gauge!("buzz_sqlite_read_pool_active", "lane" => "channel").set(active as f64);
+        metrics::gauge!("buzz_sqlite_read_pool_high_water", "lane" => "channel")
+            .set(HIGH_WATER.load(std::sync::atomic::Ordering::Relaxed) as f64);
+        metrics::histogram!("buzz_sqlite_read_queue_seconds", "lane" => "channel")
+            .record(acquired.elapsed().as_secs_f64());
+        let query_started = std::time::Instant::now();
+        let mut database_rows = builder.build().fetch_all(&mut *connection).await?;
         let has_more = database_rows.len() > limit as usize;
         database_rows.truncate(limit as usize);
         let next_cursor = if has_more {
@@ -477,7 +554,7 @@ impl SqliteStore {
                  GROUP BY tm.root_event_id, e.pubkey \
                  ) WHERE row_number <= 10 ORDER BY root_event_id, row_number",
             );
-            let participant_rows = participants.build().fetch_all(&self.pool).await?;
+            let participant_rows = participants.build().fetch_all(&mut *connection).await?;
             let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
                 std::collections::HashMap::new();
             for row in participant_rows {
@@ -497,6 +574,8 @@ impl SqliteStore {
             }
         }
 
+        metrics::histogram!("buzz_sqlite_read_query_seconds", "lane" => "channel")
+            .record(query_started.elapsed().as_secs_f64());
         Ok(ChannelWindow {
             rows,
             has_more,
