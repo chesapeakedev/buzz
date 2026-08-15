@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trace SQLite Incidents"
+  short_description: "Correlate Buzz events, logs, and SQLite state"
+  default_prompt: "Use $trace-sqlite-incidents to correlate a reported Buzz incident with relay logs and embedded SQLite evidence."
