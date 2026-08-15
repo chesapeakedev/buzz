@@ -252,7 +252,7 @@ pub struct Config {
     /// streams are accepted, logged, and closed (no session consumer yet).
     pub mesh_demo_echo: bool,
 
-    /// Optional hex-encoded pubkey of the relay owner.
+    /// Optional hex- or bech32-encoded pubkey of the relay owner.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
@@ -365,6 +365,24 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+}
+
+fn parse_relay_owner_pubkey(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    match nostr::PublicKey::parse(value) {
+        Ok(pubkey) => Some(pubkey.to_hex()),
+        Err(error) => {
+            warn!(
+                "RELAY_OWNER_PUBKEY is not a valid 64-char hex or npub public key \
+                 and will be ignored: {error}"
+            );
+            None
+        }
+    }
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -856,21 +874,8 @@ impl Config {
             .ok()
             .or_else(|| file_community.and_then(|community| community.owner_pubkey.clone()));
         let relay_owner_pubkey = relay_owner_raw
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .and_then(|s| {
-                // Must be exactly 64 lowercase hex characters (32-byte pubkey).
-                let valid = s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
-                if valid {
-                    Some(s)
-                } else {
-                    warn!(
-                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — ignoring. \
-                         Got: {s:?}"
-                    );
-                    None
-                }
-            });
+            .as_deref()
+            .and_then(parse_relay_owner_pubkey);
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
         // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
@@ -1340,6 +1345,28 @@ mod tests {
         );
 
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
+
+    #[test]
+    fn relay_owner_pubkey_accepts_hex_and_npub_and_normalizes_to_hex() {
+        use nostr::ToBech32 as _;
+
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().expect("encode npub");
+
+        assert_eq!(parse_relay_owner_pubkey(&hex), Some(hex.clone()));
+        assert_eq!(
+            parse_relay_owner_pubkey(&hex.to_uppercase()),
+            Some(hex.clone())
+        );
+        assert_eq!(parse_relay_owner_pubkey(&npub), Some(hex));
+    }
+
+    #[test]
+    fn relay_owner_pubkey_rejects_empty_and_invalid_values() {
+        assert_eq!(parse_relay_owner_pubkey("   "), None);
+        assert_eq!(parse_relay_owner_pubkey("not-a-public-key"), None);
     }
 
     #[test]

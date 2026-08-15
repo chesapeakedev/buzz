@@ -1178,6 +1178,7 @@ dependencies = [
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "blurhash",
  "buzz-core",
