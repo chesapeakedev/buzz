@@ -17,7 +17,8 @@ the Cloudflare Tunnel guide for [`buzz.chesapeake.dev`](cloudflare-tunnel.md).
 The default `RELAY_ACCESS=open` is appropriate only when the published port is
 bound to loopback. For a public deployment, copy `.env.example`, set the
 owner public key as either the `npub` shown by Buzz Desktop or 64-character
-hex, use `RELAY_ACCESS=closed`, and run with the Caddy override:
+hex, use `RELAY_ACCESS=closed`, and optionally set `RELAY_CONTACT` to the
+public contact string advertised through NIP-11. Then run with the Caddy override:
 
 ```bash
 cp .env.example .env
