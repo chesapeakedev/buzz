@@ -1,8 +1,11 @@
 import { BookMarked, GitBranch } from "lucide-react";
-import { toast } from "sonner";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import buzzAppIcon from "@/assets/app-icon@3x.png";
+import { NostrQueryError } from "@/shared/lib/nostr-client";
+import { useRelayInfo } from "@/shared/lib/relay-info";
+import { hasNip07Provider } from "@/shared/lib/nostr-signer";
+import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { mockRepos } from "../mock-repos";
 import { useRepos } from "../use-repos";
@@ -68,6 +71,67 @@ function CommunityEmptyState() {
   );
 }
 
+function AccessGuidance({ contact }: { contact?: string }) {
+  if (!contact) return <p>Ask the community owner for an invite.</p>;
+  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
+  return (
+    <p>
+      Request access from{" "}
+      {email ? (
+        <a className="underline" href={`mailto:${contact}`}>
+          {contact}
+        </a>
+      ) : (
+        contact
+      )}
+      .
+    </p>
+  );
+}
+
+function StatusState({
+  title,
+  description,
+  contact,
+  retry,
+}: {
+  title: string;
+  description: string;
+  contact?: string;
+  retry?: () => void;
+}) {
+  return (
+    <div className="flex flex-1 items-center justify-center bg-[#F3F3F3] px-4 py-16 text-center dark:bg-[#171717]">
+      <div className="flex w-full max-w-xl flex-col items-center px-6 py-10">
+        <div
+          className="h-16 w-16 overflow-hidden bg-black"
+          style={{ borderRadius: "22.37%" }}
+        >
+          <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
+        </div>
+        <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black dark:text-white">
+          {title}
+        </h1>
+        <p className="mt-2 max-w-md text-sm leading-relaxed text-black/60 dark:text-white/60">
+          {description}
+        </p>
+        {retry ? (
+          <Button className="mt-6" onClick={retry}>
+            Retry
+          </Button>
+        ) : (
+          <>
+            <ConnectButton className="mt-6" />
+            <div className="mt-4 text-sm text-black/60 dark:text-white/60">
+              <AccessGuidance contact={contact} />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ReposPage() {
   const preview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("preview")
@@ -78,7 +142,9 @@ export function ReposPage() {
     data: fetchedRepos,
     isLoading: isLoadingRepos,
     error,
+    refetch,
   } = useRepos({ enabled: !showMockRepos && !showMockEmptyState });
+  const { data: relayInfo } = useRelayInfo();
   const repos = showMockRepos
     ? mockRepos
     : showMockEmptyState
@@ -87,14 +153,6 @@ export function ReposPage() {
   const isLoading = preview ? false : isLoadingRepos;
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortOrder>("newest");
-
-  useEffect(() => {
-    if (error) {
-      toast.error("Failed to load repositories", {
-        description: error.message,
-      });
-    }
-  }, [error]);
 
   const filteredRepos = useMemo(() => {
     if (!repos) return [];
@@ -138,6 +196,33 @@ export function ReposPage() {
         </div>
         <aside className="hidden w-72 shrink-0 lg:block" />
       </div>
+    );
+  }
+
+  if (error instanceof NostrQueryError && error.kind === "access-denied") {
+    const signed = hasNip07Provider();
+    return (
+      <StatusState
+        title={
+          signed ? "You don’t have access" : "This is a private Buzz community"
+        }
+        description={
+          signed
+            ? "Your current browser identity is not a member of this community."
+            : "Repositories in this community are available to members only."
+        }
+        contact={relayInfo?.contact}
+      />
+    );
+  }
+
+  if (error) {
+    return (
+      <StatusState
+        title="Couldn’t load this community"
+        description="Check your connection and try again."
+        retry={() => void refetch()}
+      />
     );
   }
 

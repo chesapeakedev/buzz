@@ -25,6 +25,28 @@ export type NostrEvent = SignedNostrEvent;
 
 const QUERY_TIMEOUT_MS = 10_000;
 
+export type NostrQueryErrorKind = "access-denied" | "transient" | "unexpected";
+
+export class NostrQueryError extends Error {
+  constructor(
+    public readonly kind: NostrQueryErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = "NostrQueryError";
+  }
+}
+
+function queryFailure(reason: string): NostrQueryError {
+  if (reason.toLowerCase().includes("restricted: not a relay member")) {
+    return new NostrQueryError(
+      "access-denied",
+      "Relay membership is required.",
+    );
+  }
+  return new NostrQueryError("unexpected", "The relay rejected the request.");
+}
+
 /**
  * Open a WebSocket to `wsUrl`, authenticate via NIP-42 if challenged,
  * send a REQ with the given filter, collect EVENTs until EOSE, then
@@ -48,7 +70,7 @@ export function queryEvents(
       if (!settled) {
         settled = true;
         ws.close();
-        reject(new Error(`Relay query timed out after ${QUERY_TIMEOUT_MS}ms`));
+        reject(new NostrQueryError("transient", "The relay query timed out."));
       }
     }, QUERY_TIMEOUT_MS);
 
@@ -122,10 +144,8 @@ export function queryEvents(
           settled = true;
           cleanup();
           reject(
-            new Error(
-              typeof data[3] === "string"
-                ? data[3]
-                : "Relay authentication failed.",
+            queryFailure(
+              typeof data[3] === "string" ? data[3] : "authentication failed",
             ),
           );
         }
@@ -149,7 +169,7 @@ export function queryEvents(
             typeof data[2] === "string"
               ? data[2]
               : "subscription closed by relay";
-          reject(new Error(reason));
+          reject(queryFailure(reason));
         }
       } else if (type === "NOTICE") {
         // Informational notice from relay — ignore for now.
@@ -160,7 +180,9 @@ export function queryEvents(
       if (!settled) {
         settled = true;
         cleanup();
-        reject(new Error("WebSocket connection failed"));
+        reject(
+          new NostrQueryError("transient", "WebSocket connection failed."),
+        );
       }
     });
 
