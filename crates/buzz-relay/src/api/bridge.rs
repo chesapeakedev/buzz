@@ -472,7 +472,13 @@ async fn handle_channel_window_filter(
             kind_filter.as_deref(),
         )
         .await
-        .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::ReadUnavailable(message) => {
+                metrics::counter!("buzz_sqlite_read_requests_total", "lane" => "channel", "outcome" => "unavailable").increment(1);
+                api_error(StatusCode::SERVICE_UNAVAILABLE, &format!("temporarily unavailable; retry after 1 second: {message}"))
+            }
+            error => internal_error(&format!("channel window error: {error}")),
+        })?;
 
     // 1. Rows, in keyset order.
     let mut row_ids_hex = Vec::with_capacity(window.rows.len());
@@ -1805,7 +1811,13 @@ async fn handle_bridge_search(
             .search
             .search(&search_query)
             .await
-            .map_err(|e| internal_error(&format!("search error: {e}")))?;
+            .map_err(|e| match e {
+                buzz_search::SearchError::ReadUnavailable(message) => {
+                    metrics::counter!("buzz_sqlite_read_requests_total", "lane" => "search", "outcome" => "unavailable").increment(1);
+                    api_error(StatusCode::SERVICE_UNAVAILABLE, &format!("temporarily unavailable; retry after 1 second: {message}"))
+                }
+                error => internal_error(&format!("search error: {error}")),
+            })?;
 
         // Fetch full events from DB by ID. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.

@@ -1061,6 +1061,7 @@ dependencies = [
  "hex",
  "metrics",
  "metrics-util",
+ "moka",
  "nostr 0.44.7",
  "rand 0.10.1",
  "serde",
@@ -1373,6 +1374,8 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
+ "metrics",
+ "moka",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",

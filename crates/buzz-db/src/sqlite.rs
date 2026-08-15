@@ -81,6 +81,12 @@ pub use security_windows::SecurityRateWindow;
 pub struct SqliteConfig {
     /// Maximum number of pooled read connections.
     pub max_connections: u32,
+    /// Connections reserved for channel-window reads.
+    pub channel_max_connections: u32,
+    /// Connections reserved for full-text search reads.
+    pub search_max_connections: u32,
+    /// Lifetime of embedded result-cache entries. Zero disables caching.
+    pub read_cache_ttl: Duration,
     /// Maximum wait for a pooled connection.
     pub acquire_timeout: Duration,
     /// Maximum wait for a locked SQLite database.
@@ -90,8 +96,11 @@ pub struct SqliteConfig {
 impl Default for SqliteConfig {
     fn default() -> Self {
         Self {
-            max_connections: 4,
-            acquire_timeout: Duration::from_secs(3),
+            max_connections: 8,
+            channel_max_connections: 4,
+            search_max_connections: 2,
+            read_cache_ttl: Duration::ZERO,
+            acquire_timeout: Duration::from_secs(5),
             busy_timeout: Duration::from_secs(5),
         }
     }
@@ -101,14 +110,30 @@ impl Default for SqliteConfig {
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    channel_pool: SqlitePool,
+    search_pool: SqlitePool,
+    channel_cache: Option<moka::future::Cache<ChannelWindowCacheKey, crate::thread::ChannelWindow>>,
     writer: Arc<Mutex<()>>,
     usage_leader: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChannelWindowCacheKey {
+    community_id: crate::CommunityId,
+    channel_id: uuid::Uuid,
+    limit: u32,
+    cursor_micros: Option<i64>,
+    cursor_id: Option<Vec<u8>>,
+    kinds: Vec<u32>,
 }
 
 impl SqliteStore {
     /// Open a fresh-install SQLite database with the required safety pragmas.
     pub async fn connect(path: &Path, config: &SqliteConfig) -> Result<Self> {
-        if config.max_connections == 0 {
+        if config.max_connections == 0
+            || config.channel_max_connections == 0
+            || config.search_max_connections == 0
+        {
             return Err(DbError::InvalidData(
                 "SQLite max_connections must be greater than zero".to_owned(),
             ));
@@ -138,8 +163,38 @@ impl SqliteStore {
             .connect_with(options)
             .await?;
 
+        let read_options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(config.busy_timeout)
+            .pragma("query_only", "ON");
+        let channel_pool = SqlitePoolOptions::new()
+            .min_connections(0)
+            .max_connections(config.channel_max_connections)
+            .acquire_timeout(config.acquire_timeout)
+            .connect_with(read_options.clone())
+            .await?;
+        let search_pool = SqlitePoolOptions::new()
+            .min_connections(0)
+            .max_connections(config.search_max_connections)
+            .acquire_timeout(config.acquire_timeout)
+            .connect_with(read_options)
+            .await?;
+        let channel_cache = (!config.read_cache_ttl.is_zero()).then(|| {
+            moka::future::Cache::builder()
+                .max_capacity(512)
+                .time_to_live(config.read_cache_ttl)
+                .build()
+        });
+
         Ok(Self {
             pool,
+            channel_pool,
+            search_pool,
+            channel_cache,
             writer: Arc::new(Mutex::new(())),
             usage_leader: Arc::new(Mutex::new(())),
         })
@@ -161,6 +216,11 @@ impl SqliteStore {
     /// relay handlers continue to use domain operations.
     pub fn adapter_pool(&self) -> SqlitePool {
         self.pool.clone()
+    }
+
+    /// Clone the read-only pool reserved for SQLite FTS queries.
+    pub fn search_pool(&self) -> SqlitePool {
+        self.search_pool.clone()
     }
 
     /// Clone the single writer gate for another SQLite backend adapter.
@@ -244,6 +304,28 @@ mod tests {
             assert_eq!(synchronous, 1);
             assert_eq!(busy_timeout, 5_000);
         }
+    }
+
+    #[tokio::test]
+    async fn dedicated_read_pools_are_query_only() {
+        let (_directory, store) = migrated_store().await;
+        let channel_query_only: i64 = sqlx::query_scalar("PRAGMA query_only")
+            .fetch_one(&store.channel_pool)
+            .await
+            .expect("read channel query_only");
+        let search_query_only: i64 = sqlx::query_scalar("PRAGMA query_only")
+            .fetch_one(&store.search_pool)
+            .await
+            .expect("read search query_only");
+        assert_eq!(channel_query_only, 1);
+        assert_eq!(search_query_only, 1);
+        let mutation = sqlx::query("CREATE TABLE forbidden_on_read_pool (id INTEGER)")
+            .execute(&store.channel_pool)
+            .await;
+        assert!(
+            mutation.is_err(),
+            "read pool unexpectedly accepted mutation"
+        );
     }
 
     #[tokio::test]

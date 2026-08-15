@@ -6,8 +6,8 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{HeaderMap, Request, StatusCode},
-    middleware,
+    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{get, post, put},
     Router,
@@ -25,6 +25,18 @@ use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::state::AppState;
+
+async fn add_retry_after_to_unavailable(request: Request<Body>, next: Next) -> impl IntoResponse {
+    let mut response = next.run(request).await;
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+        && !response.headers().contains_key(RETRY_AFTER)
+    {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
+}
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
@@ -196,6 +208,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     merged
         .layer(middleware::from_fn(track_metrics))
+        .layer(middleware::from_fn(add_retry_after_to_unavailable))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
 }

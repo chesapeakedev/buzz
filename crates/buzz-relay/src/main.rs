@@ -242,7 +242,13 @@ async fn main() -> anyhow::Result<()> {
         Db::new_sqlite(
             &layout.database,
             &buzz_db::sqlite::SqliteConfig {
-                max_connections: config.db_pool_size.max(1),
+                max_connections: config.sqlite_core_pool_size,
+                channel_max_connections: config.sqlite_channel_pool_size,
+                search_max_connections: config.sqlite_search_pool_size,
+                read_cache_ttl: std::time::Duration::from_millis(config.sqlite_read_cache_ttl_ms),
+                acquire_timeout: std::time::Duration::from_millis(
+                    config.sqlite_read_queue_timeout_ms,
+                ),
                 ..buzz_db::sqlite::SqliteConfig::default()
             },
         )
@@ -476,7 +482,10 @@ async fn main() -> anyhow::Result<()> {
     // same Postgres over its own pool. Search is lag-tolerant, so it prefers
     // the read replica when one is configured.
     let search = if let Some(store) = db.sqlite_store() {
-        SearchService::new_sqlite(store.adapter_pool())
+        SearchService::new_sqlite_with_ttl(
+            store.search_pool(),
+            std::time::Duration::from_millis(config.sqlite_read_cache_ttl_ms),
+        )
     } else {
         let search_db_url = config
             .read_database_url

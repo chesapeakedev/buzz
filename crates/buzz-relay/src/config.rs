@@ -158,6 +158,16 @@ pub struct Config {
     /// the per-pod pool and requests fail on acquire timeout while the
     /// database sits idle.
     pub db_pool_size: u32,
+    /// Core SQLite pool size (embedded mode only).
+    pub sqlite_core_pool_size: u32,
+    /// Channel-window SQLite read-pool size (embedded mode only).
+    pub sqlite_channel_pool_size: u32,
+    /// FTS SQLite read-pool size (embedded mode only).
+    pub sqlite_search_pool_size: u32,
+    /// Embedded read-result cache TTL in milliseconds; zero disables it.
+    pub sqlite_read_cache_ttl_ms: u64,
+    /// Maximum wait for an embedded read-pool connection.
+    pub sqlite_read_queue_timeout_ms: u64,
     /// Maximum connections in the Postgres read-replica pool
     /// (`BUZZ_DB_READ_POOL_SIZE`). Defaults to `db_pool_size`. Sized
     /// independently so reader capacity can be tuned against the replica's
@@ -690,11 +700,42 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(16);
 
-        let db_pool_size = std::env::var("BUZZ_DB_POOL_SIZE")
-            .ok()
+        let db_pool_size_raw = std::env::var("BUZZ_DB_POOL_SIZE").ok();
+        let db_pool_size = db_pool_size_raw
+            .as_deref()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(50);
+
+        let positive_u32 = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(default)
+        };
+        let sqlite_core_pool_size = std::env::var("BUZZ_SQLITE_CORE_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                db_pool_size_raw
+                    .as_deref()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|v| *v > 0)
+            })
+            .unwrap_or(8);
+        let sqlite_channel_pool_size = positive_u32("BUZZ_SQLITE_CHANNEL_POOL_SIZE", 4);
+        let sqlite_search_pool_size = positive_u32("BUZZ_SQLITE_SEARCH_POOL_SIZE", 2);
+        let sqlite_read_cache_ttl_ms = std::env::var("BUZZ_SQLITE_READ_CACHE_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let sqlite_read_queue_timeout_ms = std::env::var("BUZZ_SQLITE_READ_QUEUE_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5000);
 
         let db_read_pool_size = std::env::var("BUZZ_DB_READ_POOL_SIZE")
             .ok()
@@ -1184,6 +1225,11 @@ impl Config {
             redis_url,
             redis_pool_size,
             db_pool_size,
+            sqlite_core_pool_size,
+            sqlite_channel_pool_size,
+            sqlite_search_pool_size,
+            sqlite_read_cache_ttl_ms,
+            sqlite_read_queue_timeout_ms,
             db_read_pool_size,
             relay_url,
             pairing_relay_url,

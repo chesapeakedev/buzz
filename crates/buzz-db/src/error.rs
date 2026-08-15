@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// An embedded read bulkhead could not admit work before its deadline.
+    #[error("embedded read temporarily unavailable: {0}")]
+    ReadUnavailable(String),
+
     /// A SQLx driver-level error.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),

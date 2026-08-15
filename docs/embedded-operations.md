@@ -204,6 +204,26 @@ post-commit fan-out separately. Built-in metrics are
 `buzz_sqlite_writer_wait_seconds` and
 `buzz_sqlite_event_transaction_seconds`.
 
+Channel-window and FTS reads have independent, query-only pools against that
+same WAL database. Their defaults are 4 and 2 connections; the core pool
+defaults to 8. Tune them with `BUZZ_SQLITE_CHANNEL_POOL_SIZE`,
+`BUZZ_SQLITE_SEARCH_POOL_SIZE`, and `BUZZ_SQLITE_CORE_POOL_SIZE`. An explicitly
+set `BUZZ_DB_POOL_SIZE` remains the core-pool fallback for compatibility.
+`BUZZ_SQLITE_READ_QUEUE_TIMEOUT_MS` (default 5000) bounds admission. An HTTP
+read that cannot acquire its bulkhead returns 503 and should be retried after
+one second; readiness remains healthy during this transient saturation.
+
+Embedded channel windows and searches cache raw results, including empty
+results, for `BUZZ_SQLITE_READ_CACHE_TTL_MS` (default 3000). Identical misses
+are coalesced, errors are not retained, and each cache is capped at 512 keys.
+Realtime fan-out is immediate, but a newly accepted durable event may take up
+to the configured TTL to appear in a fresh query. Set the TTL to `0` for the
+immediate cache rollback; PostgreSQL queries do not use this cache. Monitor
+`buzz_sqlite_read_cache_total`, `buzz_sqlite_read_loaders_in_flight`,
+`buzz_sqlite_read_queue_seconds`, `buzz_sqlite_read_query_seconds`, and
+`buzz_sqlite_read_pool_timeouts_total`, plus current/high-water pool gauges;
+all are split by the bounded `lane` label.
+
 Safe investigation order:
 
 1. Capture query plans and write amplification.
@@ -214,6 +234,11 @@ Safe investigation order:
 Do not add multiple SQLite writers, share a SQLite file across relay processes,
 or silently weaken durability. Those requirements select the distributed
 PostgreSQL/Redis/S3 profile.
+
+Splitting the physical database and adopting Turso are deferred. Reconsider
+them only after these read fixes if sustained writer-wait p95 exceeds 50 ms or
+write conflicts appear. Promote to PostgreSQL/Redis/S3 sooner whenever the
+operational boundary above is reached.
 
 ## 6. Evidence and next milestone
 
