@@ -1,6 +1,133 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
+async function mockRepositoryQuery(
+  page: import("@playwright/test").Page,
+  outcome: "denied" | "empty" | "failure",
+  options: { contact?: string; nip07?: boolean } = {},
+) {
+  await page.addInitScript(
+    ({ result, nip07 }) => {
+      if (nip07) {
+        window.nostr = {
+          async getPublicKey() {
+            return "ab".repeat(32);
+          },
+          async signEvent(event) {
+            return {
+              ...event,
+              id: "cd".repeat(32),
+              pubkey: "ab".repeat(32),
+              sig: "ef".repeat(64),
+            };
+          },
+        };
+      }
+      class MockWebSocket extends EventTarget {
+        static OPEN = 1;
+        readyState = 1;
+        constructor(_url: string) {
+          super();
+          setTimeout(() => this.dispatchEvent(new Event("open")), 0);
+        }
+        send(raw: string) {
+          const message = JSON.parse(raw) as unknown[];
+          if (message[0] !== "REQ") return;
+          const sub = message[1];
+          if (result === "denied") {
+            this.dispatchEvent(
+              new MessageEvent("message", {
+                data: JSON.stringify([
+                  "CLOSED",
+                  sub,
+                  "restricted: not a relay member",
+                ]),
+              }),
+            );
+          } else if (result === "empty") {
+            this.dispatchEvent(
+              new MessageEvent("message", {
+                data: JSON.stringify(["EOSE", sub]),
+              }),
+            );
+          } else {
+            this.dispatchEvent(new Event("error"));
+          }
+        }
+        close() {
+          this.readyState = 3;
+        }
+      }
+      Object.assign(window, { WebSocket: MockWebSocket });
+    },
+    { result: outcome, nip07: options.nip07 ?? false },
+  );
+  await page.route("**/*", async (route) => {
+    if (route.request().headers().accept === "application/nostr+json") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/nostr+json",
+        body: JSON.stringify({ contact: options.contact }),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+}
+
+test("anonymous private community shows configured contact and Buzz deep link", async ({
+  page,
+}) => {
+  await mockRepositoryQuery(page, "denied", { contact: "owner@example.com" });
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "This is a private Buzz community" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "owner@example.com" }),
+  ).toHaveAttribute("href", "mailto:owner@example.com");
+  await expect(
+    page.getByRole("link", { name: "Open in Buzz" }),
+  ).toHaveAttribute("href", /^buzz:\/\/connect\?relay=/);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+});
+
+test("signed nonmember gets identity-specific denial and fallback guidance", async ({
+  page,
+}) => {
+  await mockRepositoryQuery(page, "denied", { nip07: true });
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "You don’t have access" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Ask the community owner for an invite."),
+  ).toBeVisible();
+});
+
+test("successful empty repository query retains the empty-community state", async ({
+  page,
+}) => {
+  await mockRepositoryQuery(page, "empty");
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "This community is empty" }),
+  ).toBeVisible();
+});
+
+test("transient repository failures offer retry without exposing relay errors", async ({
+  page,
+}) => {
+  await mockRepositoryQuery(page, "failure");
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Couldn’t load this community" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByText("WebSocket connection failed.")).toHaveCount(0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+});
+
 test("home page loads with Buzz branding", async ({ page }) => {
   await page.goto("/");
   await expect(

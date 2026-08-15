@@ -1,5 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { queryEvents, type NostrEvent } from "@/shared/lib/nostr-client";
+import {
+  NostrQueryError,
+  queryEvents,
+  type NostrEvent,
+} from "@/shared/lib/nostr-client";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { mockRepos } from "./mock-repos";
 
@@ -75,6 +79,9 @@ export function useRepos({ enabled = true }: { enabled?: boolean } = {}) {
     queryFn: fetchRepos,
     enabled,
     staleTime: 60_000,
+    retry: (failureCount, error) =>
+      !(error instanceof NostrQueryError && error.kind === "access-denied") &&
+      failureCount < 2,
   });
 }
 
