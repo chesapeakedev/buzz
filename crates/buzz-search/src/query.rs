@@ -430,7 +430,7 @@ pub async fn search_sqlite(
         "SELECT e.id, e.kind, e.pubkey, e.channel_id, \
          e.created_at / 1000000 AS created_at_s, \
          -bm25(events_fts) AS rank \
-         FROM events_fts JOIN events e ON e.rowid = events_fts.rowid \
+         FROM events_fts CROSS JOIN events e ON e.rowid = events_fts.rowid \
          WHERE e.community_id = ",
     );
     builder
@@ -503,7 +503,23 @@ pub async fn search_sqlite(
         .push(" OFFSET ")
         .push_bind(offset);
 
-    let rows = builder.build().fetch_all(pool).await?;
+    let acquired = std::time::Instant::now();
+    let mut connection = pool.acquire().await.map_err(|error| {
+        metrics::counter!("buzz_sqlite_read_pool_timeouts_total", "lane" => "search").increment(1);
+        SearchError::ReadUnavailable(error.to_string())
+    })?;
+    let active = pool.size() - pool.num_idle() as u32;
+    static HIGH_WATER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    HIGH_WATER.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+    metrics::gauge!("buzz_sqlite_read_pool_active", "lane" => "search").set(active as f64);
+    metrics::gauge!("buzz_sqlite_read_pool_high_water", "lane" => "search")
+        .set(HIGH_WATER.load(std::sync::atomic::Ordering::Relaxed) as f64);
+    metrics::histogram!("buzz_sqlite_read_queue_seconds", "lane" => "search")
+        .record(acquired.elapsed().as_secs_f64());
+    let query_started = std::time::Instant::now();
+    let rows = builder.build().fetch_all(&mut *connection).await?;
+    metrics::histogram!("buzz_sqlite_read_query_seconds", "lane" => "search")
+        .record(query_started.elapsed().as_secs_f64());
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;

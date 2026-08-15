@@ -468,6 +468,39 @@ async fn sqlite_search_contract() {
 }
 
 #[tokio::test]
+async fn sqlite_search_plan_is_fts_first_then_rowid_lookup() {
+    let backend = ContractBackend::sqlite().await;
+    let ContractBackend::Sqlite { pool } = backend else {
+        unreachable!("SQLite fixture")
+    };
+    let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "EXPLAIN QUERY PLAN \
+         SELECT e.id FROM events_fts \
+         CROSS JOIN events e ON e.rowid = events_fts.rowid \
+         WHERE e.community_id = ? AND e.deleted_at IS NULL \
+           AND events_fts MATCH ?",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind("hello")
+    .fetch_all(&pool)
+    .await
+    .expect("explain SQLite FTS query");
+    let plan = rows
+        .into_iter()
+        .map(|(_, _, _, detail)| detail)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan.contains("SCAN events_fts VIRTUAL TABLE"),
+        "FTS virtual table must drive the plan: {plan}"
+    );
+    assert!(
+        plan.contains("SEARCH e USING INTEGER PRIMARY KEY (rowid=?)"),
+        "canonical events must use the rowid lookup: {plan}"
+    );
+}
+
+#[tokio::test]
 async fn sqlite_search_index_changes_at_the_event_transaction_boundary() {
     let temp = tempfile::tempdir().expect("create SQLite search tempdir");
     let options = SqliteConnectOptions::new()
