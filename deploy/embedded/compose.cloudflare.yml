@@ -1,0 +1,17 @@
+services:
+  relay:
+    ports: !override
+      - "127.0.0.1:${BUZZ_HTTP_PORT:-3000}:3000"
+
+  cloudflared:
+    image: cloudflare/cloudflared@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
