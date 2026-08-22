@@ -126,7 +126,7 @@ validates the rebased, signed, merge-free stack and force-with-lease updates the
 fork's `main`; it never contacts GitHub's pull-request API. Synchronization and
 publication run only from the maintained local checkout; no scheduled or
 GitHub-hosted sync is part of the fork workflow. If a rebase conflicts, use the repository-scoped
-`$deliver-embedded-backends` Codex skill to reproduce and resolve it locally.
+`$maintain-fork` Codex skill to reproduce and resolve it locally.
 
 ### Remove Block-specific release authority
 
