@@ -1,14 +1,16 @@
 # Run embedded Buzz at `buzz.chesapeake.dev` with Cloudflare Tunnel
 
-This guide runs one embedded Buzz relay on this device using Docker Compose.
+This guide runs an embedded Buzz community relay and ephemeral pairing relay on
+this device using Docker Compose.
 SQLite state, media objects, and the relay identity live in the `buzz-data`
 Docker volume. A `cloudflared` sidecar makes an outbound connection to
 Cloudflare, so the router does not need port forwarding and the host does not
 need inbound ports 80 or 443 open.
 
-The public client URL is `wss://buzz.chesapeake.dev`. Cloudflare terminates TLS
-and forwards ordinary HTTP/WebSocket traffic through the tunnel to
-`http://relay:3000` on the private Compose network.
+The public client URLs are `wss://buzz.chesapeake.dev` and
+`wss://pairing.buzz.chesapeake.dev`. Cloudflare terminates TLS and forwards
+ordinary HTTP/WebSocket traffic through the tunnel to the corresponding
+container on the private Compose network.
 
 ## 1. Configure this device
 
@@ -24,6 +26,8 @@ Edit `deploy/embedded/.env` and set:
 BUZZ_IMAGE=buzz-embedded:<YYYY-MM-DD>-<short-commit>
 BUZZ_DOMAIN=buzz.chesapeake.dev
 RELAY_URL=wss://buzz.chesapeake.dev
+BUZZ_PAIRING_DOMAIN=pairing.buzz.chesapeake.dev
+BUZZ_PAIRING_RELAY_URL=wss://pairing.buzz.chesapeake.dev
 RELAY_ACCESS=closed
 RELAY_OWNER_PUBKEY=<owner-npub-or-64-character-hex-public-key>
 BUZZ_REQUIRE_AUTH_TOKEN=true
@@ -101,6 +105,9 @@ These labels reflect Cloudflare's current main dashboard:
 10. For **Service URL**, enter exactly `http://relay:3000`.
 11. Select **Add route** or **Save**. Cloudflare creates the proxied DNS record
     for `buzz.chesapeake.dev` automatically.
+12. Add a second **Published application** route. Use hostname
+    `pairing.buzz.chesapeake.dev`, leave the path empty, and set **Service URL**
+    to exactly `http://pairing-relay:5000`.
 
 Do not create a Cloudflare Access application in front of this hostname unless
 all Buzz clients are known to support that additional authentication flow.
@@ -129,11 +136,12 @@ docker compose \
   up -d --wait
 ```
 
-The override binds the relay only to `127.0.0.1:3000`; it is not exposed on the
-LAN. Verify the local origin and tunnel container:
+The override binds both relays only to loopback; neither is exposed on the LAN.
+Verify the local origins and tunnel container:
 
 ```bash
 curl -fsS http://127.0.0.1:3000/_readiness
+bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'
 docker compose \
   --env-file deploy/embedded/.env \
   -f deploy/embedded/compose.yml \
@@ -148,6 +156,10 @@ document:
 curl -fsS https://buzz.chesapeake.dev/_readiness
 curl -fsS -H 'Accept: application/nostr+json' https://buzz.chesapeake.dev/
 ```
+
+The NIP-11 response should contain
+`"pairing_relay_url":"wss://pairing.buzz.chesapeake.dev"`. A WebSocket client
+can then verify that `wss://pairing.buzz.chesapeake.dev` accepts a connection.
 
 Clients should use `wss://buzz.chesapeake.dev`, not an `https://` URL.
 With `BUZZ_SERVE_GIT_WEB_GUI=true`, opening
@@ -167,7 +179,7 @@ docker compose --env-file deploy/embedded/.env \
   -f deploy/embedded/compose.cloudflare.yml ps
 docker compose --env-file deploy/embedded/.env \
   -f deploy/embedded/compose.yml \
-  -f deploy/embedded/compose.cloudflare.yml logs --tail=200 relay cloudflared
+  -f deploy/embedded/compose.cloudflare.yml logs --tail=200 relay pairing-relay cloudflared
 
 # Restart without deleting data
 docker compose --env-file deploy/embedded/.env \
@@ -202,8 +214,8 @@ sure its Service URL is `http://relay:3000`, not `localhost`: inside the
 - Back up the complete stopped `buzz-data` volume and record the exact image
   tag. Test restore into an empty volume.
 - Configure this device not to suspend while it is expected to host Buzz.
-- Docker's `restart: unless-stopped` brings both containers back after a Docker
-  daemon or device restart, unless an operator explicitly stopped them.
+- Docker's `restart: unless-stopped` brings all three containers back after a
+  Docker daemon or device restart, unless an operator explicitly stopped them.
 
 ## Cloudflare references
 

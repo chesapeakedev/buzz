@@ -1,8 +1,10 @@
 # Embedded Buzz relay
 
-This bundle runs only the relay. SQLite, local coordination, filesystem media,
-and the durable data directory are provided by the image; PostgreSQL, Redis,
-and MinIO are intentionally absent.
+This bundle runs the community relay and its ephemeral NIP-AB device-pairing
+relay from the same image. SQLite, local coordination, filesystem media, and
+the durable data directory are provided by the community relay; the pairing
+relay keeps no durable state. PostgreSQL, Redis, and MinIO are intentionally
+absent.
 
 ## Local-only start
 
@@ -10,6 +12,10 @@ and MinIO are intentionally absent.
 docker compose -f compose.yml up -d --wait
 curl -fsS http://127.0.0.1:8080/_readiness
 ```
+
+The community relay listens on port 3000 and advertises the pairing relay on
+port 5000 in its NIP-11 document. Public deployments should set
+`BUZZ_PAIRING_RELAY_URL` to the pairing relay's public `wss://` hostname.
 
 To publish a relay from a device behind NAT without opening inbound ports, use
 the Cloudflare Tunnel guide for [`buzz.chesapeake.dev`](cloudflare-tunnel.md).
