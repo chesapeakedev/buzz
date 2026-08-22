@@ -2889,8 +2889,17 @@ impl Db {
     /// Verify the mixed-version channel-roster database fence end to end.
     #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
     pub async fn verify_channel_roster_fence(&self) -> Result<()> {
-        channel::verify_channel_roster_fence_catalog(&self.pool).await?;
-        channel::verify_channel_roster_fence_behavior(&self.pool).await
+        match self.backend.as_ref() {
+            DatabaseBackend::Postgres(_) => {
+                channel::verify_channel_roster_fence_catalog(&self.pool).await?;
+                channel::verify_channel_roster_fence_behavior(&self.pool).await
+            }
+            // Migration 0032 protects rolling PostgreSQL deployments from
+            // legacy roster writers. SQLite is single-process and has no
+            // PostgreSQL partitioned events catalog or mixed-version writer
+            // boundary to probe.
+            DatabaseBackend::Sqlite(_) => Ok(()),
+        }
     }
 
     /// Capture the active roster while holding the membership-writer lock.
@@ -7352,6 +7361,9 @@ mod tests {
         .await
         .expect("SQLite facade");
         assert_eq!(db.backend_kind(), DatabaseBackendKind::Sqlite);
+        db.verify_channel_roster_fence()
+            .await
+            .expect("SQLite startup gate must not use the PostgreSQL roster probe");
         assert!(db.ping().await);
         assert!(db.read_pool_stats().is_none());
         let host = format!("embedded-{}.example", Uuid::new_v4().simple());
