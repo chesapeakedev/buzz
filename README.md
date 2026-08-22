@@ -14,6 +14,34 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
+## ChesapeakeDev fork changelog
+
+This repository is the ChesapeakeDev fork of
+[block/buzz](https://github.com/block/buzz). The fork preserves Buzz’s
+protocol, clients, attribution, and Apache-2.0 license while adding and
+maintaining:
+
+- An embedded, single-process relay profile using SQLite, local coordination,
+  filesystem media storage, and one durable data directory. The existing
+  PostgreSQL/Redis/S3 distributed profile remains supported.
+- A self-hosting deployment bundle with Docker Compose, optional Caddy and
+  Cloudflare Tunnel configurations, and fork-owned relay images published to
+  `ghcr.io/chesapeakedev/buzz`.
+- Backend-neutral storage and coordination seams with shared contract tests,
+  including SQLite FTS5 search and SQLite-backed audit/security state.
+- Fork-specific operating boundaries: SQLite is fresh-install-only in the
+  current release line, embedded Git is opt-in for bounded low-volume use, and
+  multi-node or higher-load deployments should use the distributed profile.
+- A separate maintenance and release boundary: fork changes are published
+  directly to `chesapeakedev/buzz`’s `main`, upstream synchronization is
+  manual, and Block-owned signed desktop/mobile and other internal release
+  lanes are not enabled here.
+
+See the [embedded operations guide](docs/embedded-operations.md), the
+[embedded-backends plan](docs/single-node-embedded-backends.md), and the
+[upstream divergence ledger](UPSTREAM.md) for deployment details and the
+current compatibility record.
+
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
@@ -21,16 +49,6 @@
 <p align="center">
   <sub><em>People and agents building together in the same room.</em></sub>
 </p>
-
----
-
-> [!NOTE]
-> This repository is the ChesapeakeDev fork of
-> [block/buzz](https://github.com/block/buzz). It is focused on an IRC-like
-> single-node deployment while retaining Buzz's protocol, clients, attribution,
-> and Apache-2.0 license. See
-> [the embedded-backends plan](docs/single-node-embedded-backends.md) and
-> [the upstream divergence ledger](UPSTREAM.md).
 
 ## What is this, really?
 
