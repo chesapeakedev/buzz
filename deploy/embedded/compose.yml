@@ -11,6 +11,7 @@ services:
       BUZZ_METRICS_PORT: "9102"
       RELAY_ACCESS: ${RELAY_ACCESS:-open}
       RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      BUZZ_PAIRING_RELAY_URL: ${BUZZ_PAIRING_RELAY_URL:-ws://localhost:5000}
       RELAY_CONTACT: ${RELAY_CONTACT:-}
       RELAY_OWNER_PUBKEY: ${RELAY_OWNER_PUBKEY:-}
       BUZZ_REQUIRE_AUTH_TOKEN: ${BUZZ_REQUIRE_AUTH_TOKEN:-false}
@@ -40,6 +41,25 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+    restart: unless-stopped
+
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/chesapeakedev/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "${BUZZ_PAIRING_PORT:-5000}:5000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     restart: unless-stopped
 
 volumes:
