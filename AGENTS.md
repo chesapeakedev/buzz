@@ -691,7 +691,7 @@ invariants when changing fork-owned code:
 - Keep generally useful refactors separate from fork branding, release
   authority, embedded defaults, and deployment policy when practical.
 
-Use `$deliver-embedded-backends` only for maintaining the fork against a new
+Use `$maintain-fork` only for maintaining the fork against a new
 `upstream/main`: rebasing the fork stack, resolving semantic conflicts, running
 the upstream-versus-embedded compatibility smoke, and publishing the validated
 linear stack directly to `origin/main`.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain Fork"
+  short_description: "Rebase and validate the embedded Buzz fork"
+  default_prompt: "Use $maintain-fork to rebase upstream beneath the fork, resolve conflicts, run compatibility gates, and publish origin/main."

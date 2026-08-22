@@ -195,7 +195,7 @@ print(json.dumps({
 PY
 }
 
-# Resolve a rebase-conflict sentinel using codex (deliver-embedded-backends skill),
+# Resolve a rebase-conflict sentinel using codex (maintain-fork skill),
 # then publish the rebased stack and cut a release.
 resolve_conflicts() {
   local sp repo sentinel_contents last_msg prompt
@@ -217,7 +217,7 @@ PY
 
 A 'git rebase --onto <upstream> <merge-base> upstream-sync' stopped on a conflict. The repo is mid-rebase on branch 'upstream-sync' (REBASE_HEAD exists).
 
-Follow the conflict-resolution procedure in .codex/skills/deliver-embedded-backends/SKILL.md (the 'Build a Defended Linear History' / rebase sections): preserve upstream behavior by default, then reapply fork-specific changes behind narrow seams. Never resolve conflicts wholesale with an ours/theirs strategy. Keep every replayed commit Conventional-Commit compliant and DCO-signed.
+Follow the conflict-resolution procedure in .codex/skills/maintain-fork/SKILL.md (the 'Build a Defended Linear History' / rebase sections): preserve upstream behavior by default, then reapply fork-specific changes behind narrow seams. Never resolve conflicts wholesale with an ours/theirs strategy. Keep every replayed commit Conventional-Commit compliant and DCO-signed.
 
 Sentinel state (JSON):
 $sentinel_contents

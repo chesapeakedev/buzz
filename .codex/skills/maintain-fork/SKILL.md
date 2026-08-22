@@ -1,5 +1,5 @@
 ---
-name: deliver-embedded-backends
+name: maintain-fork
 description: Maintain the ChesapeakeDev Buzz embedded-backend fork against block/buzz upstream. Use when fetching or rebasing upstream/main, resolving upstream-sync conflicts, validating distributed-versus-embedded compatibility, recording conflict guidance, or publishing the validated fork stack directly to origin/main.
 ---
 

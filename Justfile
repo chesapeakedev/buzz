@@ -81,7 +81,7 @@ sync-upstream-publish-main:
 sync:
     ./scripts/sync-upstream.sh sync && ./scripts/sync-upstream.sh release
 
-# LLM-resolve a rebase-conflict sentinel (codex + deliver-embedded-backends skill), then publish main + release.
+# LLM-resolve a rebase-conflict sentinel (codex + maintain-fork skill), then publish main + release.
 sync-resolve:
     ./scripts/sync-upstream.sh resolve && ./scripts/sync-upstream.sh release
 
