@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, Result};
+use crate::{relay_members, DatabaseBackend, Db, DbError, Result};
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +91,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.lookup_community_by_host(normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -120,6 +123,9 @@ impl Db {
     /// Returns whether a community id still exists in the active lifecycle state.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.is_community_active(community_id).await;
+        }
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
@@ -138,6 +144,11 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .lookup_community_by_host_for_management(normalized_host)
+                .await;
+        }
         let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
             .bind(normalized_host)
             .fetch_optional(&self.pool)
@@ -161,6 +172,9 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<Vec<OwnedCommunityRecord>> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.list_communities_owned_by(&owner_pubkey).await;
+        }
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.host, c.created_at, c.archived_at
@@ -203,6 +217,9 @@ impl Db {
     /// is never used to re-derive the community.
     #[datastore_span(name = "lookup_community_host", system = "postgresql")]
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.lookup_community_host(community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT host
@@ -230,6 +247,9 @@ impl Db {
     /// validated and size-capped at that write path.
     #[datastore_span(name = "get_community_icon", system = "postgresql")]
     pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.get_community_icon(community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT icon
@@ -255,6 +275,9 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.set_community_icon(community_id, icon).await;
+        }
         sqlx::query(
             r#"
             UPDATE communities
@@ -279,6 +302,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.ensure_configured_community(normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -320,6 +346,11 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<CreateCommunityWithOwnerResult> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .create_community_with_owner(normalized_host, owner_pubkey)
+                .await;
+        }
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pool.begin().await?;
 
@@ -412,6 +443,15 @@ impl Db {
         owner_pubkey: &str,
         protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .archive_community_owned_by(
+                    normalized_host,
+                    owner_pubkey,
+                    protected_deployment_host,
+                )
+                .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
@@ -447,6 +487,11 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<Option<UnarchivedCommunityRecord>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store
+                .unarchive_community_owned_by(normalized_host, owner_pubkey)
+                .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = NULL
@@ -520,6 +565,9 @@ impl Db {
         &self,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if let DatabaseBackend::Sqlite(store) = self.backend.as_ref() {
+            return store.communities_of_channels(channel_ids).await;
+        }
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
