@@ -903,9 +903,8 @@ impl AppState {
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let gif_http_client = crate::api::gifs::build_gif_http_client();
-        let admission_rate_limiter: Arc<dyn RateLimiter> = Arc::new(
-            RedisRateLimiter::new(redis_pool.clone()),
-        );
+        let admission_rate_limiter: Arc<dyn RateLimiter> =
+            Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),

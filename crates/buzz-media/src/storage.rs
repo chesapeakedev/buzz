@@ -209,6 +209,7 @@ pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
 /// Build a community-scoped sidecar key from the resolved request tenant.
 pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
     sidecar_key(ctx.community(), sha256)
+}
 
 /// Backend-neutral media blob operations used by upload, download, and sweep paths.
 ///

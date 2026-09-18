@@ -23,8 +23,8 @@ pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
 pub use filesystem::{FilesystemBlobConfig, FilesystemBlobStorage};
 pub use storage::{
-    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobStorage, BulkDeleteOutcome,
-    BlobMetadata, ByteStream, MediaStorage, ObjectVersionEntry, ObjectVersionKind,
+    ctx_sidecar_key, sidecar_key, BlobHeadMeta, BlobMeta, BlobMetadata, BlobStorage,
+    BulkDeleteOutcome, ByteStream, MediaStorage, ObjectVersionEntry, ObjectVersionKind,
     ObjectVersionRef, ObjectVersionsPage,
 };
 pub use types::BlobDescriptor;
