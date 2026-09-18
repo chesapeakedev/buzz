@@ -16,19 +16,36 @@ validation, and publication path.
 
 ## Current baseline
 
-- Current upstream base commit: `caa64b5e8f584a740e331887a5dd1cda32bcb958`
+- Current upstream base commit: `52621c09bea503f4d5860030dfabfaf9ade71bfa`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest sync target is `caa64b5e8f584a740e331887a5dd1cda32bcb958`. The
-complete fork stack was semantically rebased onto that base in the fixed
-`upstream-sync` branch. It is merge-free, Conventional Commit compliant,
-DCO-signed, passes the sync and fork-release safety contract tests, and was
-published directly to fork `main`. Post-sync compatibility, smoke-harness, and
-maintenance-policy fixes were then fast-forwarded normally; `origin/main` is
-the authoritative current publication tip.
+The latest full-sync target was `caa64b5e8f584a740e331887a5dd1cda32bcb958`.
+The current partial-sync target is `52621c09bea503f4d5860030dfabfaf9ade71bfa`;
+it advances the fork 50 commits from that full-sync base while leaving 185
+upstream commits for the next maintenance chunk.
+
+## 2026-09-18 partial synchronization
+
+The fork stack was replayed from merge base `8c0f42e187ca82d701251fc849217530178ebace`
+onto `52621c09bea503f4d5860030dfabfaf9ade71bfa`, an ancestor of current
+`upstream/main` `8953cbfff58ed768d996677fed3af0e3bac64a20` with exactly 185
+commits remaining above it. The 201 fork commits remain linear, signed, and
+Conventional-Commit compliant.
+
+Representative conflicts preserved upstream behavior while reapplying the
+embedded seams: command/workflow transactions kept database-owned atomic
+operations and upstream revision tests; `Db` facade conflicts retained
+PostgreSQL observability plus SQLite dispatch; media conflicts retained
+versioned-object parsing alongside `BlobStorage`, filesystem sidecars, and
+`BlobMetadata`; relay rate limiting kept the backend-neutral trait and GIF
+client; Docker retained both provenance build arguments and SBOM generation;
+usage leadership retained SQLite coordination and instrumented PostgreSQL
+acquisition; and dependency/template conflicts retained both sides' settings.
+No intentional product-semantic divergence was introduced beyond stopping at
+this 50-commit upstream target for the requested incremental sync.
 
 ## Rebase conflict audit
 
