@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
+#[cfg(test)]
 use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::{CommandExecution, DbError};
@@ -27,7 +28,9 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
+#[cfg(test)]
+use super::ingest::extract_channel_id;
+use super::ingest::{IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
@@ -78,6 +81,7 @@ pub async fn handle_command(
 
 /// Result of persisting a command event: either a duplicate (already processed)
 /// or an open transaction that the handler must commit after executing mutations.
+#[cfg(test)]
 enum PersistResult {
     /// Event was already processed — return idempotent success.
     Duplicate,
@@ -99,6 +103,7 @@ enum PersistResult {
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
 /// operations such as workflow upserts. DM and approval commands use
 /// database-owned atomic command APIs below and are not part of this legacy path.
+#[cfg(test)]
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -196,6 +201,7 @@ async fn persist_command_event(
     }
 }
 
+#[cfg(test)]
 fn parse_expected_workflow_revision(
     kind: i32,
     expected_revision: Option<&str>,
