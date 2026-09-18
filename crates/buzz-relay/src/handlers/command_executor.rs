@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
+use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::{CommandExecution, DbError};
 use buzz_workflow::executor::TriggerContext;
@@ -26,7 +27,7 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{IngestAuth, IngestError, IngestResult};
+use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,

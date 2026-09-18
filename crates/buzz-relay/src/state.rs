@@ -23,7 +23,6 @@ use buzz_db::Db;
 use buzz_media::BlobStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
-use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{Coordination, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -900,11 +899,7 @@ impl AppState {
             )
             .expect("git pack cache path must be available"),
         );
-        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
-            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let gif_http_client = crate::api::gifs::build_gif_http_client();
-        let admission_rate_limiter: Arc<dyn RateLimiter> =
-            Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
