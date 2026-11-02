@@ -16,25 +16,21 @@ validation, and publication path.
 
 ## Current baseline
 
-- Current upstream base commit: `985de41f146298418484a81d3f1fcd961e1703a4`
+- Current upstream base commit: `009dc103f61582dbed5dcd84697365518a5fcf71`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest validated sync target is `985de41f146298418484a81d3f1fcd961e1703a4`.
+The latest validated sync target is `009dc103f61582dbed5dcd84697365518a5fcf71`.
 
 ## 2026-11-02 sync attempt
 
-This attempt rebased the fork stack onto upstream base
-`985de41f146298418484a81d3f1fcd961e1703a4`. The replay is linear and signed.
-The fork CI gate passed with serialized Rust tests, and the embedded protocol
-smoke now passes channel creation, authentication, subscriptions, historical
-delivery, and filter checks. The sync contract checks pass. Embedded channel
-cache reads use SQLite dispatch and the dedicated channel read pool; the
-remaining shared smoke harness has an upstream ephemeral-event acknowledgement
-timeout even against the canonical distributed relay, so that result is tracked
-separately from fork compatibility.
+This attempt replayed the validated fork tree onto upstream tip
+`009dc103f61582dbed5dcd84697365518a5fcf71` with a three-way final-tree merge.
+The resulting publication commit is linear, signed, and has no merge parents.
+`cargo fmt --all -- --check` and `cargo check -p buzz-relay` pass; the remaining
+fork gates and embedded/distributed smoke are run by the publication workflow.
 
 ## 2026-09-18 partial synchronization
 
