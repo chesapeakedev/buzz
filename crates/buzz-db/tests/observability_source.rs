@@ -864,12 +864,20 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
         || source.contains(SWEEP_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(GENERAL_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
+        || source.contains(".acquire_writer()")
 }
 
-const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
+const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 3] = [
+    "&mut AdmittedTx",
+    "&mut crate::AdmittedTx",
+    "&mut sqlx::Transaction<'_, sqlx::Sqlite>",
+];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 2] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "async fn sqlite_corrupt_window_row_advances_the_raw_cursor(",
+];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
     "pub async fn replace_member_event(",
@@ -1628,6 +1636,7 @@ fn events_insert_tails(source: &str) -> Vec<String> {
 fn runs_event_follow_ups(function_source: &str) -> bool {
     let code = mask_comments_and_literals(function_source);
     code.contains("event_follow_up::after_admitted_insert(")
+        || code.contains("sqlite_event_follow_up::after_admitted_insert(")
         || (code.contains("event_follow_up::enqueue_push_match(")
             && code.contains(".record_channel_event("))
 }
@@ -1982,6 +1991,7 @@ fn event_insert_roster_guard_violations(production_source: &str) -> Vec<String> 
                     .any(|exception| header.starts_with(exception))
                 && !code.contains("guard_channel_roster_event(")
                 && !code.contains("validate_channel_roster_snapshot(")
+                && !code.contains("validate_channel_roster_snapshot_sqlite(")
         })
         .map(|function_source| function_header(function_source).to_owned())
         .collect()

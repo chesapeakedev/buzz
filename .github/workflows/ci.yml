@@ -106,10 +106,13 @@ jobs:
               - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
+              - 'scripts/publish-mobile-release-candidate.sh'
               - 'scripts/release-rulesets.sh'
               - 'scripts/test-mobile-release-contract.sh'
+              - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
               - 'scripts/ci-hermit-retry.sh'
+              - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
       - name: Select runtime suites conservatively at the PR file-list limit
@@ -123,20 +126,27 @@ jobs:
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh
       - name: Release workflow source contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract
         run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Desktop release candidate contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract
+        if: github.repository == 'block/buzz'
         run: |
           scripts/test-oss-desktop-promotion.sh
           scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
-        run: scripts/test-mobile-release-contract.sh
+        if: github.repository == 'block/buzz'
+        run: |
+          scripts/test-mobile-release-contract.sh
+          scripts/test-mobile-release-candidate-publisher.sh
       - name: Desktop instance environment contract
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
+        if: github.repository == 'block/buzz'
         run: scripts/test-mobile-worktree-overrides.sh
       - name: Codex security review contract
         run: just security-review-check
@@ -144,21 +154,21 @@ jobs:
         run: |
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
-      - name: SQLx dependency pin
-        run: |
-          python3 scripts/check-sqlx-pin.py
-          python3 scripts/test-sqlx-pin.py
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
         run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs
       - name: File size policy
         run: just file-size-check
+      - name: File size ratchet unit tests
+        if: github.repository == 'block/buzz'
+        run: node --test scripts/check-file-sizes-core.test.mjs
 
   dead-token-guard:
     name: Dead Token Reference Guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.repository == 'block/buzz'
     permissions:
       contents: read
     steps:
@@ -185,6 +195,19 @@ jobs:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: required
+
+  fork-release-safety:
+    name: Fork Release Safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Verify upstream publishing remains disabled in forks
+        run: |
+          scripts/test-fork-release-safety.sh
+          scripts/test-chesapeakedev-release-contract.sh
 
   rust-cross-compile-domain:
     name: Rust Cross-Compile

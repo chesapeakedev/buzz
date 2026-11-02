@@ -1990,6 +1990,44 @@ impl Db {
         channel: NewChannel<'_>,
         event: &nostr::Event,
     ) -> Result<ChannelCreate> {
+        if let Some(sqlite) = &self.sqlite {
+            let (_record, inserted) = sqlite
+                .create_channel_with_id(
+                    community_id,
+                    channel_id,
+                    channel.name,
+                    channel.channel_type,
+                    channel.visibility,
+                    channel.description,
+                    channel.created_by,
+                    channel.ttl_seconds,
+                )
+                .await?;
+            if !inserted {
+                let resent = sqlite
+                    .get_event_by_id(community_id, event.id.as_bytes())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                return Ok(ChannelCreate::Exists { resent });
+            }
+            for member in channel.members {
+                sqlite
+                    .add_member(
+                        community_id,
+                        channel_id,
+                        member,
+                        crate::channel::MemberRole::Member,
+                        Some(channel.created_by),
+                    )
+                    .await?;
+            }
+            let (stored, _) = sqlite
+                .insert_event_with_thread_metadata(community_id, event, Some(channel_id), None)
+                .await?;
+            return Ok(ChannelCreate::Created(Box::new(stored)));
+        }
         create_channel_with_event(
             &self.pool,
             self.push_enqueue.clone(),
@@ -2076,6 +2114,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<ChannelRecord> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_channel(community_id, channel_id).await;
+        }
         get_channel_with_operation(
             &self.pool,
             community_id,

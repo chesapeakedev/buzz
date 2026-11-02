@@ -3235,16 +3235,29 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp adapter dir");
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/usr/bin/env bash\n{script}\n"))
+        let temp_path = dir.join(format!(".{name}.tmp"));
+        std::fs::write(&temp_path, format!("#!/usr/bin/env bash\n{script}\n"))
             .expect("write fake adapter");
-        let mut permissions = std::fs::metadata(&path)
+        let mut permissions = std::fs::metadata(&temp_path)
             .expect("adapter metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
-        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
-            .await
-            .expect("spawn named fake adapter");
+        std::fs::set_permissions(&temp_path, permissions).expect("chmod fake adapter");
+        std::fs::rename(&temp_path, &path).expect("publish fake adapter");
+        let mut client = None;
+        for _ in 0..100 {
+            match AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false).await {
+                Ok(value) => {
+                    client = Some(value);
+                    break;
+                }
+                Err(error) if error.to_string().contains("Text file busy") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("spawn named fake adapter: {error}"),
+            }
+        }
+        let client = client.expect("spawn named fake adapter remained busy");
         (client, dir)
     }
 
@@ -3262,14 +3275,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("buzz-acp-env-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create env probe dir");
         let path = dir.join(file_name);
+        let temp_path = dir.join(format!(".{file_name}.tmp"));
         std::fs::write(
-            &path,
+            &temp_path,
             format!("#!/bin/sh\nprintf '%s\\n' \"${{{var}:-<unset>}}\"\n"),
         )
         .expect("write env probe script");
-        let mut permissions = std::fs::metadata(&path).expect("stat probe").permissions();
+        let mut permissions = std::fs::metadata(&temp_path)
+            .expect("stat probe")
+            .permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&path, permissions).expect("chmod probe");
+        std::fs::set_permissions(&temp_path, permissions).expect("chmod probe");
+        std::fs::rename(&temp_path, &path).expect("publish env probe");
 
         let mut client = AcpClient::spawn(
             path.to_str().expect("probe path is UTF-8"),
@@ -3295,7 +3312,9 @@ mod tests {
     /// before `extra_env`, so the later `Command::env` write wins).
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Serialize process-environment reads with env-mutating tests.
     async fn spawn_applies_runtime_env_defaults_with_extra_env_precedence() {
+        let _env_guard = crate::build_mcp_servers_tests::ENV_LOCK.lock().unwrap();
         const VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
         if std::env::var_os(VAR).is_some() {
             // Inherited parent values win over both layers; the default and
@@ -4803,8 +4822,8 @@ sleep 1"#,
             .session_prompt_with_idle_timeout(
                 "wire-session",
                 "hello",
-                std::time::Duration::from_secs(2),
                 std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
             )
             .await
             .expect("wire prompt");

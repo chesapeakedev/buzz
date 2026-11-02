@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
-# Public Buzz relay image — published as ghcr.io/block/buzz:<tag>.
+# Public ChesapeakeDev Buzz relay image — published as
+# ghcr.io/chesapeakedev/buzz:<tag>.
 #
 # Builds the `buzz-relay` binary (Rust 1.98) and the `buzz-web` static bundle
 # (pnpm + vite), then assembles them into a small debian-slim runtime with
@@ -135,9 +136,9 @@ FROM debian:${DEBIAN_VERSION}-slim AS runtime-base
 # one — without it GHCR keeps the image private even when the repo is public.
 LABEL org.opencontainers.image.title="Buzz" \
       org.opencontainers.image.description="WebSocket relay server for the Buzz communications platform" \
-      org.opencontainers.image.source="https://github.com/block/buzz" \
-      org.opencontainers.image.url="https://github.com/block/buzz" \
-      org.opencontainers.image.documentation="https://github.com/block/buzz#readme" \
+      org.opencontainers.image.source="https://github.com/chesapeakedev/buzz" \
+      org.opencontainers.image.url="https://github.com/chesapeakedev/buzz" \
+      org.opencontainers.image.documentation="https://github.com/chesapeakedev/buzz#readme" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update \
@@ -164,7 +165,7 @@ ENV BUZZ_WEB_DIR=/srv/buzz/web \
 EXPOSE 3000 8080 9102
 
 # deploy/compose mounts a volume here; pre-created so it inherits buzz:buzz.
-RUN mkdir -p /data/git && chown buzz:buzz /data/git
+RUN mkdir -p /data && chown -R buzz:buzz /data
 
 USER buzz:buzz
 WORKDIR /var/lib/buzz

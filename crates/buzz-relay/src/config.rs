@@ -3,6 +3,7 @@
 use std::time::Duration;
 use std::{collections::HashMap, net::SocketAddr};
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{error, warn};
@@ -32,7 +33,7 @@ pub enum ConfigError {
 /// # Role resolution (nip98 mode only)
 ///
 /// In `nip98` mode the authenticated pubkey is resolved to an
-/// `AdminPrincipal` at request time via [`crate::api::admin::auth::lookup_admin_principal`]:
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
 /// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
 /// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
 ///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)
@@ -112,10 +113,75 @@ impl std::fmt::Debug for KlipyConfig {
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
+/// Backend profile selected for this relay process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentMode {
+    /// One-process profile using SQLite, local coordination, and filesystem objects.
+    Embedded,
+    /// Distributed profile using PostgreSQL, Redis, and S3-compatible storage.
+    Distributed,
+}
+
+/// Access policy for the deployment's configured community.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityAccess {
+    /// Anyone may join; authentication and channel policy still apply.
+    Open,
+    /// Membership must be granted by an owner or operator.
+    Closed,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    server: Option<FileServerConfig>,
+    community: Option<FileCommunityConfig>,
+    git: Option<FileGitConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileServerConfig {
+    bind: Option<String>,
+    public_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileCommunityConfig {
+    access: Option<String>,
+    owner_pubkey: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGitConfig {
+    enabled: Option<bool>,
+}
+
+impl DeploymentMode {
+    /// Whether this profile must avoid distributed-only services.
+    pub const fn is_embedded(self) -> bool {
+        matches!(self, Self::Embedded)
+    }
+}
 
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Enable incremental artifact reads after every serving writer is upgraded.
+    pub artifact_incremental_enabled: bool,
+    /// Selected relational/coordination/object-storage deployment profile.
+    pub deployment_mode: DeploymentMode,
+    /// Whether Git hosting is enabled. Embedded mode defaults to disabled;
+    /// distributed mode defaults to enabled for backwards compatibility.
+    pub git_enabled: bool,
+    /// Access policy for the deployment community.
+    pub community_access: CommunityAccess,
+    /// Whether the access policy was explicitly supplied by the operator.
+    pub community_access_explicit: bool,
+    /// Durable root for the embedded profile (`/data` in the container).
+    pub data_dir: std::path::PathBuf,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -127,6 +193,10 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica freshness budget for fleet usage telemetry
+    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
+    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
+    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -143,6 +213,12 @@ pub struct Config {
     pub drain_jitter_ms: u64,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Maximum connections in the shared Redis pool. Defaults to 16.
+    ///
+    /// deadpool's own default is `CPU_COUNT * 2`, which on a 2-vCPU relay
+    /// pod is only 4 — small enough that rate-limit checks, presence, and
+    /// pub/sub publishes queue behind each other under load.
+    pub redis_pool_size: usize,
     /// Maximum connections in the Postgres writer/reader pools. Defaults to 50.
     ///
     /// The `buzz-db` default of 20 was sized for a handful of pods against
@@ -151,6 +227,16 @@ pub struct Config {
     /// the per-pod pool and requests fail on acquire timeout while the
     /// database sits idle.
     pub db_pool_size: u32,
+    /// Core SQLite pool size (embedded mode only).
+    pub sqlite_core_pool_size: u32,
+    /// Channel-window SQLite read-pool size (embedded mode only).
+    pub sqlite_channel_pool_size: u32,
+    /// FTS SQLite read-pool size (embedded mode only).
+    pub sqlite_search_pool_size: u32,
+    /// Embedded read-result cache TTL in milliseconds; zero disables it.
+    pub sqlite_read_cache_ttl_ms: u64,
+    /// Maximum wait for an embedded read-pool connection.
+    pub sqlite_read_queue_timeout_ms: u64,
     /// Maximum connections in the Postgres read-replica pool
     /// (`BUZZ_DB_READ_POOL_SIZE`). Defaults to `db_pool_size`. Sized
     /// independently so reader capacity can be tuned against the replica's
@@ -158,6 +244,8 @@ pub struct Config {
     pub db_read_pool_size: Option<u32>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// Optional public operator contact, advertised in the NIP-11 `contact` field.
+    pub relay_contact: Option<String>,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
@@ -170,9 +258,6 @@ pub struct Config {
     pub max_frame_bytes: usize,
     /// Number of consecutive buffer-full events tolerated before cancelling a slow client.
     pub slow_client_grace_limit: u8,
-    /// `BUZZ_CLIENT_IP_HEADER`: the request header whose IP access lines log
-    /// as `client_ip`. `None` logs only the TCP `peer_addr`.
-    pub client_ip_header: Option<axum::http::HeaderName>,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
     /// Whether REST API requests must present a valid token. Independent of
@@ -180,10 +265,6 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
-    /// Opt-in NIP-CL compact membership projection; dark by default.
-    pub membership_snapshot_enabled: bool,
-    /// Opt-in NIP-CL public memberships, independent of self discovery.
-    pub membership_public_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -255,7 +336,7 @@ pub struct Config {
     /// streams are accepted, logged, and closed (no session consumer yet).
     pub mesh_demo_echo: bool,
 
-    /// Optional hex-encoded pubkey of the relay owner.
+    /// Optional hex- or bech32-encoded pubkey of the relay owner.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
@@ -289,10 +370,6 @@ pub struct Config {
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
-    /// Endpoint receiving each new per-community storage snapshot
-    /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
-    pub storage_usage_delivery_url: Option<url::Url>,
-
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -313,8 +390,6 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
-    /// Channel media authorization rollout: off, shadow, or enforce.
-    pub media_read_mode: crate::api::media_access::MediaReadMode,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -410,10 +485,6 @@ pub struct Config {
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 
-    /// Permit new community FI policy enables and disables. Default off; receipt
-    /// recovery/status remain available (`BUZZ_NIP_FI_CHANGES`).
-    pub nip_fi_changes: bool,
-
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
     /// fails the deploy that sets it, not the later switch to shadow.
@@ -447,17 +518,30 @@ fn invite_v1_cutoff_from_env() -> Result<Option<u64>, ConfigError> {
     }
 }
 
-/// An empty value turns the setting off; header names match case-insensitively.
-fn parse_client_ip_header(raw: &str) -> Result<Option<axum::http::HeaderName>, ConfigError> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Ok(None);
+fn load_file_config(data_dir: &std::path::Path) -> Result<FileConfig, ConfigError> {
+    let path = std::env::var("BUZZ_CONFIG_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("buzz.toml"));
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str(&contents).map_err(|error| {
+            ConfigError::InvalidValue(format!("{} is invalid TOML: {error}", path.display()))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{} could not be read: {error}",
+            path.display()
+        ))),
     }
-    axum::http::HeaderName::from_bytes(raw.to_ascii_lowercase().as_bytes())
-        .map(Some)
-        .map_err(|_| {
-            ConfigError::InvalidValue(format!("BUZZ_CLIENT_IP_HEADER is not a header name: {raw}"))
-        })
+}
+
+fn parse_community_access(raw: &str) -> Result<CommunityAccess, ConfigError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "open" => Ok(CommunityAccess::Open),
+        "closed" | "private" => Ok(CommunityAccess::Closed),
+        _ => Err(ConfigError::InvalidValue(
+            "community access must be open or closed".to_string(),
+        )),
+    }
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -532,6 +616,8 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     }
     Ok(raw.trim_end_matches('/').to_string())
 }
+
+const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
 
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
@@ -614,18 +700,51 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
         Err(error) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid UTF-8: {error}"
         ))),
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "on" => Ok(true),
-            "false" | "0" | "off" | "" => Ok(false),
-            _ => Err(ConfigError::InvalidValue(format!(
-                "{name} must be true or false"
-            ))),
-        },
+        Ok(value) => parse_bool_value(name, &value),
+    }
+}
+
+fn parse_bool_value(name: &str, value: &str) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" => Ok(true),
+        "false" | "0" | "off" | "" => Ok(false),
+        _ => Err(ConfigError::InvalidValue(format!(
+            "{name} must be true or false"
+        ))),
     }
 }
 
 fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     parse_bool(name, false)
+}
+
+fn deployment_mode_from_env() -> Result<DeploymentMode, ConfigError> {
+    if let Ok(raw) = std::env::var("BUZZ_DEPLOYMENT_MODE") {
+        return match raw.trim().to_ascii_lowercase().as_str() {
+            "embedded" | "single-node" | "single_node" => Ok(DeploymentMode::Embedded),
+            "distributed" | "postgres" => Ok(DeploymentMode::Distributed),
+            _ => Err(ConfigError::InvalidValue(
+                "BUZZ_DEPLOYMENT_MODE must be embedded or distributed".to_string(),
+            )),
+        };
+    }
+
+    let distributed_setting_present = [
+        "DATABASE_URL",
+        "READ_DATABASE_URL",
+        "REDIS_URL",
+        "BUZZ_S3_ENDPOINT",
+        "BUZZ_S3_ACCESS_KEY",
+        "BUZZ_S3_SECRET_KEY",
+        "BUZZ_S3_BUCKET",
+    ]
+    .into_iter()
+    .any(|name| std::env::var_os(name).is_some());
+    Ok(if distributed_setting_present {
+        DeploymentMode::Distributed
+    } else {
+        DeploymentMode::Embedded
+    })
 }
 
 fn ensure_git_repo_path(
@@ -676,8 +795,55 @@ fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let bind_addr_raw =
-            std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+        let deployment_mode = deployment_mode_from_env()?;
+        let data_dir = std::env::var("BUZZ_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/data"));
+        let file_config = load_file_config(&data_dir)?;
+        let file_server = file_config.server.as_ref();
+        let file_community = file_config.community.as_ref();
+        let file_git = file_config.git.as_ref();
+        let git_enabled = match std::env::var("BUZZ_GIT_ENABLED") {
+            Ok(raw) => parse_bool_value("BUZZ_GIT_ENABLED", &raw)?,
+            Err(std::env::VarError::NotPresent) => file_git
+                .and_then(|git| git.enabled)
+                .unwrap_or(deployment_mode == DeploymentMode::Distributed),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_GIT_ENABLED must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let community_access_explicit = std::env::var_os("RELAY_ACCESS").is_some()
+            || file_community
+                .and_then(|community| community.access.as_ref())
+                .is_some();
+        let community_access = match std::env::var("RELAY_ACCESS") {
+            Ok(raw) => parse_community_access(&raw)?,
+            Err(std::env::VarError::NotPresent) => file_community
+                .and_then(|community| community.access.as_deref())
+                .map(parse_community_access)
+                .transpose()?
+                .unwrap_or(CommunityAccess::Open),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "RELAY_ACCESS must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let bind_addr_raw = std::env::var("BUZZ_BIND_ADDR")
+            .or_else(|_| std::env::var("BUZZ_BIND"))
+            .unwrap_or_else(|_| {
+                file_server
+                    .and_then(|server| server.bind.clone())
+                    .unwrap_or_else(|| {
+                        if deployment_mode.is_embedded() {
+                            "127.0.0.1:3000".to_string()
+                        } else {
+                            "0.0.0.0:3000".to_string()
+                        }
+                    })
+            });
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
@@ -708,6 +874,16 @@ impl Config {
             })?,
             Err(_) => 0,
         };
+        let usage_metrics_replica_max_age_ms =
+            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
+                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
+                            .to_string(),
+                    )
+                })?,
+                Err(_) => 30_000,
+            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -731,19 +907,63 @@ impl Config {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-        let db_pool_size = std::env::var("BUZZ_DB_POOL_SIZE")
+        let redis_pool_size = std::env::var("BUZZ_REDIS_POOL_SIZE")
             .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(16);
+
+        let db_pool_size_raw = std::env::var("BUZZ_DB_POOL_SIZE").ok();
+        let db_pool_size = db_pool_size_raw
+            .as_deref()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(50);
+
+        let positive_u32 = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(default)
+        };
+        let sqlite_core_pool_size = std::env::var("BUZZ_SQLITE_CORE_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                db_pool_size_raw
+                    .as_deref()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|v| *v > 0)
+            })
+            .unwrap_or(8);
+        let sqlite_channel_pool_size = positive_u32("BUZZ_SQLITE_CHANNEL_POOL_SIZE", 4);
+        let sqlite_search_pool_size = positive_u32("BUZZ_SQLITE_SEARCH_POOL_SIZE", 2);
+        let sqlite_read_cache_ttl_ms = std::env::var("BUZZ_SQLITE_READ_CACHE_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let sqlite_read_queue_timeout_ms = std::env::var("BUZZ_SQLITE_READ_QUEUE_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5000);
 
         let db_read_pool_size = std::env::var("BUZZ_DB_READ_POOL_SIZE")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
 
-        let relay_url =
-            std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+        let relay_url = std::env::var("RELAY_URL").unwrap_or_else(|_| {
+            file_server
+                .and_then(|server| server.public_url.clone())
+                .unwrap_or_else(|| "ws://localhost:3000".to_string())
+        });
+        let relay_contact = std::env::var("RELAY_CONTACT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -790,9 +1010,6 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
 
-        let client_ip_header =
-            parse_client_ip_header(&std::env::var("BUZZ_CLIENT_IP_HEADER").unwrap_or_default())?;
-
         let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -801,7 +1018,18 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
+        let require_relay_membership = match std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP") {
+            Ok(value) => parse_bool_value("BUZZ_REQUIRE_RELAY_MEMBERSHIP", &value)?,
+            Err(std::env::VarError::NotPresent) => {
+                matches!(community_access, CommunityAccess::Closed)
+            }
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_REQUIRE_RELAY_MEMBERSHIP must be valid UTF-8: {error}"
+                )))
+            }
+        };
+        let artifact_incremental_enabled = std::env::var("BUZZ_ARTIFACT_INCREMENTAL_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -850,28 +1078,22 @@ impl Config {
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
-        let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
+        let relay_owner_raw = std::env::var("RELAY_OWNER_PUBKEY")
             .ok()
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                // Must be exactly 64 lowercase hex characters (32-byte pubkey).
-                // Fail closed — once RELAY_OWNER_PUBKEY can be the break-glass
-                // operator root (owner-fallback B), silently discarding a malformed
-                // value would be a lockout, not a graceful degradation.
-                let valid = s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
-                if valid {
-                    Ok(s)
-                } else {
-                    Err(ConfigError::InvalidValue(format!(
-                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — \
-                         got: {s:?}. Fix or unset it; a malformed value is a startup error \
-                         because this key can serve as the break-glass operator root when \
-                         RELAY_OPERATOR_PUBKEYS is empty."
-                    )))
-                }
-            })
-            .transpose()?;
+            .or_else(|| file_community.and_then(|community| community.owner_pubkey.clone()));
+        let relay_owner_pubkey = match relay_owner_raw.as_deref() {
+            None => None,
+            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) => Some(
+                nostr::PublicKey::parse(raw.trim())
+                    .map_err(|error| {
+                        ConfigError::InvalidValue(format!(
+                            "RELAY_OWNER_PUBKEY is not a valid 64-char hex or npub public key: {error}"
+                        ))
+                    })?
+                    .to_hex(),
+            ),
+        };
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
         // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
@@ -930,18 +1152,6 @@ impl Config {
             Err(error) => {
                 return Err(ConfigError::InvalidValue(format!(
                     "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
-                )));
-            }
-        };
-        let storage_usage_delivery_url = match std::env::var("BUZZ_STORAGE_USAGE_URL") {
-            Ok(raw) => Some(
-                crate::storage_usage_delivery::parse_delivery_url(&raw)
-                    .map_err(ConfigError::InvalidValue)?,
-            ),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(error) => {
-                return Err(ConfigError::InvalidValue(format!(
-                    "BUZZ_STORAGE_USAGE_URL must be valid UTF-8: {error}"
                 )));
             }
         };
@@ -1010,15 +1220,6 @@ impl Config {
                     "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
                         .to_string(),
                 ));
-            }
-        };
-        let media_read_mode = match std::env::var("BUZZ_MEDIA_READ_MODE") {
-            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
-            Err(std::env::VarError::NotPresent) => crate::api::media_access::MediaReadMode::Off,
-            Err(_) => {
-                return Err(ConfigError::InvalidValue(
-                    "BUZZ_MEDIA_READ_MODE must be valid Unicode".into(),
-                ))
             }
         };
         let media = buzz_media::MediaConfig {
@@ -1170,7 +1371,10 @@ impl Config {
                         .to_string(),
                 ));
             }
-            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotPresent) if deployment_mode.is_embedded() => None,
+            Err(std::env::VarError::NotPresent) => Some(parse_push_gateway_delivery_url(
+                DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
+            )?),
             Err(error) => {
                 return Err(ConfigError::InvalidValue(format!(
                     "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be valid UTF-8: {error}"
@@ -1449,29 +1653,37 @@ impl Config {
             ));
         }
         Ok(Self {
+            deployment_mode,
+            git_enabled,
+            community_access,
+            community_access_explicit,
+            data_dir,
             bind_addr,
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
+            redis_pool_size,
             db_pool_size,
+            sqlite_core_pool_size,
+            sqlite_channel_pool_size,
+            sqlite_search_pool_size,
+            sqlite_read_cache_ttl_ms,
+            sqlite_read_queue_timeout_ms,
             db_read_pool_size,
             relay_url,
+            relay_contact,
             pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
             send_buffer_size,
             max_frame_bytes,
             slow_client_grace_limit,
-            client_ip_header,
             auth,
             require_auth_token,
             buzz_v1_enabled,
-            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
-                .is_ok_and(|v| v == "true"),
-            membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
-                .is_ok_and(|v| v == "true"),
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
@@ -1483,6 +1695,7 @@ impl Config {
             partition_manager_advance_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
+            artifact_incremental_enabled,
             huddle_audio_available,
             mesh,
             mesh_demo_echo,
@@ -1490,11 +1703,9 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             operator_listener_delivery_urls,
-            storage_usage_delivery_url,
             allow_nip_oa_auth,
             klipy,
             media,
-            media_read_mode,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
@@ -1520,7 +1731,6 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
-            nip_fi_changes: parse_bool("BUZZ_NIP_FI_CHANGES", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1591,31 +1801,6 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
-    }
-
-    #[test]
-    fn nip_fi_changes_are_explicitly_default_off() {
-        let (_fi, _cfg) = env_guards();
-        let before = std::env::var("BUZZ_NIP_FI_CHANGES").ok();
-        std::env::remove_var("BUZZ_NIP_FI_CHANGES");
-        assert!(!Config::from_env().unwrap().nip_fi_changes);
-        for value in ["true", "TRUE", "1", "on", " On "] {
-            std::env::set_var("BUZZ_NIP_FI_CHANGES", value);
-            assert!(Config::from_env().unwrap().nip_fi_changes, "{value}");
-        }
-        for value in ["false", "FALSE", "0", "off", "", " Off "] {
-            std::env::set_var("BUZZ_NIP_FI_CHANGES", value);
-            assert!(!Config::from_env().unwrap().nip_fi_changes, "{value}");
-        }
-        std::env::set_var("BUZZ_NIP_FI_CHANGES", "treu");
-        assert!(
-            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
-            if message.contains("BUZZ_NIP_FI_CHANGES must be true or false"))
-        );
-        match before {
-            Some(value) => std::env::set_var("BUZZ_NIP_FI_CHANGES", value),
-            None => std::env::remove_var("BUZZ_NIP_FI_CHANGES"),
-        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one
@@ -1749,12 +1934,30 @@ mod tests {
     }
 
     #[test]
+    fn relay_owner_pubkey_accepts_hex_and_npub_and_normalizes_to_hex() {
+        use nostr::ToBech32 as _;
+
+        let _guards = env_guards();
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().expect("encode npub");
+
+        for value in [&hex, &hex.to_uppercase(), &npub] {
+            std::env::set_var("RELAY_OWNER_PUBKEY", value);
+            let config = Config::from_env().expect("valid relay owner key");
+            assert_eq!(config.relay_owner_pubkey.as_deref(), Some(hex.as_str()));
+        }
+        std::env::remove_var("RELAY_OWNER_PUBKEY");
+    }
+
+    #[test]
     fn defaults_are_valid() {
         let _guards = env_guards();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
+        assert_eq!(config.redis_pool_size, 16);
         assert_eq!(config.db_pool_size, 50);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
@@ -1800,6 +2003,30 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+        assert!(!config.data_dir.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn deployment_mode_explicit_values_are_strict() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        assert_eq!(
+            deployment_mode_from_env().expect("embedded mode"),
+            DeploymentMode::Embedded
+        );
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "distributed");
+        assert_eq!(
+            deployment_mode_from_env().expect("distributed mode"),
+            DeploymentMode::Distributed
+        );
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "typo");
+        assert!(deployment_mode_from_env().is_err());
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
     }
 
     /// Run `Config::from_env()` with the admin variables forced to `values`,
@@ -2352,6 +2579,31 @@ mod tests {
     }
 
     #[test]
+    fn redis_pool_size_env_override_and_invalid_fallback() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
+        let overridden = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
+        let zero = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
+        let junk = Config::from_env().expect("config").redis_pool_size;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
+        } else {
+            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
+        }
+
+        assert_eq!(overridden, 32);
+        assert_eq!(zero, 16, "zero must fall back to the default");
+        assert_eq!(junk, 16, "unparsable value must fall back to the default");
+    }
+
+    #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
@@ -2483,6 +2735,35 @@ mod tests {
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
+
+        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        let defaults = Config::from_env().expect("config");
+
+        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
+        let disabled = Config::from_env().expect("config");
+
+        if let Some(value) = previous_usage {
+            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        }
+        if let Some(value) = previous_serving {
+            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        }
+
+        assert_eq!(defaults.replica_read_max_age_ms, 0);
+        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
+        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
     }
 
     #[test]
@@ -2705,6 +2986,8 @@ mod tests {
         let _guards = env_guards();
         let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        let previous_mode = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
         std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
@@ -2751,6 +3034,34 @@ mod tests {
             std::env::remove_var("BUZZ_PUSH_ENABLED");
         }
         if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        }
+        if let Some(value) = previous_mode {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
+    }
+
+    #[test]
+    fn push_gateway_is_disabled_by_default_for_embedded() {
+        let _guards = env_guards();
+        let previous_mode = std::env::var_os("BUZZ_DEPLOYMENT_MODE");
+        let previous_url = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+
+        let config = Config::from_env().expect("embedded config");
+        assert!(config.push_gateway_delivery_url.is_none());
+
+        if let Some(value) = previous_mode {
+            std::env::set_var("BUZZ_DEPLOYMENT_MODE", value);
+        } else {
+            std::env::remove_var("BUZZ_DEPLOYMENT_MODE");
+        }
+        if let Some(value) = previous_url {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
             std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
@@ -2942,17 +3253,6 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_header_is_off_when_empty_and_case_insensitive() {
-        assert_eq!(parse_client_ip_header("").unwrap(), None);
-        assert_eq!(parse_client_ip_header("  ").unwrap(), None);
-        assert_eq!(
-            parse_client_ip_header(" CF-Connecting-IP ").unwrap(),
-            Some(axum::http::HeaderName::from_static("cf-connecting-ip"))
-        );
-        assert!(parse_client_ip_header("not a header").is_err());
-    }
-
-    #[test]
     fn invalid_bind_addr_returns_error() {
         assert!(matches!(
             parse_bind_addr("not-an-addr"),
@@ -3029,6 +3329,77 @@ mod tests {
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
         );
+    }
+
+    #[test]
+    fn embedded_toml_rejects_unknown_fields() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        std::fs::write(
+            directory.path().join("buzz.toml"),
+            "[server]\nbind = \"127.0.0.1:3000\"\nmisspelled = true\n",
+        )
+        .expect("write config");
+        let error = load_file_config(directory.path()).expect_err("unknown field must fail");
+        assert!(error.to_string().contains("invalid TOML"));
+    }
+
+    #[test]
+    fn community_access_accepts_only_open_or_closed() {
+        assert_eq!(
+            parse_community_access("private").expect("private alias"),
+            CommunityAccess::Closed
+        );
+        assert!(parse_community_access("maybe").is_err());
+    }
+
+    #[test]
+    fn environment_values_override_embedded_toml() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        std::fs::write(
+            directory.path().join("buzz.toml"),
+            "[server]\nbind = \"127.0.0.1:3010\"\npublic_url = \"ws://file.example\"\n[community]\naccess = \"closed\"\n[git]\nenabled = true\n",
+        )
+        .expect("write config");
+        let git_path = directory.path().join("git");
+        std::env::set_var("BUZZ_DEPLOYMENT_MODE", "embedded");
+        std::env::set_var("BUZZ_DATA_DIR", directory.path());
+        std::env::set_var("BUZZ_CONFIG_PATH", directory.path().join("buzz.toml"));
+        std::env::set_var("BUZZ_GIT_REPO_PATH", &git_path);
+        std::env::set_var("BUZZ_BIND_ADDR", "127.0.0.1:3020");
+        std::env::set_var("RELAY_ACCESS", "open");
+        std::env::set_var("BUZZ_GIT_ENABLED", "false");
+        let config = Config::from_env().expect("config");
+        for name in [
+            "BUZZ_DEPLOYMENT_MODE",
+            "BUZZ_DATA_DIR",
+            "BUZZ_CONFIG_PATH",
+            "BUZZ_GIT_REPO_PATH",
+            "BUZZ_BIND_ADDR",
+            "RELAY_ACCESS",
+            "BUZZ_GIT_ENABLED",
+        ] {
+            std::env::remove_var(name);
+        }
+        assert_eq!(config.bind_addr.port(), 3020);
+        assert_eq!(config.community_access, CommunityAccess::Open);
+        assert!(!config.git_enabled);
+        assert_eq!(config.relay_url, "ws://file.example");
+    }
+
+    #[test]
+    fn relay_contact_is_trimmed_and_empty_values_are_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("RELAY_CONTACT", "  owner@example.com  ");
+        let configured = Config::from_env().expect("configured contact");
+        assert_eq!(
+            configured.relay_contact.as_deref(),
+            Some("owner@example.com")
+        );
+        std::env::set_var("RELAY_CONTACT", "   ");
+        let empty = Config::from_env().expect("empty contact");
+        std::env::remove_var("RELAY_CONTACT");
+        assert!(empty.relay_contact.is_none());
     }
 }
 

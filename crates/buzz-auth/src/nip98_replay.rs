@@ -10,7 +10,7 @@
 //!
 //! The required shape (§5):
 //!
-//! - shared state (Redis), atomic set-if-absent, TTL ≥ 120s
+//! - durable shared state, atomic set-if-absent, TTL ≥ 120s
 //! - community-scoped key — see [`nip98_replay_key`]
 //!
 //! ## Usage shape
@@ -58,8 +58,9 @@ pub const MAX_REPLAY_TTL_SECS: u64 = 3600;
 
 /// Shared seen-set for NIP-98 event ids, scoped per community.
 ///
-/// The production implementation lives in `buzz-pubsub` (Redis `SET NX EX`).
-/// A test impl is provided behind `cfg(any(test, feature = "test-utils"))`.
+/// Production implementations use Redis `SET NX EX` in distributed mode and
+/// a relational unique insert in embedded mode. A test impl is provided behind
+/// `cfg(any(test, feature = "test-utils"))`.
 pub trait Nip98ReplayGuard: Send + Sync {
     /// Atomically claim `event_id` in an explicit deployment or community scope.
     fn try_mark_in_scope<'a>(
@@ -75,8 +76,8 @@ pub trait Nip98ReplayGuard: Send + Sync {
     /// `Ok(false)` when an entry already exists (the caller MUST reject the
     /// request as replay).
     ///
-    /// On `Err` (Redis unreachable, etc.) callers MUST fail closed — reject
-    /// the request rather than admitting it. The shared seen-set is a
+    /// On backend error callers MUST fail closed — reject the request rather
+    /// than admitting it. The shared seen-set is a
     /// correctness fence; degrading to "best effort, allow on error" forfeits
     /// the freshness proof.
     ///

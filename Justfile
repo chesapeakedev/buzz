@@ -65,6 +65,47 @@ hooks:
     git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
+# Fetch fork and canonical upstream refs and report their divergence
+sync-upstream-status:
+    ./scripts/sync-upstream.sh status
+
+# Rebase the fork patch stack onto upstream without pushing it
+sync-upstream:
+    ./scripts/sync-upstream.sh sync
+
+# Rebase upstream beneath the fork patch stack and publish fork main directly
+sync-upstream-publish-main:
+    ./scripts/sync-upstream.sh publish-main
+
+# Unattended upstream sync: rebase fork onto upstream, then publish main + release + regression smoke.
+# On rebase conflict, exits non-zero with a sentinel at .git/upstream-sync-conflict.json; run 'just sync-resolve'.
+sync:
+    ./scripts/sync-upstream.sh sync && ./scripts/sync-upstream.sh release
+
+# LLM-resolve a rebase-conflict sentinel (codex + maintain-fork skill), then publish main + release.
+sync-resolve:
+    ./scripts/sync-upstream.sh resolve && ./scripts/sync-upstream.sh release
+
+# Publish the prepared rebased stack (if any), then release + regression smoke.
+sync-release:
+    ./scripts/sync-upstream.sh release
+
+# Exercise upstream-sync behavior against isolated local Git repositories
+test-sync-upstream:
+    ./scripts/test-sync-upstream.sh
+
+# Exercise the same relay protocol workload against upstream distributed and fork embedded tips
+smoke-upstream-fork:
+    ./scripts/test-upstream-fork-smoke.sh
+
+# Verify that fork CI cannot publish through upstream-owned release lanes
+test-fork-release-safety:
+    ./scripts/test-fork-release-safety.sh
+
+# Verify ChesapeakeDev relay publication ownership, tags, and provenance
+test-chesapeakedev-release:
+    ./scripts/test-chesapeakedev-release-contract.sh
+
 # Wipe development state and recreate a clean environment. Installed Buzz is preserved.
 [confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
 reset:
@@ -385,6 +426,9 @@ desktop-e2e-pre-push: _ensure-migrations
 
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+
+# Fork-owned gate: relay/backend formatting, lint, units, and sync contracts only
+fork-ci: fmt-check clippy test-unit test-sync-upstream
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 

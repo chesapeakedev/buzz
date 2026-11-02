@@ -1303,7 +1303,7 @@ mod external_infra {
 
         async fn snapshot(&self) -> DefaultBranchSnapshot {
             DefaultBranchSnapshot::load(
-                &self.state.git_store,
+                &*self.state.git_store,
                 &self.tenant,
                 &self.owner.public_key().to_hex(),
                 &self.repo,
@@ -1330,7 +1330,7 @@ mod external_infra {
             git(&source, &["commit", "-m", "main"]).await;
             git(&source, &["checkout", "legacy"]).await;
             super::super::super::cas_publish::cas_publish(
-                &self.state.git_store,
+                &*self.state.git_store,
                 &self.tenant,
                 &source,
                 &self.owner.public_key().to_hex(),

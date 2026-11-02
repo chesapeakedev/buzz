@@ -127,7 +127,7 @@ mod postgres_tests {
         config.require_relay_membership = true;
         // Restore the production Redis guard; never accept every replay in this test.
         state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
-            state.redis_pool.clone(),
+            state.redis_pool.clone().expect("redis pool"),
         ));
         let state = Arc::new(state);
         let body = serde_json::to_vec(&filter(&key)).unwrap();

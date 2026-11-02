@@ -1328,6 +1328,9 @@ impl Db {
     /// [`Db::route_read`]). Not precedent for routing other permission reads.
     #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.is_relay_member(community, pubkey).await;
+        }
         let path = "relay_membership";
         match self
             .route_read(
@@ -1369,6 +1372,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<bool> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.is_relay_member(community, pubkey).await;
+        }
         is_relay_member(&self.pool, community, pubkey).await
     }
 

@@ -515,6 +515,7 @@ pub async fn accept(
         subscriptions = serde_json::to_value(body_subscriptions)
             .map_err(|_| "invalid subscriptions".to_string())?;
         Some(buzz_db::push::ActiveLease {
+            app_profile: "ios-production",
             endpoint_hash: &endpoint_hash,
             endpoint_grant: &capability,
             max_class,

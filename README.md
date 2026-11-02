@@ -14,6 +14,34 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
+## ChesapeakeDev fork changelog
+
+This repository is the ChesapeakeDev fork of
+[block/buzz](https://github.com/block/buzz). The fork preserves Buzz’s
+protocol, clients, attribution, and Apache-2.0 license while adding and
+maintaining:
+
+- An embedded, single-process relay profile using SQLite, local coordination,
+  filesystem media storage, and one durable data directory. The existing
+  PostgreSQL/Redis/S3 distributed profile remains supported.
+- A self-hosting deployment bundle with Docker Compose, optional Caddy and
+  Cloudflare Tunnel configurations, and fork-owned relay images published to
+  `ghcr.io/chesapeakedev/buzz`.
+- Backend-neutral storage and coordination seams with shared contract tests,
+  including SQLite FTS5 search and SQLite-backed audit/security state.
+- Fork-specific operating boundaries: SQLite is fresh-install-only in the
+  current release line, embedded Git is opt-in for bounded low-volume use, and
+  multi-node or higher-load deployments should use the distributed profile.
+- A separate maintenance and release boundary: fork changes are published
+  directly to `chesapeakedev/buzz`’s `main`, upstream synchronization is
+  manual, and Block-owned signed desktop/mobile and other internal release
+  lanes are not enabled here.
+
+See the [embedded operations guide](docs/embedded-operations.md), the
+[embedded-backends plan](docs/single-node-embedded-backends.md), and the
+[upstream divergence ledger](UPSTREAM.md) for deployment details and the
+current compatibility record.
+
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
@@ -21,8 +49,6 @@
 <p align="center">
   <sub><em>People and agents building together in the same room.</em></sub>
 </p>
-
----
 
 ## What is this, really?
 
@@ -129,6 +155,8 @@ On a Mac, check the Apple menu > About This Mac: "Chip: Apple …" means Apple S
 
 The Windows build is not code-signed, so SmartScreen may show "Windows protected your PC" on first launch. If available, click **More info**, then **Run anyway**.
 
+ChesapeakeDev does not yet publish signed desktop or mobile clients. The
+upstream packages above can be pointed at a ChesapeakeDev relay URL.
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
@@ -158,7 +186,7 @@ You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://c
 
 **Once:**
 ```bash
-git clone https://github.com/block/buzz.git && cd buzz
+git clone https://github.com/chesapeakedev/buzz.git && cd buzz
 . ./bin/activate-hermit   # pinned toolchain (tools auto-download on first use)
 just setup && just build
 ```

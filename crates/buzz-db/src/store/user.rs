@@ -696,6 +696,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_agent_channel_policy(community_id, pubkey).await;
+        }
         crate::user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
     }
 
@@ -788,23 +791,23 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_and_get_policy() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let agent_pk = random_pubkey();
         let owner_pk = random_pubkey();
 
-        ensure_user(&db.pool, community, &agent_pk)
+        ensure_user(db.postgres_pool(), community, &agent_pk)
             .await
             .expect("ensure agent");
-        ensure_user(&db.pool, community, &owner_pk)
+        ensure_user(db.postgres_pool(), community, &owner_pk)
             .await
             .expect("ensure owner");
 
-        let was_set = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk)
+        let was_set = set_agent_owner(db.postgres_pool(), community, &agent_pk, &owner_pk)
             .await
             .expect("set_agent_owner");
         assert!(was_set, "first set_agent_owner should return true");
 
-        let result = get_agent_channel_policy(&db.pool, community, &agent_pk)
+        let result = get_agent_channel_policy(db.postgres_pool(), community, &agent_pk)
             .await
             .expect("get_agent_channel_policy");
 
@@ -822,17 +825,17 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let pk = random_pubkey();
-        ensure_user(&db.pool, community, &pk)
+        ensure_user(db.postgres_pool(), community, &pk)
             .await
             .expect("ensure user");
 
         // owner_only
-        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
+        set_channel_add_policy(db.postgres_pool(), community, &pk, "owner_only")
             .await
             .expect("set owner_only");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
+        let (policy, owner) = get_agent_channel_policy(db.postgres_pool(), community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -840,10 +843,10 @@ mod postgres_tests {
         assert!(owner.is_none(), "no owner was set");
 
         // nobody
-        set_channel_add_policy(&db.pool, community, &pk, "nobody")
+        set_channel_add_policy(db.postgres_pool(), community, &pk, "nobody")
             .await
             .expect("set nobody");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
+        let (policy, owner) = get_agent_channel_policy(db.postgres_pool(), community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -851,10 +854,10 @@ mod postgres_tests {
         assert!(owner.is_none());
 
         // anyone (reset to default)
-        set_channel_add_policy(&db.pool, community, &pk, "anyone")
+        set_channel_add_policy(db.postgres_pool(), community, &pk, "anyone")
             .await
             .expect("set anyone");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
+        let (policy, owner) = get_agent_channel_policy(db.postgres_pool(), community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -868,10 +871,10 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_get_policy_unknown_pubkey() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let pk = random_pubkey();
 
-        let result = get_agent_channel_policy(&db.pool, community, &pk)
+        let result = get_agent_channel_policy(db.postgres_pool(), community, &pk)
             .await
             .expect("query should not error");
 
@@ -884,16 +887,16 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_nonexistent_agent() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let agent_pk = random_pubkey();
         let owner_pk = random_pubkey();
 
         // Only ensure the owner exists -- agent is intentionally absent.
-        ensure_user(&db.pool, community, &owner_pk)
+        ensure_user(db.postgres_pool(), community, &owner_pk)
             .await
             .expect("ensure owner");
 
-        let result = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk).await;
+        let result = set_agent_owner(db.postgres_pool(), community, &agent_pk, &owner_pk).await;
         assert!(
             result.is_err(),
             "should error when agent pubkey is not in users table"
@@ -905,33 +908,33 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_already_owned() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let agent_pk = random_pubkey();
         let owner1 = random_pubkey();
         let owner2 = random_pubkey();
 
-        ensure_user(&db.pool, community, &agent_pk)
+        ensure_user(db.postgres_pool(), community, &agent_pk)
             .await
             .expect("ensure agent");
-        ensure_user(&db.pool, community, &owner1)
+        ensure_user(db.postgres_pool(), community, &owner1)
             .await
             .expect("ensure owner1");
-        ensure_user(&db.pool, community, &owner2)
+        ensure_user(db.postgres_pool(), community, &owner2)
             .await
             .expect("ensure owner2");
 
-        let first = set_agent_owner(&db.pool, community, &agent_pk, &owner1)
+        let first = set_agent_owner(db.postgres_pool(), community, &agent_pk, &owner1)
             .await
             .expect("first set");
         assert!(first, "first set should succeed");
 
-        let second = set_agent_owner(&db.pool, community, &agent_pk, &owner2)
+        let second = set_agent_owner(db.postgres_pool(), community, &agent_pk, &owner2)
             .await
             .expect("second set should not error");
         assert!(!second, "second set should return false (already owned)");
 
         // Verify original owner is preserved.
-        let (_, owner) = get_agent_channel_policy(&db.pool, community, &agent_pk)
+        let (_, owner) = get_agent_channel_policy(db.postgres_pool(), community, &agent_pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -944,10 +947,10 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy_nonexistent_user() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let pk = random_pubkey();
 
-        let result = set_channel_add_policy(&db.pool, community, &pk, "nobody").await;
+        let result = set_channel_add_policy(db.postgres_pool(), community, &pk, "nobody").await;
         assert!(
             result.is_err(),
             "should error when pubkey is not in users table"
@@ -958,10 +961,13 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy_rejects_invalid() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let pubkey = nostr::Keys::generate().public_key().to_bytes().to_vec();
-        ensure_user(&db.pool, community, &pubkey).await.unwrap();
-        let result = set_channel_add_policy(&db.pool, community, &pubkey, "invalid_policy").await;
+        ensure_user(db.postgres_pool(), community, &pubkey)
+            .await
+            .unwrap();
+        let result =
+            set_channel_add_policy(db.postgres_pool(), community, &pubkey, "invalid_policy").await;
         assert!(result.is_err(), "should reject invalid policy value");
     }
 
@@ -1005,17 +1011,17 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn test_owner_only_with_no_owner() {
         let db = setup_db().await;
-        let community = make_community(&db.pool).await;
+        let community = make_community(db.postgres_pool()).await;
         let pk = random_pubkey();
-        ensure_user(&db.pool, community, &pk)
+        ensure_user(db.postgres_pool(), community, &pk)
             .await
             .expect("ensure user");
 
-        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
+        set_channel_add_policy(db.postgres_pool(), community, &pk, "owner_only")
             .await
             .expect("set owner_only");
 
-        let result = get_agent_channel_policy(&db.pool, community, &pk)
+        let result = get_agent_channel_policy(db.postgres_pool(), community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");

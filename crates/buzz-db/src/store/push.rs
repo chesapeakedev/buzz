@@ -48,6 +48,41 @@ async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: Communit
     Ok(())
 }
 
+/// Recovery window for the activation backfill: recent events that the gate
+/// legitimately skipped (no eligible lease at their commit time) are enqueued
+/// when a lease activates, so a user who registers moments after a message
+/// still gets woken. Product coverage only — the advisory-lock total order is
+/// what makes the gate correct; see `PUSH_GATE_LOCK_NAMESPACE`.
+pub(crate) const PUSH_GATE_BACKFILL_SECS: i64 = 120;
+
+/// Enqueue match jobs for recent gate-skipped events. MUST run inside the same
+/// transaction that holds the exclusive push-gate lock: after this commit,
+/// every event is either backfilled here or ordered after the activation and
+/// enqueued by the trigger — running it post-commit would reopen the gap.
+/// Keyed on relay `received_at` (not author-controlled `created_at`); the kind
+/// list mirrors the trigger allowlist; `ON CONFLICT DO NOTHING` dedups against
+/// rows the trigger already enqueued.
+#[allow(dead_code)]
+async fn backfill_push_match_jobs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO push_match_queue (community_id, event_id) \
+         SELECT community_id, id FROM events \
+         WHERE community_id = $1 \
+           AND kind IN (7, 9, 1059, 40007, 46010) \
+           AND deleted_at IS NULL \
+           AND received_at > now() - make_interval(secs => $2) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(PUSH_GATE_BACKFILL_SECS as f64)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Maximum claims for a malformed matcher job before it is discarded.
 pub const MAX_MATCH_ATTEMPTS: i32 = 8;
 
@@ -71,6 +106,8 @@ pub struct LeaseVersion<'a> {
 /// Effective fields for an active APNs lease.
 #[derive(Debug, Clone, Copy)]
 pub struct ActiveLease<'a> {
+    /// Push application profile associated with the endpoint.
+    pub app_profile: &'a str,
     /// SHA-256 of the platform endpoint.
     pub endpoint_hash: &'a [u8],
     /// Opaque endpoint grant issued by the stateless gateway.
@@ -1694,6 +1731,7 @@ mod postgres_tests {
                 installation,
                 version(generation as u8, generation * 10, generation),
                 ActiveLease {
+                    app_profile: "ios-production",
                     endpoint_hash: endpoint,
                     endpoint_grant: "opaque-grant",
                     max_class: "default",
@@ -1728,6 +1766,7 @@ mod postgres_tests {
                 expires_at: 200,
             },
             Some(ActiveLease {
+                app_profile: "ios-production",
                 endpoint_hash: &endpoint,
                 endpoint_grant: "opaque-grant",
                 max_class: "not-a-class",
@@ -1781,6 +1820,7 @@ mod postgres_tests {
                     expires_at: 1,
                 },
                 Some(ActiveLease {
+                    app_profile: "ios-production",
                     endpoint_hash: &endpoint,
                     endpoint_grant: "opaque-grant",
                     max_class: "default",
@@ -1806,6 +1846,7 @@ mod postgres_tests {
                 expires_at: i64::MAX / 2,
             },
             Some(ActiveLease {
+                app_profile: "ios-production",
                 endpoint_hash: &[43; 32],
                 endpoint_grant: "replacement-grant",
                 max_class: "default",
@@ -1854,6 +1895,7 @@ mod postgres_tests {
                 expires_at: 200,
             },
             ActiveLease {
+                app_profile: "ios-production",
                 endpoint_hash: &endpoint,
                 endpoint_grant: "opaque-grant",
                 max_class: "default",
@@ -1915,6 +1957,7 @@ mod postgres_tests {
                 "install",
                 version(3, 15, 99),
                 ActiveLease {
+                    app_profile: "ios-production",
                     endpoint_hash: &endpoint,
                     endpoint_grant: "grant",
                     max_class: "default",
@@ -2013,10 +2056,13 @@ mod postgres_tests {
         ));
         let total: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM push_wake_outbox \
-             WHERE endpoint_hash = $1 AND event_id = $2",
+             WHERE endpoint_hash = $1 AND event_id = $2 \
+               AND community_id IN ($3, $4)",
         )
         .bind(endpoint)
         .bind(event)
+        .bind(a.as_uuid())
+        .bind(b.as_uuid())
         .fetch_one(&pool)
         .await
         .expect("count all jobs");
@@ -2915,6 +2961,7 @@ mod postgres_tests {
                     "install",
                     version(1, 10, 1),
                     ActiveLease {
+                        app_profile: "ios-production",
                         endpoint_hash: &[92; 32],
                         endpoint_grant: "opaque-grant",
                         max_class: "default",

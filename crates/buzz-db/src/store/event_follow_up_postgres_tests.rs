@@ -202,6 +202,7 @@ async fn activate_lease(
                 expires_at,
             },
             push::ActiveLease {
+                app_profile: "ios-production",
                 endpoint_hash: &endpoint_hash,
                 endpoint_grant: "test-grant",
                 max_class: "default",

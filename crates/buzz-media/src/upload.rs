@@ -8,8 +8,8 @@ use tokio::io::AsyncWriteExt;
 use crate::auth::verify_upload_hash_only;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
-use crate::storage::{BlobMeta, MediaStorage};
-use crate::thumbnail::{generate_image_metadata_sync, THUMBS};
+use crate::storage::{ctx_sidecar_key, BlobMeta, BlobStorage};
+use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
@@ -43,7 +43,7 @@ use crate::validation::{
 /// existence implies referenced objects are readable, while a record failure
 /// cannot publish media without triggering moderation.
 struct BufferedUploadInput<'a> {
-    storage: &'a MediaStorage,
+    storage: &'a dyn BlobStorage,
     config: &'a MediaConfig,
     ctx: &'a TenantContext,
     auth_event: &'a nostr::Event,
@@ -89,7 +89,7 @@ where
     .map_err(|_| MediaError::Internal)??;
 
     let key = format!("{sha256}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
+    let meta_key = ctx_sidecar_key(ctx, &sha256);
 
     // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
     // sidecar exists but the blob is missing, fall through to re-upload.
@@ -205,7 +205,7 @@ struct MetadataInput {
 /// This is the image path — body is already fully buffered in RAM. Do NOT use
 /// this for video uploads; use [`process_video_upload`] instead.
 pub async fn process_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -243,7 +243,7 @@ pub async fn process_upload(
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
 pub async fn process_file_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -290,7 +290,7 @@ pub async fn process_file_upload(
 ///
 /// Returns a [`BlobDescriptor`] with the `duration` field populated.
 pub async fn process_video_upload(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
@@ -425,7 +425,7 @@ pub async fn process_video_upload(
 
     let ext = "mp4";
     let key = format!("{sha256_hex}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
+    let meta_key = ctx_sidecar_key(ctx, &sha256_hex);
 
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;
@@ -512,48 +512,26 @@ pub async fn process_video_upload(
 /// Generate thumbnail and metadata without publishing the sidecar serve gate.
 /// Returns the completed [`BlobMeta`] on success.
 async fn prepare_image_metadata(
-    storage: &MediaStorage,
+    storage: &dyn BlobStorage,
     config: &MediaConfig,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
-    let mut meta = store_image_thumbnails(
-        storage,
-        config,
-        &input.sha256,
-        input.body,
-        &input.mime,
-        &input.ext,
-    )
-    .await?;
-    meta.uploaded_at = input.uploaded_at;
-    Ok(meta)
-}
-
-/// Generate an image's metadata and store every thumbnail variant.
-///
-/// Shared by the upload path and on-demand regeneration of missing thumbnails.
-pub async fn store_image_thumbnails(
-    storage: &MediaStorage,
-    config: &MediaConfig,
-    sha256: &str,
-    body: Bytes,
-    mime: &str,
-    ext: &str,
-) -> Result<BlobMeta, MediaError> {
-    let (cfg_ref, sha256_ref, mime_ref, ext_ref) = (
-        config.clone(),
-        sha256.to_owned(),
-        mime.to_owned(),
-        ext.to_owned(),
-    );
-    let (meta, thumbs) = tokio::task::spawn_blocking(move || {
-        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body, &mime_ref, &ext_ref)
+    let body_ref = input.body.clone();
+    let mime_ref = input.mime.clone();
+    let ext_ref = input.ext.clone();
+    let sha256_ref = input.sha256.clone();
+    let cfg_ref = config.clone();
+    let (mut meta, thumb_bytes) = tokio::task::spawn_blocking(move || {
+        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body_ref, &mime_ref, &ext_ref)
     })
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    for (thumb, bytes) in THUMBS.into_iter().zip(thumbs.into_iter().flatten()) {
-        storage.put(&thumb.key(sha256), &bytes, thumb.mime).await?;
+    meta.uploaded_at = input.uploaded_at;
+
+    if let Some(ref tb) = thumb_bytes {
+        let thumb_key = format!("{}.thumb.jpg", input.sha256);
+        storage.put(&thumb_key, tb, "image/jpeg").await?;
     }
 
     Ok(meta)
@@ -602,64 +580,6 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
-        }
-    }
-
-    /// A 640x640 image, so its thumbnail is 320x320, whose left half has the
-    /// given alpha and right half is opaque red.
-    fn image_with_alpha(alpha: u8, format: image::ImageFormat) -> Vec<u8> {
-        let img = image::RgbaImage::from_fn(640, 640, |x, _| {
-            image::Rgba([255, 0, 0, if x < 320 { alpha } else { 255 }])
-        });
-        let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), format)
-            .unwrap();
-        bytes
-    }
-
-    #[test]
-    fn image_thumbnails_are_alpha_webp_and_jpeg() {
-        for (format, mime, ext) in [
-            (image::ImageFormat::Png, "image/png", "png"),
-            (image::ImageFormat::Gif, "image/gif", "gif"),
-        ] {
-            let sha = "a".repeat(64);
-            let (meta, thumbs) = generate_image_metadata_sync(
-                &test_config(),
-                &sha,
-                &image_with_alpha(0, format),
-                mime,
-                ext,
-            )
-            .unwrap();
-            assert_eq!(
-                meta.thumb_url,
-                format!("https://media.example.com/{sha}.thumb.webp"),
-                "{ext}"
-            );
-            let [webp, jpeg] = thumbs.unwrap();
-            assert_eq!(
-                image::guess_format(&webp).unwrap(),
-                image::ImageFormat::WebP,
-                "{ext}"
-            );
-            let decoded = image::load_from_memory(&webp).unwrap().to_rgba8();
-            assert_eq!(decoded.dimensions(), (320, 320), "{ext}");
-            assert_eq!(
-                decoded.get_pixel(0, 0)[3],
-                0,
-                "{ext}: transparent stays transparent"
-            );
-            assert_eq!(
-                decoded.get_pixel(319, 0)[3],
-                255,
-                "{ext}: opaque stays opaque"
-            );
-            assert_eq!(
-                image::guess_format(&jpeg).unwrap(),
-                image::ImageFormat::Jpeg,
-                "{ext}: JPEG stays for installed clients"
-            );
         }
     }
 
@@ -729,7 +649,7 @@ mod tests {
         let meta = BlobMeta {
             dim: "800x600".to_string(),
             blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj".to_string(),
-            thumb_url: format!("https://media.example.com/{hash}.thumb.webp"),
+            thumb_url: format!("https://media.example.com/{hash}.thumb.jpg"),
             ext: "jpg".to_string(),
             mime_type: "image/jpeg".to_string(),
             size: 100_000,
@@ -843,6 +763,7 @@ mod tests {
 #[cfg(test)]
 mod minio_tests {
     use super::*;
+    use crate::storage::MediaStorage;
     use buzz_core::tenant::{CommunityId, TenantContext};
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use uuid::Uuid;

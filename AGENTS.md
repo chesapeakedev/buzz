@@ -29,6 +29,26 @@ against that direction. Scale validation to the change's risk and exercise the
 real workflow for user-visible or integration behavior when practical; green CI
 and runtime evidence answer different questions.
 
+## ChesapeakeDev Fork Workflow
+
+When `origin` is `chesapeakedev/buzz`, changes are committed and pushed
+directly to `main`; this fork does not use pull requests or review approvals as
+a publication gate. Keep the branch linear, create every commit with DCO
+sign-off (`git commit -s`), run the applicable repository checks before
+pushing, and preserve focused, reviewable commits even though there is no PR.
+The GitHub `CI` workflow runs on every push to `main` as a deterministic
+post-push backstop for formatting, linting, tests, security checks, and other
+repository gates. Treat a failure there as work to fix promptly; it is not a
+pull-request review gate.
+
+Ordinary changes use a normal fast-forward push. Upstream synchronization is
+the sole intentional history rewrite and is run manually from the local
+development checkout; there is no upstream-sync GitHub Actions workflow or
+required sync cadence. Prepare it with `just sync-upstream` and publish it with
+`just sync-upstream-publish-main`, which validates the complete patch stack and
+uses an exact `--force-with-lease`. Do not open a pull request against either
+the fork or `block/buzz` unless the user explicitly asks for one.
+
 ---
 
 ## Before opening a PR
@@ -876,3 +896,35 @@ persistent automatic addresses. Use the returned label from registration for
 insert/restore/remove. Ambiguous manually typed names must fail visibly without
 clearing the draft in chat, edit, and standalone forum consumers; never fan out
 silently to all identities sharing a name. See `docs/mention-editor.md`.
+
+---
+
+## ChesapeakeDev Fork Development
+
+This fork is developed and synchronized manually from a local development
+machine. There is no scheduled upstream-sync job and no GitHub Actions workflow
+may perform an upstream sync. Work is committed directly to the fork's `main`
+branch; do not open pull requests for fork-only work.
+
+Ordinary feature development uses the normal agent harness and repository
+practices. It does not require a persistent Codex goal. Keep changes in focused,
+dependency-ordered Conventional Commits, commit with `git commit -s`, preserve a
+linear history, run the narrow owning tests while iterating, and run
+`just fork-ci` before pushing. The fork does not modify desktop, Tauri, web, or
+mobile code, so their checks remain upstream-owned and are not fork gates.
+Preserve the embedded program's core
+invariants when changing fork-owned code:
+
+- Keep PostgreSQL/Redis/S3 behavior supported while maintaining the embedded
+  SQLite/local/filesystem adapters behind narrow backend-neutral seams.
+- Keep tenant predicates, durable security state, thread counters, atomic
+  object writes, traversal protection, and restart recovery intact.
+- Prefer shared backend contract tests and protocol-level regression tests over
+  tests coupled to one adapter's representation.
+- Keep generally useful refactors separate from fork branding, release
+  authority, embedded defaults, and deployment policy when practical.
+
+Use `$maintain-fork` only for maintaining the fork against a new
+`upstream/main`: rebasing the fork stack, resolving semantic conflicts, running
+the upstream-versus-embedded compatibility smoke, and publishing the validated
+linear stack directly to `origin/main`.

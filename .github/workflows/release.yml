@@ -654,6 +654,7 @@ jobs:
 
   release-windows:
     name: Release Windows
+    if: github.repository == 'block/buzz'
     runs-on: windows-latest
     needs: setup
     timeout-minutes: 60

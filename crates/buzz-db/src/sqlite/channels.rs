@@ -1,0 +1,1202 @@
+//! SQLite channel creation and lookup operations.
+
+use chrono::{DateTime, Utc};
+use sqlx::{QueryBuilder, Row as _, Sqlite};
+use uuid::Uuid;
+
+use super::SqliteStore;
+use crate::channel::{
+    AccessibleChannel, BotChannelEntry, BotMemberRecord, ChannelRecord, ChannelType, ChannelUpdate,
+    ChannelVisibility, MemberRecord, MemberRole, ReapedEphemeralChannel,
+};
+use crate::{CommunityId, DbError, Result};
+
+fn parse_timestamp(value: i64) -> Result<DateTime<Utc>> {
+    DateTime::from_timestamp_micros(value).ok_or(DbError::InvalidTimestamp(value))
+}
+
+fn parse_optional_timestamp(value: Option<i64>) -> Result<Option<DateTime<Utc>>> {
+    value.map(parse_timestamp).transpose()
+}
+
+fn parse_channel(row: sqlx::sqlite::SqliteRow) -> Result<ChannelRecord> {
+    let id: String = row.try_get("id")?;
+    Ok(ChannelRecord {
+        id: Uuid::parse_str(&id)
+            .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?,
+        name: row.try_get("name")?,
+        channel_type: row.try_get("channel_type")?,
+        visibility: row.try_get("visibility")?,
+        description: row.try_get("description")?,
+        canvas: row.try_get("canvas")?,
+        created_by: row.try_get("created_by")?,
+        created_at: parse_timestamp(row.try_get("created_at")?)?,
+        updated_at: parse_timestamp(row.try_get("updated_at")?)?,
+        archived_at: parse_optional_timestamp(row.try_get("archived_at")?)?,
+        deleted_at: parse_optional_timestamp(row.try_get("deleted_at")?)?,
+        nip29_group_id: row.try_get("nip29_group_id")?,
+        topic_required: row.try_get::<i64, _>("topic_required")? != 0,
+        max_members: row.try_get("max_members")?,
+        topic: row.try_get("topic")?,
+        topic_set_by: row.try_get("topic_set_by")?,
+        topic_set_at: parse_optional_timestamp(row.try_get("topic_set_at")?)?,
+        purpose: row.try_get("purpose")?,
+        purpose_set_by: row.try_get("purpose_set_by")?,
+        purpose_set_at: parse_optional_timestamp(row.try_get("purpose_set_at")?)?,
+        ttl_seconds: row.try_get("ttl_seconds")?,
+        ttl_deadline: parse_optional_timestamp(row.try_get("ttl_deadline")?)?,
+        labels: Vec::new(),
+        join_role: row
+            .try_get("join_role")
+            .unwrap_or_else(|_| "member".to_string()),
+        unlisted: row.try_get("unlisted").unwrap_or(false),
+        auto_join: row.try_get("auto_join").unwrap_or(false),
+    })
+}
+
+fn parse_member(row: sqlx::sqlite::SqliteRow) -> Result<MemberRecord> {
+    let channel_id: String = row.try_get("channel_id")?;
+    Ok(MemberRecord {
+        channel_id: Uuid::parse_str(&channel_id)
+            .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?,
+        pubkey: row.try_get("pubkey")?,
+        role: row.try_get("role")?,
+        joined_at: parse_timestamp(row.try_get("joined_at")?)?,
+        invited_by: row.try_get("invited_by")?,
+        removed_at: parse_optional_timestamp(row.try_get("removed_at")?)?,
+    })
+}
+
+async fn active_role(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    community_id: &str,
+    channel_id: &str,
+    pubkey: &[u8],
+) -> Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT role FROM channel_members \
+         WHERE community_id = ? AND channel_id = ? AND pubkey = ? \
+           AND removed_at IS NULL",
+    )
+    .bind(community_id)
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(Into::into)
+}
+
+impl SqliteStore {
+    /// Return open or actively joined channels visible to one user.
+    pub async fn get_accessible_channels(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        visibility_filter: Option<&str>,
+        member_only: Option<bool>,
+    ) -> Result<Vec<AccessibleChannel>> {
+        let membership_clause = if member_only == Some(true) {
+            "AND cm.channel_id IS NOT NULL"
+        } else {
+            "AND (c.visibility = 'open' OR cm.channel_id IS NOT NULL)"
+        };
+        let visibility_clause = visibility_filter
+            .map(|_| " AND c.visibility = ?")
+            .unwrap_or("");
+        let sql = format!(
+            "SELECT c.*, (cm.channel_id IS NOT NULL) AS is_member \
+             FROM channels c LEFT JOIN channel_members cm \
+               ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+              AND cm.pubkey = ? AND cm.removed_at IS NULL \
+             WHERE c.community_id = ? AND c.deleted_at IS NULL {membership_clause} \
+               AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL){visibility_clause} \
+             ORDER BY CASE c.channel_type WHEN 'stream' THEN 0 WHEN 'forum' THEN 1 ELSE 2 END, c.name \
+             LIMIT 1000"
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(pubkey)
+            .bind(community.as_uuid().to_string());
+        if let Some(visibility) = visibility_filter {
+            query = query.bind(visibility);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                let is_member = row.try_get::<i64, _>("is_member")? != 0;
+                Ok(AccessibleChannel {
+                    channel: parse_channel(row)?,
+                    is_member,
+                })
+            })
+            .collect()
+    }
+
+    /// Return bot members and their active channel memberships.
+    pub async fn get_bot_members(&self, community: CommunityId) -> Result<Vec<BotMemberRecord>> {
+        let rows = sqlx::query(
+            "SELECT cm.pubkey, u.display_name, u.agent_type, u.capabilities, \
+                    c.name AS channel_name, c.id AS channel_id \
+             FROM channel_members cm \
+             LEFT JOIN users u ON cm.community_id = u.community_id AND cm.pubkey = u.pubkey \
+             JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+                AND c.deleted_at IS NULL \
+             WHERE cm.community_id = ? AND cm.role = 'bot' AND cm.removed_at IS NULL \
+             ORDER BY cm.pubkey, c.name LIMIT 1000",
+        )
+        .bind(community.as_uuid().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut members: std::collections::BTreeMap<Vec<u8>, BotMemberRecord> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let entry = members
+                .entry(pubkey.clone())
+                .or_insert_with(|| BotMemberRecord {
+                    pubkey,
+                    display_name: row.try_get("display_name").ok(),
+                    agent_type: row.try_get("agent_type").ok(),
+                    capabilities: row
+                        .try_get::<Option<String>, _>("capabilities")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_str(&value).ok()),
+                    channels: Vec::new(),
+                });
+            entry.channels.push(BotChannelEntry {
+                name: row.try_get("channel_name")?,
+                id: row.try_get("channel_id")?,
+            });
+        }
+        Ok(members.into_values().collect())
+    }
+
+    /// Return the owning community for each live channel in a batch.
+    pub async fn communities_of_channels(
+        &self,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, community_id FROM channels WHERE deleted_at IS NULL AND id IN (",
+        );
+        let mut separated = query.separated(", ");
+        for channel_id in channel_ids {
+            separated.push_bind(channel_id.to_string());
+        }
+        query.push(")");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut result = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let channel_id: String = row.try_get("id")?;
+            let community_id: String = row.try_get("community_id")?;
+            let channel_id = Uuid::parse_str(&channel_id)
+                .map_err(|error| DbError::InvalidData(format!("channel id: {error}")))?;
+            let community_id = Uuid::parse_str(&community_id)
+                .map_err(|error| DbError::InvalidData(format!("community id: {error}")))?;
+            result.insert(channel_id, CommunityId::from_uuid(community_id));
+        }
+        Ok(result)
+    }
+
+    /// Create a channel with an application-generated tenant-local UUID.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_channel(
+        &self,
+        community: CommunityId,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+    ) -> Result<ChannelRecord> {
+        self.create_channel_with_id(
+            community,
+            Uuid::new_v4(),
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+        )
+        .await
+        .map(|(record, _)| record)
+    }
+
+    /// Create a channel with a caller-supplied tenant-local UUID.
+    ///
+    /// The creator membership is inserted in the same immediate transaction.
+    /// A duplicate `(community, channel)` returns the existing record without
+    /// changing its metadata or membership.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_channel_with_id(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+    ) -> Result<(ChannelRecord, bool)> {
+        if created_by.len() != 32 {
+            return Err(DbError::InvalidData(format!(
+                "pubkey must be 32 bytes, got {}",
+                created_by.len()
+            )));
+        }
+        if channel_id.is_nil() {
+            return Err(DbError::InvalidData(
+                "channel_id must not be nil (reserved for global fan-out)".to_owned(),
+            ));
+        }
+        let name = buzz_core::channel::canonical_channel_name(name);
+        if name.is_empty() {
+            return Err(DbError::InvalidData("channel name is required".to_owned()));
+        }
+
+        let now = Utc::now().timestamp_micros();
+        let ttl_deadline = match ttl_seconds {
+            Some(ttl) => Some(
+                i64::from(ttl)
+                    .checked_mul(1_000_000)
+                    .and_then(|duration| now.checked_add(duration))
+                    .ok_or_else(|| {
+                        DbError::InvalidData("ttl_seconds produces an invalid deadline".to_owned())
+                    })?,
+            ),
+            None => None,
+        };
+        let community_id = community.as_uuid().to_string();
+        let channel_id = channel_id.to_string();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let inserted = sqlx::query(
+            "INSERT INTO channels \
+             (community_id, id, name, channel_type, visibility, description, \
+              created_by, created_at, updated_at, ttl_seconds, ttl_deadline) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (community_id, id) DO NOTHING",
+        )
+        .bind(&community_id)
+        .bind(&channel_id)
+        .bind(name)
+        .bind(channel_type.as_str())
+        .bind(visibility.as_str())
+        .bind(description)
+        .bind(created_by)
+        .bind(now)
+        .bind(now)
+        .bind(ttl_seconds)
+        .bind(ttl_deadline)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+
+        if inserted {
+            sqlx::query(
+                "INSERT INTO channel_members \
+                 (community_id, channel_id, pubkey, role, joined_at, invited_by) \
+                 VALUES (?, ?, ?, 'owner', ?, ?)",
+            )
+            .bind(&community_id)
+            .bind(&channel_id)
+            .bind(created_by)
+            .bind(now)
+            .bind(created_by)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let row = sqlx::query(
+            "SELECT id, name, channel_type, visibility, description, canvas, \
+                    created_by, created_at, updated_at, archived_at, deleted_at, \
+                    nip29_group_id, topic_required, max_members, topic, \
+                    topic_set_by, topic_set_at, purpose, purpose_set_by, \
+                    purpose_set_at, ttl_seconds, ttl_deadline \
+             FROM channels WHERE community_id = ? AND id = ?",
+        )
+        .bind(&community_id)
+        .bind(&channel_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = parse_channel(row)?;
+        transaction.commit().await?;
+        Ok((record, inserted))
+    }
+
+    /// Return a live channel in one community.
+    pub async fn get_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<ChannelRecord> {
+        let row = sqlx::query(
+            "SELECT id, name, channel_type, visibility, description, canvas, \
+                    created_by, created_at, updated_at, archived_at, deleted_at, \
+                    nip29_group_id, topic_required, max_members, topic, \
+                    topic_set_by, topic_set_at, purpose, purpose_set_by, \
+                    purpose_set_at, ttl_seconds, ttl_deadline \
+             FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))?;
+        parse_channel(row)
+    }
+
+    /// List live channels in one community, optionally filtered by visibility.
+    pub async fn list_channels(
+        &self,
+        community: CommunityId,
+        visibility: Option<&str>,
+    ) -> Result<Vec<ChannelRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, name, channel_type, visibility, description, canvas, \
+                    created_by, created_at, updated_at, archived_at, deleted_at, \
+                    nip29_group_id, topic_required, max_members, topic, \
+                    topic_set_by, topic_set_at, purpose, purpose_set_by, \
+                    purpose_set_at, ttl_seconds, ttl_deadline \
+             FROM channels \
+             WHERE community_id = ? AND deleted_at IS NULL \
+               AND (? IS NULL OR visibility = ?) \
+             ORDER BY created_at DESC, id LIMIT 1000",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(visibility)
+        .bind(visibility)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(parse_channel).collect()
+    }
+
+    /// Return the active members of a live channel.
+    pub async fn get_members(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<MemberRecord>> {
+        let rows = sqlx::query(
+            "SELECT cm.channel_id, cm.pubkey, cm.role, cm.joined_at, \
+                    cm.invited_by, cm.removed_at \
+             FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ? AND cm.channel_id = ? \
+               AND cm.removed_at IS NULL AND c.deleted_at IS NULL \
+             ORDER BY cm.joined_at, cm.pubkey LIMIT 1000",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(parse_member).collect()
+    }
+
+    /// Return active membership pairs for the supplied channel and pubkey sets.
+    pub async fn membership_pairs(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Uuid, Vec<u8>)>> {
+        if channel_ids.is_empty() || pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT cm.channel_id, cm.pubkey FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ",
+        );
+        builder
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND cm.channel_id IN (");
+        let mut channels = builder.separated(", ");
+        for channel_id in channel_ids {
+            channels.push_bind(channel_id.to_string());
+        }
+        builder.push(") AND cm.pubkey IN (");
+        let mut keys = builder.separated(", ");
+        for pubkey in pubkeys {
+            keys.push_bind(pubkey);
+        }
+        builder.push(
+            ") AND cm.removed_at IS NULL AND c.deleted_at IS NULL \
+             ORDER BY cm.channel_id, cm.pubkey",
+        );
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                let channel_id: String = row.try_get("channel_id")?;
+                let channel_id = Uuid::parse_str(&channel_id)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?;
+                Ok((channel_id, row.try_get("pubkey")?))
+            })
+            .collect()
+    }
+
+    /// Return active members for the supplied live channels.
+    pub async fn get_members_bulk(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<MemberRecord>> {
+        if channel_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT cm.channel_id, cm.pubkey, cm.role, cm.joined_at, \
+                    cm.invited_by, cm.removed_at \
+             FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ",
+        );
+        builder
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND cm.channel_id IN (");
+        let mut channels = builder.separated(", ");
+        for channel_id in channel_ids {
+            channels.push_bind(channel_id.to_string());
+        }
+        builder.push(
+            ") AND cm.removed_at IS NULL AND c.deleted_at IS NULL \
+             ORDER BY cm.joined_at, cm.pubkey",
+        );
+        builder
+            .build()
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(parse_member)
+            .collect()
+    }
+
+    /// Add or reactivate a channel member with PostgreSQL-equivalent role checks.
+    ///
+    /// The process-wide writer gate and immediate transaction serialize the
+    /// authorization read, last-owner check, and membership upsert.
+    pub async fn add_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        role: MemberRole,
+        invited_by: Option<&[u8]>,
+    ) -> Result<MemberRecord> {
+        if pubkey.len() != 32 {
+            return Err(DbError::InvalidData(format!(
+                "pubkey must be 32 bytes, got {}",
+                pubkey.len()
+            )));
+        }
+
+        let community_id = community.as_uuid().to_string();
+        let channel_id_text = channel_id.to_string();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let channel = sqlx::query(
+            "SELECT visibility, created_by FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(&community_id)
+        .bind(&channel_id_text)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))?;
+        let visibility: String = channel.try_get("visibility")?;
+        let created_by: Vec<u8> = channel.try_get("created_by")?;
+
+        let effective_role = if visibility == ChannelVisibility::Private.as_str() {
+            let inviter = invited_by.ok_or_else(|| {
+                DbError::AccessDenied("private channel requires an invite".to_owned())
+            })?;
+            let creator_bootstrap = inviter == pubkey && inviter == created_by.as_slice();
+            if !creator_bootstrap {
+                let inviter_role =
+                    active_role(&mut transaction, &community_id, &channel_id_text, inviter)
+                        .await?
+                        .ok_or_else(|| {
+                            DbError::AccessDenied("inviter is not an active member".to_owned())
+                        })?;
+                let inviter_role: MemberRole = inviter_role.parse().map_err(|_| {
+                    DbError::InvalidData(format!("invalid role in database: {inviter_role}"))
+                })?;
+                if role.is_elevated() && !inviter_role.is_elevated() {
+                    return Err(DbError::AccessDenied(
+                        "only owners/admins may grant elevated roles".to_owned(),
+                    ));
+                }
+            }
+            role
+        } else if role.is_elevated() {
+            let granter_role = match invited_by {
+                Some(inviter) => {
+                    active_role(&mut transaction, &community_id, &channel_id_text, inviter).await?
+                }
+                None => None,
+            };
+            match granter_role.as_deref() {
+                Some("owner") | Some("admin") => role,
+                _ => {
+                    return Err(DbError::AccessDenied(
+                        "only owners/admins may grant elevated roles".to_owned(),
+                    ))
+                }
+            }
+        } else {
+            role
+        };
+
+        let current_role =
+            active_role(&mut transaction, &community_id, &channel_id_text, pubkey).await?;
+        if let Some(current_role) =
+            current_role.filter(|current| current != effective_role.as_str())
+        {
+            let actor_role = match invited_by {
+                Some(inviter) => {
+                    active_role(&mut transaction, &community_id, &channel_id_text, inviter).await?
+                }
+                None => None,
+            };
+            let actor_is_elevated = actor_role
+                .as_deref()
+                .and_then(|value| value.parse::<MemberRole>().ok())
+                .is_some_and(|value| value.is_elevated());
+            if !actor_is_elevated {
+                return Err(DbError::AccessDenied(
+                    "only owners/admins may change an active member's role".to_owned(),
+                ));
+            }
+            if current_role == MemberRole::Owner.as_str() && effective_role != MemberRole::Owner {
+                let owner_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM channel_members \
+                     WHERE community_id = ? AND channel_id = ? \
+                       AND role = 'owner' AND removed_at IS NULL",
+                )
+                .bind(&community_id)
+                .bind(&channel_id_text)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if owner_count <= 1 {
+                    return Err(DbError::AccessDenied(
+                        "cannot demote the last owner — transfer ownership first".to_owned(),
+                    ));
+                }
+            }
+        }
+
+        let now = Utc::now().timestamp_micros();
+        sqlx::query(
+            "INSERT INTO channel_members \
+             (community_id, channel_id, pubkey, role, joined_at, invited_by) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET \
+               removed_at = NULL, removed_by = NULL, role = excluded.role",
+        )
+        .bind(&community_id)
+        .bind(&channel_id_text)
+        .bind(pubkey)
+        .bind(effective_role.as_str())
+        .bind(now)
+        .bind(invited_by)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT channel_id, pubkey, role, joined_at, invited_by, removed_at \
+             FROM channel_members \
+             WHERE community_id = ? AND channel_id = ? AND pubkey = ?",
+        )
+        .bind(&community_id)
+        .bind(&channel_id_text)
+        .bind(pubkey)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let member = parse_member(row)?;
+        transaction.commit().await?;
+        Ok(member)
+    }
+
+    /// Soft-remove a member after serialized authorization and last-owner checks.
+    pub async fn remove_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<()> {
+        let community_id = community.as_uuid().to_string();
+        let channel_id_text = channel_id.to_string();
+        let _writer = self.acquire_writer().await;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let self_remove = pubkey == actor_pubkey;
+        if !self_remove {
+            let actor_role = active_role(
+                &mut transaction,
+                &community_id,
+                &channel_id_text,
+                actor_pubkey,
+            )
+            .await?
+            .ok_or_else(|| DbError::AccessDenied("actor is not an active member".to_owned()))?;
+            let actor_role: MemberRole = actor_role.parse().map_err(|_| {
+                DbError::InvalidData(format!("invalid role in database: {actor_role}"))
+            })?;
+            let actor_is_agent_owner: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM users \
+                 WHERE community_id = ? AND pubkey = ? AND agent_owner_pubkey = ?)",
+            )
+            .bind(&community_id)
+            .bind(pubkey)
+            .bind(actor_pubkey)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !actor_role.is_elevated() && !actor_is_agent_owner {
+                return Err(DbError::AccessDenied(
+                    "only owners/admins or the agent's owner may remove other members".to_owned(),
+                ));
+            }
+        }
+
+        let target_role =
+            active_role(&mut transaction, &community_id, &channel_id_text, pubkey).await?;
+        if target_role.as_deref() == Some(MemberRole::Owner.as_str()) {
+            let owner_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM channel_members \
+                 WHERE community_id = ? AND channel_id = ? \
+                   AND role = 'owner' AND removed_at IS NULL",
+            )
+            .bind(&community_id)
+            .bind(&channel_id_text)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if owner_count <= 1 {
+                return Err(DbError::AccessDenied(
+                    "cannot remove the last owner — transfer ownership first".to_owned(),
+                ));
+            }
+        }
+
+        let result = sqlx::query(
+            "UPDATE channel_members SET removed_at = ?, removed_by = ? \
+             WHERE community_id = ? AND channel_id = ? AND pubkey = ? \
+               AND removed_at IS NULL",
+        )
+        .bind(Utc::now().timestamp_micros())
+        .bind(actor_pubkey)
+        .bind(&community_id)
+        .bind(&channel_id_text)
+        .bind(pubkey)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::MemberNotFound(channel_id));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Return whether a pubkey is an active member of a live channel.
+    pub async fn is_member(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 FROM channel_members cm \
+               JOIN channels c \
+                 ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+               WHERE cm.community_id = ? AND cm.channel_id = ? AND cm.pubkey = ? \
+                 AND cm.removed_at IS NULL AND c.deleted_at IS NULL)",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .bind(pubkey)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Return an active member's role in a live channel.
+    pub async fn get_member_role(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT cm.role FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ? AND cm.channel_id = ? AND cm.pubkey = ? \
+               AND cm.removed_at IS NULL AND c.deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Return the active member count for one channel.
+    pub async fn get_member_count(&self, community: CommunityId, channel_id: Uuid) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members \
+             WHERE community_id = ? AND channel_id = ? AND removed_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Return active member counts for the supplied channels.
+    pub async fn get_member_counts_bulk(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT channel_id, COUNT(*) AS member_count FROM channel_members \
+             WHERE community_id = ",
+        );
+        builder
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND removed_at IS NULL AND channel_id IN (");
+        let mut channels = builder.separated(", ");
+        for channel_id in channel_ids {
+            channels.push_bind(channel_id.to_string());
+        }
+        builder.push(") GROUP BY channel_id");
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut counts = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let channel_id: String = row.try_get("channel_id")?;
+            let channel_id = Uuid::parse_str(&channel_id)
+                .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?;
+            counts.insert(channel_id, row.try_get("member_count")?);
+        }
+        Ok(counts)
+    }
+
+    /// Return live open channels plus live channels where a pubkey is a member.
+    pub async fn get_accessible_channel_ids(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT cm.channel_id FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ? AND cm.pubkey = ? \
+               AND cm.removed_at IS NULL AND c.deleted_at IS NULL \
+             UNION \
+             SELECT id FROM channels \
+             WHERE community_id = ? AND visibility = 'open' AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(pubkey)
+        .bind(community.as_uuid().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))
+            })
+            .collect()
+    }
+
+    /// Return active member channel IDs for one pubkey.
+    pub async fn get_member_channel_ids(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT cm.channel_id FROM channel_members cm \
+             JOIN channels c \
+               ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+             WHERE cm.community_id = ? AND cm.pubkey = ? \
+               AND cm.removed_at IS NULL AND c.deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(pubkey)
+        .fetch_all(&self.channel_pool)
+        .await?;
+        rows.into_iter()
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))
+            })
+            .collect()
+    }
+
+    /// Return live listed open channel IDs in one community.
+    pub async fn get_listed_open_channel_ids(&self, community: CommunityId) -> Result<Vec<Uuid>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM channels \
+             WHERE community_id = ? AND visibility = 'open' \
+               AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .fetch_all(&self.channel_pool)
+        .await?;
+        rows.into_iter()
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))
+            })
+            .collect()
+    }
+}
+
+impl SqliteStore {
+    /// Return canvas content for a live channel.
+    pub async fn get_canvas(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT canvas FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))
+    }
+
+    /// Set or clear canvas content for a live channel.
+    pub async fn set_canvas(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        canvas: Option<&str>,
+    ) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let result = sqlx::query(
+            "UPDATE channels SET canvas = ? \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(canvas)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        Ok(())
+    }
+
+    /// Update supplied channel metadata fields.
+    pub async fn update_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        mut updates: ChannelUpdate,
+    ) -> Result<ChannelRecord> {
+        if updates.name.is_none()
+            && updates.description.is_none()
+            && updates.visibility.is_none()
+            && updates.ttl_seconds.is_none()
+        {
+            return Err(DbError::InvalidData(
+                "at least one field must be provided for update".to_owned(),
+            ));
+        }
+        if let Some(name) = updates.name.as_mut() {
+            *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+            if name.is_empty() {
+                return Err(DbError::InvalidData("channel name is required".to_owned()));
+            }
+        }
+
+        let now = Utc::now().timestamp_micros();
+        let ttl_deadline = match updates.ttl_seconds {
+            Some(Some(ttl)) => Some(
+                i64::from(ttl)
+                    .checked_mul(1_000_000)
+                    .and_then(|duration| now.checked_add(duration))
+                    .ok_or_else(|| {
+                        DbError::InvalidData("ttl_seconds produces an invalid deadline".to_owned())
+                    })?,
+            ),
+            Some(None) | None => None,
+        };
+        let _writer = self.acquire_writer().await;
+        let mut builder = QueryBuilder::<Sqlite>::new("UPDATE channels SET ");
+        let mut assignments = builder.separated(", ");
+        if let Some(name) = updates.name {
+            assignments.push("name = ").push_bind_unseparated(name);
+        }
+        if let Some(description) = updates.description {
+            assignments
+                .push("description = ")
+                .push_bind_unseparated(description);
+        }
+        if let Some(visibility) = updates.visibility {
+            assignments
+                .push("visibility = ")
+                .push_bind_unseparated(visibility);
+        }
+        if let Some(ttl_seconds) = updates.ttl_seconds {
+            assignments
+                .push("ttl_seconds = ")
+                .push_bind_unseparated(ttl_seconds)
+                .push_unseparated(", ttl_deadline = ")
+                .push_bind_unseparated(ttl_deadline);
+        }
+        assignments.push("updated_at = ").push_bind_unseparated(now);
+        builder
+            .push(" WHERE community_id = ")
+            .push_bind(community.as_uuid().to_string())
+            .push(" AND id = ")
+            .push_bind(channel_id.to_string())
+            .push(" AND deleted_at IS NULL");
+        let result = builder.build().execute(&self.pool).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        self.get_channel(community, channel_id).await
+    }
+
+    /// Set a channel topic and its author timestamp.
+    pub async fn set_topic(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        topic: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        self.set_text_metadata(community, channel_id, "topic", topic, set_by)
+            .await
+    }
+
+    /// Set a channel purpose and its author timestamp.
+    pub async fn set_purpose(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        purpose: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        self.set_text_metadata(community, channel_id, "purpose", purpose, set_by)
+            .await
+    }
+
+    async fn set_text_metadata(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        field: &'static str,
+        value: &str,
+        set_by: &[u8],
+    ) -> Result<()> {
+        if set_by.len() != 32 {
+            return Err(DbError::InvalidData(format!(
+                "pubkey must be 32 bytes, got {}",
+                set_by.len()
+            )));
+        }
+        let sql = match field {
+            "topic" => {
+                "UPDATE channels \
+                 SET topic = ?, topic_set_by = ?, topic_set_at = ? \
+                 WHERE community_id = ? AND id = ? AND deleted_at IS NULL"
+            }
+            "purpose" => {
+                "UPDATE channels \
+                 SET purpose = ?, purpose_set_by = ?, purpose_set_at = ? \
+                 WHERE community_id = ? AND id = ? AND deleted_at IS NULL"
+            }
+            _ => {
+                return Err(DbError::InvalidData(
+                    "unsupported channel metadata field".to_owned(),
+                ))
+            }
+        };
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(sql)
+            .bind(value)
+            .bind(set_by)
+            .bind(now)
+            .bind(community.as_uuid().to_string())
+            .bind(channel_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        Ok(())
+    }
+
+    /// Archive a live, unarchived channel.
+    pub async fn archive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels SET archived_at = ? \
+             WHERE community_id = ? AND id = ? \
+               AND deleted_at IS NULL AND archived_at IS NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        self.channel_lifecycle_error(community, channel_id, true)
+            .await
+    }
+
+    /// Unarchive a live channel and renew its ephemeral deadline.
+    pub async fn unarchive_channel(&self, community: CommunityId, channel_id: Uuid) -> Result<()> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels \
+             SET archived_at = NULL, \
+                 ttl_deadline = CASE \
+                   WHEN ttl_seconds IS NOT NULL THEN ? + ttl_seconds * 1000000 \
+                   ELSE ttl_deadline END \
+             WHERE community_id = ? AND id = ? \
+               AND deleted_at IS NULL AND archived_at IS NOT NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        self.channel_lifecycle_error(community, channel_id, false)
+            .await
+    }
+
+    async fn channel_lifecycle_error(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        archiving: bool,
+    ) -> Result<()> {
+        let archived_at: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT archived_at FROM channels \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        match archived_at {
+            None => Err(DbError::ChannelNotFound(channel_id)),
+            Some(Some(_)) if archiving => Err(DbError::AccessDenied(
+                "channel is already archived".to_owned(),
+            )),
+            Some(None) if !archiving => {
+                Err(DbError::AccessDenied("channel is not archived".to_owned()))
+            }
+            Some(_) => Err(DbError::Conflict(
+                "channel lifecycle changed concurrently".to_owned(),
+            )),
+        }
+    }
+
+    /// Soft-delete a channel, returning false when absent or already deleted.
+    pub async fn soft_delete_channel(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<bool> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let result = sqlx::query(
+            "UPDATE channels SET deleted_at = ? \
+             WHERE community_id = ? AND id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Archive every due ephemeral channel in active communities.
+    pub async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
+        let _writer = self.acquire_writer().await;
+        let now = Utc::now().timestamp_micros();
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction =
+            sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT ch.community_id, c.host, ch.id \
+             FROM channels ch \
+             JOIN communities c ON ch.community_id = c.id \
+             WHERE ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < ? \
+               AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+               AND c.archived_at IS NULL \
+             ORDER BY ch.community_id, ch.id",
+        )
+        .bind(now)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut reaped = Vec::with_capacity(rows.len());
+        for row in rows {
+            let community_id: String = row.try_get("community_id")?;
+            let channel_id: String = row.try_get("id")?;
+            sqlx::query(
+                "UPDATE channels SET archived_at = ? \
+                 WHERE community_id = ? AND id = ? AND archived_at IS NULL",
+            )
+            .bind(now)
+            .bind(&community_id)
+            .bind(&channel_id)
+            .execute(&mut *transaction)
+            .await?;
+            reaped.push(ReapedEphemeralChannel {
+                community_id: CommunityId::from_uuid(
+                    Uuid::parse_str(&community_id).map_err(|error| {
+                        DbError::InvalidData(format!("community UUID: {error}"))
+                    })?,
+                ),
+                host: row.try_get("host")?,
+                channel_id: Uuid::parse_str(&channel_id)
+                    .map_err(|error| DbError::InvalidData(format!("channel UUID: {error}")))?,
+            });
+        }
+        transaction.commit().await?;
+        Ok(reaped)
+    }
+}

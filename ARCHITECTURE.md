@@ -131,7 +131,7 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
     ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
     ├── buzz-auth        (NIP-42, NIP-98, API tokens, scopes, rate limiting)
     ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
-    ├── buzz-search      (Postgres FTS: query, delete)
+    ├── buzz-search      (PostgreSQL/SQLite FTS query adapters)
     ├── buzz-audit       (hash-chain tamper-evident log)
     └── buzz-workflow    (YAML-as-code automation engine)
          │
@@ -550,7 +550,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Live delivery never drops an event silently: when a worker's bounded queue is full, an event is not delivered within 30 s of this node reading it from Redis, or the access gate still cannot check a recipient by that deadline (it re-checks with backoff until then), that event's local recipients get `CLOSED "resync: ..."` for syncs, are fenced from every further live EVENT frame as soon as the loss is detected (so a client's resume cursor stops moving), and are closed so clients catch up from their cursor; when the dispatcher itself lags the broadcast, every subscribed connection is treated the same way. Only the fence is immediate: each node closes at most 1% of its connections per second (at least one per jittered 100 ms tick), so a loss cannot become a reconnect storm. A slow delivery is delivered late rather than lost, so a database stall of a few seconds delays events instead of closing their recipients on every node at once. Clients resume from the newest `created_at` they received minus 5 s; an event delivered more than 5 s late, then lost at the deadline or by a disconnect while it waits, is replayed only if the client's cursor did not move past it by more than that slack. A dispatcher that falls behind without overflowing the broadcast detects a loss late, and dispatcher lag loses events it never sees; neither is bounded by the deadline. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
@@ -568,42 +568,60 @@ EXPIRE buzz:typing:{channel_id} 60
 
 ---
 
-### buzz-search — Postgres FTS Integration
+### Object Storage — Media Blobs and Git CAS
 
-Full-text search via Postgres FTS. Events are searchable through the
-`events.search_tsv` generated `tsvector` column (populated on insert, indexed
-by a GIN index) — there is no separate search service or out-of-band indexer.
-Privacy-sensitive kinds are excluded at the storage level (the `search_tsv`
-`CASE WHEN kind IN (...)` yields `NULL`, which never matches `@@`). In
-multi-community mode every query filter includes `community_id`, so the shared
-`events` table is infrastructure, not a cross-community result space; the relay
-re-authorizes every candidate hit before returning it.
+Relay handlers depend on behavior-specific object-storage interfaces rather
+than S3 client types:
 
-A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
-only an allowlist of kinds, and so does one converted by
-`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
-kind 30180 (custom emoji entries) until an operator runs the updated maintenance
-script, which must happen before the emoji migration rollout.
+- `buzz_media::BlobStorage` covers media writes, streaming and ranged reads,
+  metadata HEADs, deletion, tenant-scoped sidecars, and bounded listing for
+  storage accounting.
+- `api::git::store::GitStorage` covers content-addressed packs/manifests,
+  derived pack indexes, verified reads, pointer snapshots, and conditional
+  pointer swaps.
+
+`MediaStorage` and `GitStore` are the distributed S3-compatible
+implementations. `FilesystemBlobStorage` implements the media side for
+single-node deployments but is not selected until embedded runtime
+configuration is enabled. It confines validated keys beneath one canonical
+root, publishes owner-only files through same-directory flush-and-rename,
+fsyncs parent directories on Unix, enforces a serialized physical-byte quota,
+and removes abandoned temporary files during recovery.
+
+Distributed startup still constructs the S3 adapters and runs the Git
+conditional-write conformance probe before readiness. Both media adapters run
+the same behavior contract. The interfaces preserve community sidecars as the
+media read gate and classify a losing Git pointer precondition as
+`CasOutcome::LostRace`, not a backend failure.
+
+---
+
+### buzz-search — Backend-specific FTS Integration
+
+PostgreSQL searches the `events.search_tsv` generated `tsvector` column through
+a GIN index. SQLite searches an external-content FTS5 table maintained by
+triggers in the event write transaction. Neither adapter needs a separate
+service or out-of-band indexer. Fresh installations share a positive searchable
+kind allowlist, keeping encrypted, private, and control kinds out of both
+storage-level indexes. In multi-community mode every query includes
+`community_id`; the relay re-authorizes every candidate hit before returning it.
 
 **Key behaviors:**
-- `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
-  parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s). Prefix-mode relevance (outside
-  profile search) ranks only the newest 1000 matches, which Postgres may read
-  from the primary key backward instead of the GIN index.
+- `SearchService::new(pool)` selects PostgreSQL while
+  `SearchService::new_sqlite(pool)` selects SQLite; `search(&SearchQuery)`
+  dispatches to parameterized backend SQL and returns candidate `SearchHit`s.
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
-- Every query carries `community_id`, and every access path leads with it (the
-  FTS predicate BitmapAnd-ed with community-leading btree filters, or the
-  `(community_id, created_at, id)` primary key read backward), so a query never
-  crosses tenants.
+- Every query carries `community_id`, so a query never crosses tenants.
+- Word, phrase, prefix, channel, kind, author, time, tombstone, and pagination
+  behavior is shared. Tokenization and rank ordering may differ by backend.
 - Permission filtering is **caller's responsibility** — `buzz-search` returns
   candidate hits; the relay re-authorizes each one (channel membership, `#p`,
   owner gates) before delivering it.
 
 **Does NOT:** enforce channel membership or access control. Does NOT write
-events (indexing is the `search_tsv` generated column on the `events` insert).
+events (index maintenance is part of the database event mutation).
 
 ---
 
@@ -717,7 +735,9 @@ pub struct AppState {
     pub handler_semaphore: Arc<Semaphore>,    // 1024 concurrent handlers
     pub relay_keypair: nostr::Keys,           // relay identity
     pub local_event_ids: moka::sync::Cache,   // local-echo dedup
-    // + config, redis_pool, membership_cache, media_storage, shutdown state
+    pub media_storage: Arc<dyn BlobStorage>,
+    pub git_store: Arc<dyn GitStorage>,
+    // + config, redis_pool, membership_cache, shutdown state
 }
 ```
 
@@ -743,8 +763,6 @@ pub struct ConnectionState {
 }
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
-
-**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
 
 **HTTP endpoints:**
 
@@ -962,19 +980,14 @@ Docker Compose provides the full local development stack. All services include h
 | `buzz:presence:{pubkey_hex}` | String | 180s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
 | `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
-### Full-Text Search (Postgres FTS)
+### Full-Text Search
 
-Search runs over the `events.search_tsv` generated `tsvector` column on the
-`events` table (no separate collection or service). The column is populated on
-insert — `to_tsvector('simple', content)` — and excludes privacy-sensitive
-kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
-storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
-(`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
-community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`. Prefix-mode relevance ranks only the newest 1000
-matches; for a common prefix Postgres reads the `(community_id, created_at, id)`
-primary key backward and stops there, still fenced by its leading
-`community_id`.
+PostgreSQL uses the `events.search_tsv` generated `tsvector` column and a GIN
+index. SQLite uses an external-content FTS5 table updated by transactional
+triggers. Fresh schemas index only the public searchable-kind allowlist, so
+private or encrypted rows remain storage-level unsearchable. Both query paths
+bind `community_id` before applying FTS and optional channel, kind, author,
+time, tombstone, and pagination filters.
 
 ---
 

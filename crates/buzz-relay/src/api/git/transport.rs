@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{header, StatusCode},
+    http::{header, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -1058,8 +1059,13 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
-            .await
+        match load_manifest_for_read(
+            state.git_store.as_ref(),
+            &auth.tenant,
+            &params.owner,
+            &params.repo,
+        )
+        .await
         {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
@@ -1104,7 +1110,7 @@ async fn info_refs_subprocess(
     let _permit = acquire_git_permit(state, "info_refs")?;
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        state.git_store.as_ref(),
         tenant,
         &params.owner,
         &params.repo,
@@ -1311,7 +1317,7 @@ pub async fn upload_pack(
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        state.git_store.as_ref(),
         &auth.tenant,
         &params.owner,
         &params.repo,
@@ -1402,7 +1408,7 @@ pub async fn receive_pack(
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
     let (repo, parent_state) = hydrate_for_write(
-        &state.git_store,
+        state.git_store.as_ref(),
         &auth.tenant,
         &params.owner,
         &params.repo,
@@ -2167,7 +2173,7 @@ async fn finalize_push_inner(
     // between hydrate and CAS. Observe serving-lease loss throughout the
     // potentially long upload/CAS operation, not only at its boundaries.
     let publish = cas_publish(
-        &state.git_store,
+        state.git_store.as_ref(),
         &ctx.tenant,
         ctx.repo_handle.path(),
         &ctx.owner,
@@ -2392,7 +2398,27 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .merge(super::settings::router())
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_git_enabled,
+        ))
         .with_state(state)
+}
+
+async fn require_git_enabled(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.config.git_enabled {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from(
+                "git hosting is disabled; set BUZZ_GIT_ENABLED=true",
+            ))
+            .unwrap();
+    }
+    next.run(request).await
 }
 
 #[cfg(test)]
@@ -2668,7 +2694,7 @@ mod track_c_tests {
     ) -> PushContext {
         let tenant = TenantContext::resolved(community, host);
         let (hydrated, parent_state) = hydrate_for_write(
-            &state.git_store,
+            state.git_store.as_ref(),
             &tenant,
             &owner,
             &repo,

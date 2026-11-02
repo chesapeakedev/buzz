@@ -10100,7 +10100,7 @@ mod build_mcp_servers_tests {
     use std::sync::Mutex;
 
     /// Env-var-touching tests must run serially — env vars are process-global.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     pub(super) fn test_config() -> Config {
         Config {

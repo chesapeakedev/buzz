@@ -30,7 +30,7 @@ pub async fn handle(
         let media_base =
             crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &media_base)?;
-        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage).await?;
+        crate::api::verify_imeta_blobs(tenant, &imeta_tags, state.media_storage.as_ref()).await?;
     }
 
     let tags = serialize_tags(event)?;

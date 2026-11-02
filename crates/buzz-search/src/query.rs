@@ -1,4 +1,4 @@
-//! NIP-50 search query against Postgres FTS, community-scoped.
+//! Community-scoped NIP-50 search queries for PostgreSQL FTS and SQLite FTS5.
 //!
 //! The relay never trusts a hit by itself: this layer returns canonical event
 //! ids ordered by relevance, the relay refetches `StoredEvent`s through
@@ -8,7 +8,7 @@
 //!
 //! See conformance row 50.
 
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::{PgPool, QueryBuilder, Row, SqlitePool};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -62,20 +62,15 @@ pub enum SearchMode {
     /// Prefix-match the trailing normalized query token (`pro` matches `project`).
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
-    /// relay still refetches and re-authorizes every hit; this mode changes the
-    /// candidate tsquery and, for relevance outside profile search, ranks only
-    /// the newest 1000 matches. It does not change the access boundary. A
-    /// trailing token that yields a lexeme shorter than three characters
-    /// returns no hits unless the query is kind:0-only (see `PREFIX_MIN_CHARS`).
+    /// relay still refetches and re-authorizes every hit; this mode changes only
+    /// the candidate tsquery, not the access boundary.
     Prefix,
 }
 
 /// Result ordering for a search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSort {
-    /// `ts_rank_cd` relevance, newest first among equal ranks. In
-    /// [`SearchMode::Prefix`] outside profile search, only the newest 1000
-    /// matches are ranked, so pages end with them.
+    /// `ts_rank_cd` relevance, newest first among equal ranks.
     Relevance,
     /// Newest first, ignoring relevance; ties ordered by event id.
     Newest,
@@ -131,7 +126,7 @@ pub struct SearchHit {
     pub channel_id: Option<Uuid>,
     /// Unix seconds.
     pub created_at: i64,
-    /// `ts_rank_cd` relevance score (higher = better).
+    /// Backend relevance score (higher = better).
     pub rank: f32,
 }
 
@@ -154,33 +149,8 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
-/// How many of the newest matches a prefix-mode relevance search ranks.
-/// The GIN index returns matches in no useful order, so ranking every match
-/// before `LIMIT` costs time proportional to the match count, and a short
-/// typeahead prefix matches most of a community. Reading candidates newest
-/// first lets Postgres stop at this many instead. Every page ranks the same
-/// window, so pages stay consistent and end with it.
-const PREFIX_RANK_WINDOW: i64 = 1000;
-/// Shortest lexeme [`SearchMode::Prefix`] gives `:*` for anything but a
-/// kind:0-only (profile) query. If the trailing token yields a shorter one,
-/// the tsquery is NULL and the search returns no hits, whatever completed
-/// words precede it. The check runs on Postgres' own `simple` parser output,
-/// so punctuation such as `c++`, `@al` or `don't` cannot slip a short `:*`
-/// past it.
-/// The GIN index cannot stop early or return rows in rank order, so a one- or
-/// two-character `:*` prefix makes Postgres fetch, recheck and rank a large
-/// share of every indexed message before it can apply `LIMIT`, and typeahead
-/// sends one on every typing pause. Profiles are few enough to stay
-/// one-character typeahead.
-const PREFIX_MIN_CHARS: i32 = 3;
 
-/// `min_prefix_chars` applies to [`SearchMode::Prefix`] only; 0 disables it.
-fn push_tsquery(
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    mode: SearchMode,
-    search_text: &str,
-    min_prefix_chars: i32,
-) {
+fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
     match mode {
         SearchMode::FullText => {
             qb.push("websearch_to_tsquery('simple', ");
@@ -194,20 +164,14 @@ fn push_tsquery(
             // tsquery construction so query-side normalization matches the
             // `search_tsv` generated column. `quote_literal` prevents tsquery
             // syntax injection from punctuation/operators in the raw topbar input.
-            // A trailing lexeme shorter than `min_prefix_chars` makes the whole
-            // tsquery NULL, which matches nothing (see `PREFIX_MIN_CHARS`).
             qb.push(
-                "(SELECT CASE WHEN bool_or(token_ord = max_token_ord AND char_length(lexeme) < ",
-            );
-            qb.push_bind(min_prefix_chars);
-            qb.push(
-                ") THEN NULL::tsquery ELSE COALESCE(\
+                "(SELECT COALESCE(\
                  string_agg(\
                    quote_literal(lexeme) || CASE WHEN token_ord = max_token_ord THEN ':*' ELSE '' END, \
                    ' & ' ORDER BY token_ord, lex_ord\
                  ), \
                  ''\
-                 )::tsquery END \
+                 )::tsquery \
                  FROM (\
                    SELECT raw_token.token_ord, normalized.lexeme, normalized.lex_ord, raw_token.max_token_ord \
                    FROM (\
@@ -244,20 +208,75 @@ fn normalized_search_text(q: &str) -> Option<String> {
     }
 }
 
+fn sqlite_match_expression(search_text: &str, mode: SearchMode) -> Option<String> {
+    let mut terms = Vec::new();
+    let mut word = String::new();
+    let mut phrase = Vec::new();
+    let mut quoted = false;
+
+    let flush_word =
+        |word: &mut String, phrase: &mut Vec<String>, terms: &mut Vec<String>, quoted: bool| {
+            if word.is_empty() {
+                return;
+            }
+            if quoted {
+                phrase.push(std::mem::take(word));
+            } else {
+                terms.push(std::mem::take(word));
+            }
+        };
+
+    for character in search_text.chars() {
+        if character == '"' {
+            flush_word(&mut word, &mut phrase, &mut terms, quoted);
+            if quoted && !phrase.is_empty() {
+                terms.push(phrase.join(" "));
+                phrase.clear();
+            }
+            quoted = !quoted;
+        } else if character.is_alphanumeric() || character == '_' {
+            word.push(character);
+        } else {
+            flush_word(&mut word, &mut phrase, &mut terms, quoted);
+        }
+    }
+    flush_word(&mut word, &mut phrase, &mut terms, quoted);
+    if !phrase.is_empty() {
+        terms.push(phrase.join(" "));
+    }
+    if terms.is_empty() {
+        return None;
+    }
+
+    let last = terms.len() - 1;
+    Some(
+        terms
+            .into_iter()
+            .enumerate()
+            .map(|(index, term)| {
+                let escaped = term.replace('"', "\"\"");
+                if mode == SearchMode::Prefix && index == last {
+                    format!("\"{escaped}\"*")
+                } else {
+                    format!("\"{escaped}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
+}
+
 /// Execute a community-scoped FTS query.
 ///
-/// The mode-specific tsquery is resolved first and bound as a value, so the
-/// planner estimates its selectivity instead of assuming a rare match. The
-/// search itself is a one-shot statement, planned for that value every time.
-///
-/// SQL shape:
+/// SQL shape (always):
 /// ```sql
 /// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
-///        ts_rank_cd(search_tsv, $q) AS rank
-/// FROM events            -- prefix relevance: the newest PREFIX_RANK_WINDOW matches
+///        ts_rank_cd(search_tsv, query) AS rank
+/// FROM events,
+///      <mode-specific tsquery> AS query
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
-///   AND search_tsv @@ $q
+///   AND search_tsv @@ query
 ///   [+ channel scope, kinds, authors, since, until]
 /// ORDER BY rank DESC, created_at DESC, id   -- SearchSort::Newest: created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
@@ -267,7 +286,6 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// is no code path through this function that omits it.
 #[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-    let profile_only = query.kinds.as_deref() == Some(&[0][..]);
     let Some(search_text) = normalized_search_text(&query.q) else {
         return Ok(SearchResult {
             hits: Vec::new(),
@@ -290,44 +308,19 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // first for this one narrow caller shape.
     let prioritize_exact_profile_lexeme = query.sort == SearchSort::Relevance
         && query.mode == SearchMode::Prefix
-        && profile_only
+        && query.kinds.as_deref() == Some(&[0][..])
         && search_text.chars().count() <= 2;
-    // Profiles are few, so profile typeahead keeps ranking every match.
-    let rank_window =
-        (query.sort == SearchSort::Relevance && query.mode == SearchMode::Prefix && !profile_only)
-            .then_some(PREFIX_RANK_WINDOW);
-
-    let min_prefix_chars = if profile_only { 0 } else { PREFIX_MIN_CHARS };
-    // One checkout for both statements, so a busy pool queues a search once.
-    let mut conn = pool.acquire().await?;
-    let mut resolve: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("SELECT (");
-    push_tsquery(&mut resolve, query.mode, &search_text, min_prefix_chars);
-    resolve.push(")::text");
-    let tsquery: Option<String> = resolve.build_query_scalar().fetch_one(&mut *conn).await?;
-    let Some(tsquery) = tsquery.filter(|tsquery| !tsquery.is_empty()) else {
-        // A too-short trailing prefix (NULL) or nothing searchable after
-        // normalization (empty) matches nothing.
-        return Ok(SearchResult {
-            hits: Vec::new(),
-            page,
-        });
-    };
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, kind, pubkey, channel_id, \
          EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
-         ts_rank_cd(search_tsv, ",
+         ts_rank_cd(search_tsv, search_query.query) AS rank \
+         FROM events CROSS JOIN LATERAL (SELECT ",
     );
-    qb.push_bind(&tsquery);
-    qb.push("::tsquery) AS rank FROM ");
-    if rank_window.is_some() {
-        qb.push("(SELECT id, kind, pubkey, channel_id, created_at, search_tsv FROM ");
-    }
-    qb.push("events WHERE community_id = ");
+    push_tsquery(&mut qb, query.mode, &search_text);
+    qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ ");
-    qb.push_bind(&tsquery);
-    qb.push("::tsquery");
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
 
     // Search is a current-state surface; old artifact snapshots cannot match.
     qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
@@ -383,14 +376,6 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push(")");
     }
 
-    if let Some(window) = rank_window {
-        // Matches the backward scan of each partition's primary key, so the
-        // newest candidates stream in order and the scan stops at `window`.
-        qb.push(" ORDER BY created_at DESC, id DESC LIMIT ");
-        qb.push_bind(window);
-        qb.push(") AS candidates");
-    }
-
     if query.sort == SearchSort::Newest {
         qb.push(" ORDER BY created_at DESC, id LIMIT ");
     } else if prioritize_exact_profile_lexeme {
@@ -404,9 +389,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    // Not a cached prepared statement: after five runs Postgres may switch a
-    // cached statement to a generic plan, which cannot see the tsquery.
-    let rows = crate::cancel::fetch_all(pool, conn, qb.build().persistent(false)).await?;
+    let rows = qb.build().fetch_all(pool).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
@@ -442,35 +425,27 @@ fn tier_name(column: &str) -> String {
 /// Largest page size [`search_profile_names`] accepts.
 pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
 
-/// Find people whose current kind:0 `name` or `display_name` matches `q`,
-/// or, with `verified_by`, whose current verified profile does.
+/// Find current kind:0 profiles whose `name` or `display_name` matches `q`.
 ///
 /// Matching is the NIP-50 [`SearchMode::Prefix`] rule (every completed query
 /// word must equal a word, the last may be a prefix, in any order), applied to
-/// name fields only. For kind:0 these are `name` and `display_name`; other
-/// profile fields, such as `picture` data URLs, `about` and `nip05`, cannot
-/// satisfy a word, and the existing `search_tsv` index stays the access path.
-/// With `verified_by`, a current kind:30382 event signed by that key matches
-/// on its `display_name`, `username` and `full_name` tags; its `d` tag names
-/// the person.
+/// the two name fields only. Other profile fields, such as `picture` data URLs,
+/// `about` and `nip05`, cannot satisfy a word. The result set is therefore the
+/// prefix-mode kind:0 result set minus profiles that match only outside their
+/// names; the existing `search_tsv` index stays the access path.
 ///
-/// Order is per person, by their best match: a name equal to the query, then
-/// a name that starts with it, then a name with a word that starts with it,
-/// then any other match. The query and names are compared lower-cased with
-/// whitespace collapsed, both normalized by the same SQL. Ties go by
-/// relevance of the query to the names (`ts_rank_cd` over the names alone,
-/// not the whole event), then newest first, then pubkey, so pages are stable.
-/// Pages are 1-based, like [`SearchQuery::page`], and count people.
-///
-/// Each person yields their current kind:0, when they have one, then, with
-/// `verified_by`, their current verified profile, when they have one,
-/// whichever of the two matched.
+/// Order: a name equal to the query, then a name that starts with it, then a
+/// name with a word that starts with it, then any other match. The query and
+/// names are compared lower-cased with whitespace collapsed, both normalized
+/// by the same SQL. Ties go by relevance of the query to the two names
+/// (`ts_rank_cd` over the names alone, not the whole profile), then newest
+/// first, then event id, so pages are stable. Pages are 1-based, like
+/// [`SearchQuery::page`].
 #[datastore_span(name = "search_profile_names", system = "postgresql")]
 pub async fn search_profile_names(
     pool: &PgPool,
     community: CommunityId,
     q: &str,
-    verified_by: Option<[u8; 32]>,
     page: u32,
     per_page: u32,
 ) -> Result<SearchResult, SearchError> {
@@ -483,106 +458,56 @@ pub async fn search_profile_names(
     };
     let per_page = per_page.clamp(1, PROFILE_NAMES_PER_PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page as i64);
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("WITH search_query AS (SELECT ");
-    push_tsquery(&mut qb, SearchMode::Prefix, &search_text, 0);
+    // Tiers compare the query and each name after the same SQL normalization
+    // ([`TIER_TEXT`]), so the two sides agree by construction.
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, kind, pubkey, channel_id, created_at_s, rank FROM (\
+         SELECT e.id, e.kind, e.pubkey, e.channel_id, \
+         EXTRACT(EPOCH FROM e.created_at)::bigint AS created_at_s, e.created_at, \
+         ts_rank_cd(names.tsv, search_query.query) AS rank, \
+         LEAST(",
+    );
+    for field in ["names.name", "names.display_name"] {
+        qb.push(format!(
+            "CASE WHEN {field} = search_query.typed THEN 0 \
+             WHEN starts_with({field}, search_query.typed) THEN 1 \
+             WHEN strpos({field}, ' ' || search_query.typed) > 0 THEN 2 ELSE 3 END"
+        ));
+        if field == "names.name" {
+            qb.push(", ");
+        }
+    }
+    qb.push(
+        ") AS tier \
+         FROM events e CROSS JOIN LATERAL (SELECT ",
+    );
+    push_tsquery(&mut qb, SearchMode::Prefix, &search_text);
     qb.push(" AS query, ");
-    // Every verified match is ranked before `LIMIT`, so verified names need
-    // the NIP-50 minimum prefix; kind:0 keeps one-character typeahead.
-    push_tsquery(&mut qb, SearchMode::Prefix, &search_text, PREFIX_MIN_CHARS);
-    qb.push(" AS verified_query, ");
     qb.push(TIER_TEXT[0]);
     qb.push_bind(search_text.clone());
     qb.push(TIER_TEXT[1]);
-    qb.push(" AS typed), matches AS (SELECT e.pubkey AS person, ");
-    push_name_match(&mut qb, &["name", "display_name"], "e.created_at");
-    qb.push(
-        " FROM events e CROSS JOIN search_query \
-         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields",
-    );
-    push_name_columns(&mut qb, &["name", "display_name"]);
-    qb.push(" WHERE e.community_id = ");
+    qb.push(format!(
+        " AS typed) AS search_query \
+         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields \
+         CROSS JOIN LATERAL (SELECT \
+           to_tsvector('simple', concat_ws(' ', fields.name, fields.display_name)) AS tsv, \
+           {} AS name, {} AS display_name) AS names \
+         WHERE e.community_id = ",
+        tier_name("fields.name"),
+        tier_name("fields.display_name"),
+    ));
     qb.push_bind(*community.as_uuid());
     qb.push(
         " AND e.kind = 0 AND e.channel_id IS NULL AND e.deleted_at IS NULL \
          AND e.search_tsv @@ search_query.query \
-         AND names.tsv @@ search_query.query",
-    );
-    if let Some(author) = verified_by {
-        qb.push(" UNION ALL SELECT decode(pubkey, 'hex'), ");
-        push_name_match(
-            &mut qb,
-            &VERIFIED_NAME_TAGS,
-            "to_timestamp((event ->> 'created_at')::bigint)",
-        );
-        qb.push(" FROM nip_fi_profile_heads CROSS JOIN search_query CROSS JOIN LATERAL (SELECT ");
-        for (i, tag) in VERIFIED_NAME_TAGS.iter().enumerate() {
-            if i > 0 {
-                qb.push(", ");
-            }
-            qb.push(format!("{} AS {tag}", verified_name(tag)));
-        }
-        qb.push(") AS fields");
-        push_name_columns(&mut qb, &VERIFIED_NAME_TAGS);
-        qb.push(" WHERE community_id = ");
-        qb.push_bind(*community.as_uuid());
-        qb.push(format!(
-            " AND pubkey ~ '^[0-9a-f]{{64}}$' AND {} @@ search_query.verified_query",
-            verified_names_tsv()
-        ));
-        // The head counts only while its event is live and signed by `author`.
-        qb.push(" AND EXISTS (SELECT 1 FROM events e WHERE e.community_id = ");
-        qb.push_bind(*community.as_uuid());
-        // `created_at` lets Postgres prune `events` to the head's partition.
-        qb.push(
-            " AND e.id = decode(event ->> 'id', 'hex') \
-             AND e.created_at = to_timestamp((event ->> 'created_at')::bigint) \
-             AND e.kind = 30382 AND e.pubkey = ",
-        );
-        qb.push_bind(author.to_vec());
-        qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
-    }
-    qb.push(
-        // Each person ranks by their single best match, not by mixing sources.
-        "), people AS (SELECT * FROM (SELECT DISTINCT ON (person) person, tier, \
-         rank, created_at FROM matches \
-         ORDER BY person, tier, rank DESC, created_at DESC) AS best \
-         ORDER BY tier, rank DESC, created_at DESC, person LIMIT ",
+         AND names.tsv @@ search_query.query\
+         ) AS matched ORDER BY tier, rank DESC, created_at DESC, id LIMIT ",
     );
     qb.push_bind(per_page as i64);
     qb.push(" OFFSET ");
     qb.push_bind(offset);
-    qb.push(
-        ") SELECT ev.id, ev.kind, ev.pubkey, ev.channel_id, \
-         EXTRACT(EPOCH FROM ev.created_at)::bigint AS created_at_s, people.rank \
-         FROM people CROSS JOIN LATERAL (\
-           (SELECT id, kind, pubkey, channel_id, created_at FROM events \
-            WHERE community_id = ",
-    );
-    qb.push_bind(*community.as_uuid());
-    qb.push(
-        " AND pubkey = people.person AND kind = 0 \
-         AND channel_id IS NULL AND deleted_at IS NULL \
-         ORDER BY created_at DESC, id LIMIT 1)",
-    );
-    if let Some(author) = verified_by {
-        qb.push(
-            " UNION ALL (SELECT e.id, e.kind, e.pubkey, e.channel_id, e.created_at \
-             FROM nip_fi_profile_heads h JOIN events e ON e.community_id = h.community_id \
-             AND e.id = decode(h.event ->> 'id', 'hex') \
-             AND e.created_at = to_timestamp((h.event ->> 'created_at')::bigint) \
-             WHERE h.community_id = ",
-        );
-        qb.push_bind(*community.as_uuid());
-        qb.push(" AND h.pubkey = encode(people.person, 'hex') AND e.kind = 30382 AND e.pubkey = ");
-        qb.push_bind(author.to_vec());
-        qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
-    }
-    qb.push(
-        ") AS ev ORDER BY people.tier, people.rank DESC, people.created_at DESC, \
-         people.person, ev.kind",
-    );
 
-    let rows = crate::cancel::fetch_all(pool, pool.acquire().await?, qb.build()).await?;
+    let rows = qb.build().fetch_all(pool).await?;
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;
@@ -605,68 +530,162 @@ pub async fn search_profile_names(
     Ok(SearchResult { hits, page })
 }
 
-/// Name tags of a relay-signed kind:30382 verified profile.
-const VERIFIED_NAME_TAGS: [&str; 3] = ["display_name", "username", "full_name"];
+/// Execute a community-scoped SQLite FTS5 query.
+///
+/// Candidate ranking may differ from PostgreSQL, but tenant, channel, kind,
+/// author, time, pagination, and tombstone filters have the same semantics.
+pub async fn search_sqlite(
+    pool: &SqlitePool,
+    query: &SearchQuery,
+) -> Result<SearchResult, SearchError> {
+    let page = query.page.clamp(1, PAGE_MAX);
+    let Some(search_text) = normalized_search_text(&query.q) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    };
+    let Some(match_expression) = sqlite_match_expression(&search_text, query.mode) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    };
+    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
+    let per_page_actual = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        per_page
+    };
+    let offset = i64::from(page - 1) * i64::from(per_page_actual);
 
-/// The first value of `tag` in `nip_fi_profile_heads.event`. The relay
-/// writes each name tag at most once. Strict mode keeps a tag's array
-/// shape (lax mode unwraps it), and `silent` makes malformed tags no match.
-fn verified_name(tag: &str) -> String {
-    format!(
-        "(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == \"{tag}\")[1]', '{{}}', true) \
-         #>> '{{}}')"
-    )
-}
+    let mut builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT e.id, e.kind, e.pubkey, e.channel_id, \
+         e.created_at / 1000000 AS created_at_s, \
+         -bm25(events_fts) AS rank \
+         FROM events_fts CROSS JOIN events e ON e.rowid = events_fts.rowid \
+         WHERE e.community_id = ",
+    );
+    builder
+        .push_bind(query.community.as_uuid().to_string())
+        .push(" AND e.deleted_at IS NULL AND events_fts MATCH ")
+        .push_bind(match_expression);
 
-/// The expression `idx_nip_fi_profile_heads_names` indexes
-/// (migrations/0081_nip_fi_profile_head_names.sql).
-fn verified_names_tsv() -> String {
-    let names = VERIFIED_NAME_TAGS
-        .iter()
-        .map(|tag| format!("COALESCE({}, '')", verified_name(tag)))
-        .collect::<Vec<_>>()
-        .join(" || ' ' || ");
-    format!("to_tsvector('simple', {names})")
-}
-
-/// Pushes `rank, created_at, tier` for one match over the `names` columns
-/// built by [`push_name_columns`] from the same `fields`.
-fn push_name_match(qb: &mut QueryBuilder<sqlx::Postgres>, fields: &[&str], created_at: &str) {
-    qb.push(format!(
-        "ts_rank_cd(names.tsv, search_query.query) AS rank, {created_at} AS created_at, LEAST("
-    ));
-    for (i, field) in fields.iter().enumerate() {
-        if i > 0 {
-            qb.push(", ");
+    match &query.channel_scope {
+        ChannelScope::Any => {}
+        ChannelScope::ChannelLessOnly => {
+            builder.push(" AND e.channel_id IS NULL");
         }
-        let column = format!("names.{field}");
-        qb.push(format!(
-            "CASE WHEN {column} = search_query.typed THEN 0 \
-             WHEN starts_with({column}, search_query.typed) THEN 1 \
-             WHEN strpos({column}, ' ' || search_query.typed) > 0 THEN 2 ELSE 3 END"
-        ));
+        ChannelScope::Channels(channels) if channels.is_empty() => {
+            builder.push(" AND 0");
+        }
+        ChannelScope::Channels(channels) => {
+            builder.push(" AND e.channel_id IN (");
+            let mut separated = builder.separated(", ");
+            for channel in channels {
+                separated.push_bind(channel.to_string());
+            }
+            builder.push(")");
+        }
+        ChannelScope::ChannelsOrChannelLess(channels) if channels.is_empty() => {
+            builder.push(" AND e.channel_id IS NULL");
+        }
+        ChannelScope::ChannelsOrChannelLess(channels) => {
+            builder.push(" AND (e.channel_id IN (");
+            let mut separated = builder.separated(", ");
+            for channel in channels {
+                separated.push_bind(channel.to_string());
+            }
+            builder.push(") OR e.channel_id IS NULL)");
+        }
     }
-    qb.push(") AS tier");
-}
 
-/// Pushes the `names` lateral: the `simple` tsvector of `fields` and each
-/// field normalized for tiers ([`TIER_TEXT`]).
-fn push_name_columns(qb: &mut QueryBuilder<sqlx::Postgres>, fields: &[&str]) {
-    let joined = fields
-        .iter()
-        .map(|field| format!("fields.{field}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    qb.push(format!(
-        " CROSS JOIN LATERAL (SELECT to_tsvector('simple', concat_ws(' ', {joined})) AS tsv"
-    ));
-    for field in fields {
-        qb.push(format!(
-            ", {} AS {field}",
-            tier_name(&format!("fields.{field}"))
-        ));
+    if let Some(kinds) = query.kinds.as_deref().filter(|kinds| !kinds.is_empty()) {
+        builder.push(" AND e.kind IN (");
+        let mut separated = builder.separated(", ");
+        for kind in kinds {
+            separated.push_bind(*kind);
+        }
+        builder.push(")");
     }
-    qb.push(") AS names");
+    if let Some(authors) = query
+        .authors
+        .as_deref()
+        .filter(|authors| !authors.is_empty())
+    {
+        builder.push(" AND e.pubkey IN (");
+        let mut separated = builder.separated(", ");
+        for author in authors {
+            separated.push_bind(author.clone());
+        }
+        builder.push(")");
+    }
+    if let Some(since) = query.since {
+        builder
+            .push(" AND e.created_at >= ")
+            .push_bind(since.saturating_mul(1_000_000));
+    }
+    if let Some(until) = query.until {
+        builder
+            .push(" AND e.created_at <= ")
+            .push_bind(until.saturating_mul(1_000_000));
+    }
+    builder
+        .push(" ORDER BY rank DESC, e.created_at DESC, e.id LIMIT ")
+        .push_bind(i64::from(per_page_actual))
+        .push(" OFFSET ")
+        .push_bind(offset);
+
+    let acquired = std::time::Instant::now();
+    let mut connection = pool.acquire().await.map_err(|error| {
+        metrics::counter!("buzz_sqlite_read_pool_timeouts_total", "lane" => "search").increment(1);
+        SearchError::ReadUnavailable(error.to_string())
+    })?;
+    let active = pool.size() - pool.num_idle() as u32;
+    static HIGH_WATER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    HIGH_WATER.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+    metrics::gauge!("buzz_sqlite_read_pool_active", "lane" => "search").set(active as f64);
+    metrics::gauge!("buzz_sqlite_read_pool_high_water", "lane" => "search")
+        .set(HIGH_WATER.load(std::sync::atomic::Ordering::Relaxed) as f64);
+    metrics::histogram!("buzz_sqlite_read_queue_seconds", "lane" => "search")
+        .record(acquired.elapsed().as_secs_f64());
+    let query_started = std::time::Instant::now();
+    let rows = builder.build().fetch_all(&mut *connection).await?;
+    metrics::histogram!("buzz_sqlite_read_query_seconds", "lane" => "search")
+        .record(query_started.elapsed().as_secs_f64());
+    let mut hits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id_bytes: Vec<u8> = row.try_get("id")?;
+        let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+        let id = id_bytes.try_into().map_err(|value: Vec<u8>| {
+            sqlx::Error::Decode(
+                format!("event id column is {} bytes, expected 32", value.len()).into(),
+            )
+        })?;
+        let pubkey = pubkey_bytes.try_into().map_err(|value: Vec<u8>| {
+            sqlx::Error::Decode(
+                format!("pubkey column is {} bytes, expected 32", value.len()).into(),
+            )
+        })?;
+        let channel_id = row
+            .try_get::<Option<String>, _>("channel_id")?
+            .map(|value| {
+                Uuid::parse_str(&value).map_err(|error| {
+                    sqlx::Error::Decode(format!("invalid channel UUID: {error}").into())
+                })
+            })
+            .transpose()?;
+        let rank = row.try_get::<f64, _>("rank")? as f32;
+        hits.push(SearchHit {
+            event_id: id,
+            kind: row.try_get("kind")?,
+            pubkey,
+            channel_id,
+            created_at: row.try_get("created_at_s")?,
+            rank,
+        });
+    }
+    Ok(SearchResult { hits, page })
 }
 
 #[cfg(test)]
@@ -695,5 +714,18 @@ mod tests {
         let long = "x".repeat(SEARCH_TEXT_MAX_CHARS + 10);
         let cleaned = normalized_search_text(&long).expect("non-empty");
         assert_eq!(cleaned.chars().count(), SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn sqlite_expression_preserves_phrases_and_prefixes_only_the_tail() {
+        assert_eq!(
+            sqlite_match_expression("alpha \"beta gamma\"", SearchMode::FullText).as_deref(),
+            Some("\"alpha\" AND \"beta gamma\"")
+        );
+        assert_eq!(
+            sqlite_match_expression("alpha pro", SearchMode::Prefix).as_deref(),
+            Some("\"alpha\" AND \"pro\"*")
+        );
+        assert!(sqlite_match_expression("---", SearchMode::FullText).is_none());
     }
 }

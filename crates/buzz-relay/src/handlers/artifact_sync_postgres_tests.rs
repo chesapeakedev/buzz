@@ -44,7 +44,7 @@ async fn fixture() -> Fixture {
         .await
         .expect("partitions");
     // The real Redis link: rule 1 waits for it to confirm live interest.
-    tokio::spawn(Arc::clone(&state.pubsub).run_subscriber());
+    tokio::spawn(Arc::clone(&state.pubsub).run_event_subscriber());
     state
         .pubsub
         .link_state()

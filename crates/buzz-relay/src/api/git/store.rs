@@ -32,6 +32,8 @@ use s3::error::S3Error;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 
+use buzz_core::CommunityId;
+
 /// Opaque object-store ETag (used for `If-Match` on pointer CAS).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ETag(pub String);
@@ -60,6 +62,40 @@ pub enum CasOutcome {
     Won(ETag),
     /// CAS lost the race (server returned 412).
     LostRace,
+}
+
+/// Backend-neutral durable metadata for one embedded Git pointer.
+#[derive(Debug, Clone)]
+pub struct GitPointerMetadata {
+    /// Manifest digest currently published by the pointer.
+    pub content_digest: String,
+    /// Pointer body size in bytes.
+    pub size: i64,
+    /// Opaque CAS token for the current publication.
+    pub etag: String,
+}
+
+/// SQLite-backed publication gate used by the filesystem Git adapter.
+#[async_trait::async_trait]
+pub trait GitPointerMetadataStore: Send + Sync {
+    /// Read the community-scoped pointer metadata.
+    async fn get_pointer_metadata(
+        &self,
+        community: CommunityId,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<GitPointerMetadata>, StoreError>;
+
+    /// Atomically publish a pointer under an optional If-Match token.
+    async fn cas_pointer(
+        &self,
+        community: CommunityId,
+        owner: &str,
+        repo: &str,
+        content_digest: &str,
+        size: i64,
+        expected_etag: Option<&str>,
+    ) -> Result<CasOutcome, StoreError>;
 }
 
 /// Errors that are *actually* errors — `LostRace` is not one.
@@ -91,30 +127,15 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Backend-neutral local storage or durability failure.
+    #[error("object storage error: {0}")]
+    Storage(String),
     /// Invalid storage configuration detected at client construction.
     #[error("git store config error: {0}")]
     Config(String),
     /// Conformance probe failed — backend does not satisfy A1/A2/A3.
     #[error(transparent)]
     Probe(ProbeFailure),
-}
-
-/// Whether a probe racer's outcome is unknown rather than evidence about A3:
-/// it never got a classified response (`Reqwest`/`Http`/`Io` — socket or send
-/// failure), or the backend answered 5xx, which S3 documents as a retryable
-/// server fault that classifies neither a win nor a precondition loss. The
-/// race phases drop these from the observer set; a backend that fails every
-/// racer this way still fails closed on the two-observer floor.
-fn racer_outcome_unknown(err: &StoreError) -> bool {
-    matches!(
-        err,
-        StoreError::Backend(
-            S3Error::Reqwest(_)
-                | S3Error::Http(_)
-                | S3Error::Io(_)
-                | S3Error::HttpFailWithBody(500..=599, _)
-        )
-    )
 }
 
 /// Configuration for `GitStore::run_conformance_probe`.
@@ -149,9 +170,9 @@ pub struct ProbeReport {
     /// Total number of *transport-unknown* per-racer outcomes across all
     /// race rounds (sum of both `if_match_race` and `if_none_match_race`
     /// phases). A "transport-unknown" is a pre-classification failure —
-    /// `S3Error::{Reqwest, Http, Io}` — or a 5xx response, meaning the racer
-    /// never got a classified response from the backend, so its outcome is
-    /// neither evidence for nor against A3 linearizability. Such racers are
+    /// `S3Error::{Reqwest, Http, Io}` — that means the racer never got a
+    /// classified response from the backend, so its outcome is neither
+    /// evidence for nor against A3 linearizability. Such racers are
     /// dropped from the observer set (see the race phases for the
     /// invariant: `classified >= 2` and `winners == 1` *among classified
     /// observers*).
@@ -187,6 +208,151 @@ impl From<ProbeFailure> for StoreError {
 #[derive(Clone)]
 pub struct GitStore {
     bucket: Arc<Bucket>,
+}
+
+/// Backend-neutral immutable-object and compare-and-swap operations for Git.
+///
+/// Implementations keep packs and manifests content-addressed, validate
+/// immutable reads, return pointer bodies and version tokens from one
+/// snapshot, and classify failed pointer preconditions as
+/// [`CasOutcome::LostRace`] rather than storage failures.
+#[async_trait::async_trait]
+pub trait GitStorage: Send + Sync {
+    /// Store one immutable pack and return its content-addressed key.
+    async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Best-effort create-only write of one derived pack index.
+    async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Read one derived pack index, returning `None` when absent.
+    async fn get_idx(&self, pack_digest: &str, max_bytes: u64)
+        -> Result<Option<Bytes>, StoreError>;
+
+    /// Store one immutable manifest and return its content-addressed key.
+    async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError>;
+
+    /// Read and digest-verify an immutable object.
+    async fn get_verified(&self, key: &str, expected_digest: &str) -> Result<Bytes, StoreError>;
+
+    /// Read and digest-verify a bounded immutable object.
+    async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError>;
+
+    /// Read a pointer body and version token from one snapshot.
+    async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError>;
+
+    /// Conditionally replace a pointer.
+    async fn put_pointer(
+        &self,
+        key: &str,
+        body: &[u8],
+        precond: Precond,
+    ) -> Result<CasOutcome, StoreError>;
+
+    /// Verify immutable-object and pointer-CAS guarantees.
+    async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError>;
+}
+
+#[async_trait::async_trait]
+impl<T: GitStorage + ?Sized> GitStorage for Arc<T> {
+    async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        (**self).put_pack(bytes).await
+    }
+
+    async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
+        (**self).put_idx(pack_digest, idx_bytes).await
+    }
+
+    async fn get_idx(
+        &self,
+        pack_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Bytes>, StoreError> {
+        (**self).get_idx(pack_digest, max_bytes).await
+    }
+
+    async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        (**self).put_manifest(bytes).await
+    }
+
+    async fn get_verified(&self, key: &str, expected_digest: &str) -> Result<Bytes, StoreError> {
+        (**self).get_verified(key, expected_digest).await
+    }
+
+    async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError> {
+        (**self)
+            .get_verified_limited(key, expected_digest, max_bytes)
+            .await
+    }
+
+    async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        (**self).get_pointer(key).await
+    }
+
+    async fn put_pointer(
+        &self,
+        key: &str,
+        body: &[u8],
+        precond: Precond,
+    ) -> Result<CasOutcome, StoreError> {
+        (**self).put_pointer(key, body, precond).await
+    }
+
+    async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        (**self).run_conformance_probe(config).await
+    }
+}
+
+/// Sentinel backend used when embedded deployments opt out of Git hosting.
+/// Keeping the trait available lets the relay start without allocating a Git
+/// object store while requests fail with a clear configuration error.
+#[derive(Debug, Default)]
+pub struct DisabledGitStorage;
+
+impl DisabledGitStorage {
+    fn disabled() -> StoreError {
+        StoreError::Config("Git hosting is disabled in this deployment".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl GitStorage for DisabledGitStorage {
+    async fn put_pack(&self, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_idx(&self, _: &str, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_idx(&self, _: &str, _: u64) -> Result<Option<Bytes>, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_manifest(&self, _: &[u8]) -> Result<String, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_verified(&self, _: &str, _: &str) -> Result<Bytes, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_verified_limited(&self, _: &str, _: &str, _: u64) -> Result<Bytes, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn get_pointer(&self, _: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn put_pointer(&self, _: &str, _: &[u8], _: Precond) -> Result<CasOutcome, StoreError> {
+        Err(Self::disabled())
+    }
+    async fn run_conformance_probe(&self, _: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        Err(Self::disabled())
+    }
 }
 
 impl GitStore {
@@ -582,10 +748,7 @@ impl GitStore {
     ///    (read-after-write).
     /// 2. **`if_match_race`** — `race_width` parallel `put_pointer` calls
     ///    predicated on the same ETag. Exactly one must `Won`; the rest must
-    ///    `LostRace`, apart from racers whose outcome is unknown (dropped, see
-    ///    `racer_outcome_unknown`). After each round the pointer must read back
-    ///    as the winner's body and ETag, so a dropped racer's write that
-    ///    landed anyway cannot pass. Tests A3.
+    ///    `LostRace`. Tests A3.
     /// 3. **`if_none_match_race`** — `race_width` parallel create-only writes
     ///    against the same digest-shaped key (the same `put_immutable` path
     ///    `put_pack`/`put_manifest` use). Tests A1 + A3 on the create-only
@@ -659,51 +822,49 @@ impl GitStore {
         };
         for round in 0..cfg.race_rounds {
             let arc_self: Arc<&Self> = Arc::new(self);
-            let bodies: Vec<Vec<u8>> = (0..cfg.race_width)
-                .map(|i| format!("round={round},racer={i},nonce={nonce}").into_bytes())
-                .collect();
             let mut tasks = Vec::with_capacity(cfg.race_width);
-            for body in &bodies {
+            for i in 0..cfg.race_width {
                 let me = Arc::clone(&arc_self);
                 let pkey = pointer_key.clone();
                 let et = etag.clone();
-                tasks.push(async move { me.put_pointer(&pkey, body, Precond::IfMatch(et)).await });
+                let body = format!("round={round},racer={i},nonce={nonce}").into_bytes();
+                tasks.push(async move { me.put_pointer(&pkey, &body, Precond::IfMatch(et)).await });
             }
             let outcomes = futures_util::future::join_all(tasks).await;
             // Drop-and-floor classification. A `Reqwest`/`Http`/`Io` error
             // means the racer never got a classified response from the
-            // backend (couldn't open a socket, send flaked, etc.), and a 5xx
-            // is the backend declining to classify it; its outcome is
-            // *unknown*, not negative (`racer_outcome_unknown`). A3 is a claim about
+            // backend (couldn't open a socket, send flaked, etc.); its
+            // outcome is *unknown*, not negative. A3 is a claim about
             // **observers**: dropping unknowns from the observer set
             // sharpens the assertion ("exactly one winner among observers")
             // and avoids smuggling a network-stack test into the
             // conformance probe. Parse/decode errors (`Utf8`,
-            // `ReqwestHeaderToStr`, `SerdeXml`, ...) and non-5xx
-            // `HttpFailWithBody` stay in the catch-all — those
-            // mean the backend *did* answer but not in the contract shape,
-            // which is a real conformance signal.
+            // `ReqwestHeaderToStr`, `SerdeXml`, ...) and `HttpFailWithBody`
+            // stay in the catch-all — those mean the backend *did* answer
+            // but not in the contract shape, which is a real conformance
+            // signal.
             let mut classified = 0usize;
             let mut winners = 0usize;
-            let mut winner: Option<(ETag, &[u8])> = None;
+            let mut new_etag: Option<ETag> = None;
             for (i, outcome) in outcomes.into_iter().enumerate() {
                 match outcome {
                     Ok(CasOutcome::Won(e)) => {
                         classified += 1;
                         winners += 1;
-                        winner = Some((e, &bodies[i]));
+                        new_etag = Some(e);
                     }
                     Ok(CasOutcome::LostRace) => {
                         classified += 1;
                     }
-                    Err(e) if racer_outcome_unknown(&e) => {
+                    Err(StoreError::Backend(
+                        S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
+                    )) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_match_race",
                             round,
                             racer = i,
-                            error = %e,
-                            "transport drop (outcome unknown: socket/send failure or 5xx)"
+                            "transport drop (pre-classification: socket/send failure)"
                         );
                     }
                     Err(e) => {
@@ -732,62 +893,18 @@ impl GitStore {
                 }
                 .into());
             }
-            let (won_etag, won_body) = match winner {
-                Some(w) if winners == 1 => w,
-                _ => {
-                    return Err(ProbeFailure {
-                        phase: "if_match_race",
-                        round,
-                        key: pointer_key,
-                        reason: format!(
-                            "expected exactly 1 winner among {classified} classified observers, got {winners}"
-                        ),
-                    }
-                    .into())
-                }
-            };
-            // Counting outcomes alone can't see a dropped racer whose write
-            // landed anyway (a backend that commits a stale `If-Match` PUT
-            // and then answers 5xx). Read the pointer back and require the
-            // winner's exact body and ETag before the next round predicates
-            // on that ETag. Without this, the last round has no next round
-            // to catch it.
-            let stored = self
-                .get_pointer(&pointer_key)
-                .await
-                .map_err(|e| ProbeFailure {
+            if winners != 1 {
+                return Err(ProbeFailure {
                     phase: "if_match_race",
                     round,
-                    key: pointer_key.clone(),
-                    reason: format!("post-race read failed: {e}"),
-                })?;
-            match stored {
-                Some((stored_etag, stored_body))
-                    if stored_etag == won_etag && stored_body[..] == won_body[..] => {}
-                Some((stored_etag, _)) => {
-                    return Err(ProbeFailure {
-                        phase: "if_match_race",
-                        round,
-                        key: pointer_key,
-                        reason: format!(
-                            "post-race read is not the winner's write: \
-                             winner etag {}, stored etag {}",
-                            won_etag.0, stored_etag.0
-                        ),
-                    }
-                    .into())
+                    key: pointer_key,
+                    reason: format!(
+                        "expected exactly 1 winner among {classified} classified observers, got {winners}"
+                    ),
                 }
-                None => {
-                    return Err(ProbeFailure {
-                        phase: "if_match_race",
-                        round,
-                        key: pointer_key,
-                        reason: "pointer vanished after the race".into(),
-                    }
-                    .into())
-                }
+                .into());
             }
-            etag = won_etag;
+            etag = new_etag.expect("winner exists");
         }
 
         // -- Phase 3: if_none_match_race ------------------------------------------
@@ -808,8 +925,8 @@ impl GitStore {
             }
             let results = futures_util::future::join_all(tasks).await;
             // Drop-and-floor: same classification rule as Phase 2. Drop
-            // unknown outcomes (socket/send failure or 5xx); count 2xx + 412
-            // as the classified observers. Any
+            // `Reqwest`/`Http`/`Io` (pre-classification — socket/send
+            // failure); count 2xx + 412 as the classified observers. Any
             // other status or any non-transport `StoreError` is a real
             // conformance signal and fails closed.
             let mut classified = 0usize;
@@ -834,14 +951,15 @@ impl GitStore {
                         }
                         .into())
                     }
-                    Err(e) if racer_outcome_unknown(&e) => {
+                    Err(StoreError::Backend(
+                        S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
+                    )) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_none_match_race",
                             round,
                             racer = i,
-                            error = %e,
-                            "transport drop (outcome unknown: socket/send failure or 5xx)"
+                            "transport drop (pre-classification: socket/send failure)"
                         );
                     }
                     Err(e) => {
@@ -978,6 +1096,59 @@ impl GitStore {
     }
 }
 
+#[async_trait::async_trait]
+impl GitStorage for GitStore {
+    async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_pack(self, bytes).await
+    }
+
+    async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_idx(self, pack_digest, idx_bytes).await
+    }
+
+    async fn get_idx(
+        &self,
+        pack_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Bytes>, StoreError> {
+        GitStore::get_idx(self, pack_digest, max_bytes).await
+    }
+
+    async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        GitStore::put_manifest(self, bytes).await
+    }
+
+    async fn get_verified(&self, key: &str, expected_digest: &str) -> Result<Bytes, StoreError> {
+        GitStore::get_verified(self, key, expected_digest).await
+    }
+
+    async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError> {
+        GitStore::get_verified_limited(self, key, expected_digest, max_bytes).await
+    }
+
+    async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
+        GitStore::get_pointer(self, key).await
+    }
+
+    async fn put_pointer(
+        &self,
+        key: &str,
+        body: &[u8],
+        precond: Precond,
+    ) -> Result<CasOutcome, StoreError> {
+        GitStore::put_pointer(self, key, body, precond).await
+    }
+
+    async fn run_conformance_probe(&self, config: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        GitStore::run_conformance_probe(self, config).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,23 +1173,6 @@ mod tests {
     fn classify_cas_412_is_lost_race() {
         let r = Err(S3Error::HttpFailWithBody(412, "PreconditionFailed".into()));
         assert_eq!(GitStore::classify_cas(r).unwrap(), CasOutcome::LostRace);
-    }
-
-    /// Regression: an S3 `500 InternalError` on one probe racer killed relay
-    /// startup. A 5xx is an unknown outcome (dropped from the observer set);
-    /// every answer in the contract's shape — 412 or another 4xx — still
-    /// counts as evidence.
-    #[test]
-    fn probe_drops_5xx_racers_but_keeps_4xx_as_evidence() {
-        let http = |code: u16| StoreError::Backend(S3Error::HttpFailWithBody(code, String::new()));
-        for code in [500, 503, 599] {
-            assert!(racer_outcome_unknown(&http(code)), "{code} is unknown");
-        }
-        for code in [400, 403, 412, 499] {
-            assert!(!racer_outcome_unknown(&http(code)), "{code} is evidence");
-        }
-        let io = StoreError::Backend(S3Error::Io(std::io::Error::other("reset")));
-        assert!(racer_outcome_unknown(&io));
     }
 
     #[test]
@@ -1100,314 +1254,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod fault_probe {
-    //! `run_conformance_probe` against an in-process S3 fake that injects
-    //! racer faults at the HTTP boundary, so the responses go through
-    //! rust-s3's real `fail-on-err` mapping and retry before the race phases
-    //! classify them.
-
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    use axum::extract::State;
-    use axum::http::{HeaderMap, Method, StatusCode, Uri};
-    use axum::response::{IntoResponse, Response};
-
-    use super::*;
-
-    const BUCKET: &str = "buzz-git";
-
-    /// Which `if_none_match_race` PUTs the fake faults.
-    #[derive(Clone, Copy)]
-    enum InmFault {
-        None,
-        /// Every racer PUT.
-        All(u16),
-        /// Every racer PUT once the winner has created the object, leaving
-        /// the winner as the only classified observer.
-        AllButWinner(u16),
-        /// The first PUT of each burst. Phase-3 racers send identical bytes,
-        /// so the fake can't single one out. rust-s3 retries every non-2xx
-        /// once after 1s, so the faulted slot recurs in the retry burst, and
-        /// the net effect is exactly one racer ending on this status.
-        FirstOfBurst(u16),
-    }
-
-    #[derive(Clone)]
-    struct Faults {
-        /// `if_match_race` racer indices answered with `if_match_status`.
-        /// Their bodies carry `racer=<i>`, so the fault survives the retry.
-        if_match_racers: Vec<usize>,
-        if_match_status: u16,
-        /// A non-linearizable backend: a faulted `if_match_race` PUT whose
-        /// `If-Match` is already stale is committed anyway before the fault
-        /// status goes out. A faulted PUT whose `If-Match` still matches is
-        /// answered without mutating, so rust-s3's retry 1s later is the one
-        /// that lands, after the round's real winner.
-        if_match_stale_commit: bool,
-        inm: InmFault,
-    }
-
-    #[derive(Default)]
-    struct Objects {
-        /// key → (body, ETag)
-        objects: HashMap<String, (Bytes, String)>,
-        versions: u64,
-        last_inm_put: HashMap<String, Instant>,
-    }
-
-    struct Fake {
-        faults: Faults,
-        state: Mutex<Objects>,
-    }
-
-    fn status(code: u16) -> Response {
-        let code = StatusCode::from_u16(code).expect("valid status");
-        (code, format!("<Error><Code>{code}</Code></Error>")).into_response()
-    }
-
-    impl Fake {
-        fn fault(&self, key: &str, body: &[u8], st: &mut Objects) -> Option<u16> {
-            if key.starts_with("probe/pointer-") {
-                let body = std::str::from_utf8(body).unwrap_or_default();
-                let hit = self
-                    .faults
-                    .if_match_racers
-                    .iter()
-                    .any(|i| body.contains(&format!(",racer={i},")));
-                return hit.then_some(self.faults.if_match_status);
-            }
-            if key.starts_with("probe/inm-race/") {
-                let now = Instant::now();
-                let new_burst = st
-                    .last_inm_put
-                    .insert(key.to_string(), now)
-                    .is_none_or(|prev| now - prev > Duration::from_millis(500));
-                return match self.faults.inm {
-                    InmFault::None => None,
-                    InmFault::All(code) => Some(code),
-                    InmFault::AllButWinner(code) => st.objects.contains_key(key).then_some(code),
-                    InmFault::FirstOfBurst(code) => new_burst.then_some(code),
-                };
-            }
-            None
-        }
-
-        fn commit(st: &mut Objects, key: String, body: Bytes) -> String {
-            st.versions += 1;
-            let etag = format!("\"v{}\"", st.versions);
-            st.objects.insert(key, (body, etag.clone()));
-            etag
-        }
-
-        fn handle(&self, method: Method, key: String, headers: HeaderMap, body: Bytes) -> Response {
-            let mut st = self.state.lock().unwrap();
-            match method {
-                Method::GET => match st.objects.get(&key) {
-                    Some((bytes, etag)) => {
-                        ([("etag", etag.clone())], bytes.clone()).into_response()
-                    }
-                    None => status(404),
-                },
-                Method::DELETE => {
-                    st.objects.remove(&key);
-                    StatusCode::NO_CONTENT.into_response()
-                }
-                Method::PUT => {
-                    let current = st.objects.get(&key).map(|(_, etag)| etag.as_str());
-                    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-                    let precondition_failed = match (header("if-none-match"), header("if-match")) {
-                        (Some("*"), _) => current.is_some(),
-                        (_, Some(tag)) => current != Some(tag),
-                        _ => false,
-                    };
-                    if let Some(code) = self.fault(&key, &body, &mut st) {
-                        if self.faults.if_match_stale_commit && precondition_failed {
-                            Self::commit(&mut st, key, body);
-                        }
-                        return status(code);
-                    }
-                    if precondition_failed {
-                        return status(412);
-                    }
-                    let etag = Self::commit(&mut st, key, body);
-                    ([("etag", etag)], "").into_response()
-                }
-                _ => status(405),
-            }
-        }
-    }
-
-    async fn serve(
-        State(fake): State<Arc<Fake>>,
-        method: Method,
-        uri: Uri,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> Response {
-        let prefix = format!("/{BUCKET}/");
-        let Some(key) = uri.path().strip_prefix(&prefix) else {
-            return status(404);
-        };
-        fake.handle(method, key.to_string(), headers, body)
-    }
-
-    async fn run(faults: Faults) -> Result<ProbeReport, StoreError> {
-        let fake = Arc::new(Fake {
-            faults,
-            state: Mutex::default(),
-        });
-        let app = axum::Router::new().fallback(serve).with_state(fake);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let store = GitStore::new(
-            &format!("http://{addr}"),
-            "fake",
-            "fake",
-            BUCKET,
-            "us-east-1",
-            buzz_media::config::S3AddressingStyle::Path,
-        )
-        .expect("construct git store");
-        let result = store
-            .run_conformance_probe(ProbeConfig {
-                race_width: 3,
-                race_rounds: 1,
-            })
-            .await;
-        server.abort();
-        result
-    }
-
-    fn clean() -> Faults {
-        Faults {
-            if_match_racers: Vec::new(),
-            if_match_status: 500,
-            if_match_stale_commit: false,
-            inm: InmFault::None,
-        }
-    }
-
-    fn assert_probe_failure(result: Result<ProbeReport, StoreError>, phase: &str, reason: &str) {
-        match result {
-            Err(StoreError::Probe(f)) => {
-                assert_eq!(f.phase, phase, "{f}");
-                assert!(f.reason.contains(reason), "{f}");
-            }
-            other => panic!("expected {phase} probe failure, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fake_backend_passes_clean_probe() {
-        let report = run(clean()).await.expect("clean probe passes");
-        assert_eq!(report.transport_drops, 0);
-    }
-
-    /// Regression: an S3 `500 InternalError` on one probe racer killed relay
-    /// startup. With a winner and a 412 still observed, each race phase drops
-    /// the 5xx racer and admits the backend.
-    #[tokio::test]
-    async fn one_5xx_racer_per_phase_is_dropped_and_admitted() {
-        for (phase, faults) in [
-            (
-                "if_match_race",
-                Faults {
-                    if_match_racers: vec![0],
-                    ..clean()
-                },
-            ),
-            (
-                "if_none_match_race",
-                Faults {
-                    inm: InmFault::FirstOfBurst(500),
-                    ..clean()
-                },
-            ),
-        ] {
-            let report = run(faults)
-                .await
-                .unwrap_or_else(|e| panic!("{phase}: one 5xx racer must not fail: {e}"));
-            assert_eq!(report.transport_drops, 1, "{phase}");
-        }
-    }
-
-    #[tokio::test]
-    async fn too_few_classified_observers_fail_closed() {
-        let one_observer = Faults {
-            if_match_racers: vec![0, 1],
-            ..clean()
-        };
-        assert_probe_failure(
-            run(one_observer).await,
-            "if_match_race",
-            "race not observed",
-        );
-        let winner_only = Faults {
-            inm: InmFault::AllButWinner(500),
-            ..clean()
-        };
-        assert_probe_failure(
-            run(winner_only).await,
-            "if_none_match_race",
-            "race not observed",
-        );
-        let all_5xx = Faults {
-            inm: InmFault::All(503),
-            ..clean()
-        };
-        assert_probe_failure(
-            run(all_5xx).await,
-            "if_none_match_race",
-            "race not observed",
-        );
-    }
-
-    /// A racer answered 5xx is dropped as unknown, but its stale write
-    /// landed. In the final `if_match_race` round no later `If-Match` round
-    /// trips over it, so only the post-race readback stops the backend
-    /// from being admitted with a failed payload as the pointer.
-    #[tokio::test]
-    async fn dropped_racer_whose_stale_write_lands_fails_closed() {
-        let stale_commit = Faults {
-            if_match_racers: vec![0],
-            if_match_stale_commit: true,
-            ..clean()
-        };
-        assert_probe_failure(
-            run(stale_commit).await,
-            "if_match_race",
-            "not the winner's write",
-        );
-    }
-
-    #[tokio::test]
-    async fn unexpected_4xx_racer_fails_closed() {
-        let if_match = Faults {
-            if_match_racers: vec![0],
-            if_match_status: 403,
-            ..clean()
-        };
-        assert_probe_failure(run(if_match).await, "if_match_race", "racer 0");
-        let inm = Faults {
-            inm: InmFault::FirstOfBurst(403),
-            ..clean()
-        };
-        assert_probe_failure(run(inm).await, "if_none_match_race", "backend error");
-    }
-}
-
-#[cfg(test)]
-mod probe {
+pub(crate) mod probe {
     //! Empirical probe of rust-s3 + `fail-on-err` + MinIO surfacing of 412.
     //!
     //! Run manually:
     //!   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //!     api::git::store::probe -- --nocapture --test-threads=1
     //!
-    //! Pre-req: `docker compose up minio` and the `buzz-git` bucket exists.
+    //! Pre-req: `docker compose up -d minio minio-init`.
 
     use super::*;
 
@@ -1445,6 +1299,111 @@ mod probe {
         let mut h = Sha256::new();
         h.update(b);
         hex::encode(h.finalize())
+    }
+
+    pub(crate) async fn run_git_storage_contract(store: &dyn GitStorage) -> Vec<String> {
+        let run = uuid::Uuid::new_v4();
+        let pack = format!("git-storage-contract-{run}").into_bytes();
+        let digest = sha256_hex(&pack);
+        let pack_key = store.put_pack(&pack).await.expect("put pack");
+        assert_eq!(pack_key, format!("packs/{digest}"));
+        assert_eq!(
+            store.put_pack(&pack).await.expect("idempotent pack put"),
+            pack_key
+        );
+        assert_eq!(
+            store
+                .get_verified_limited(&pack_key, &digest, pack.len() as u64)
+                .await
+                .expect("bounded verified pack read"),
+            pack
+        );
+        assert!(matches!(
+            store.get_verified(&pack_key, &"0".repeat(64)).await,
+            Err(StoreError::DigestMismatch { .. })
+        ));
+
+        let idx = b"derived-index";
+        assert_eq!(
+            store
+                .put_idx(&digest, idx)
+                .await
+                .expect("put derived index"),
+            format!("idx/{digest}")
+        );
+        assert_eq!(
+            store
+                .get_idx(&digest, idx.len() as u64)
+                .await
+                .expect("get derived index")
+                .expect("derived index exists"),
+            idx.as_slice()
+        );
+
+        let manifest = format!(r#"{{"contract":"{run}"}}"#);
+        let manifest_key = store
+            .put_manifest(manifest.as_bytes())
+            .await
+            .expect("put manifest");
+        let manifest_digest = manifest_key
+            .strip_prefix("manifests/")
+            .expect("content-addressed manifest key");
+        assert_eq!(
+            store
+                .get_verified(&manifest_key, manifest_digest)
+                .await
+                .expect("verified manifest read"),
+            manifest
+        );
+
+        let pointer_key = format!("pointers/contract-{run}.json");
+        assert!(store
+            .get_pointer(&pointer_key)
+            .await
+            .expect("missing pointer read")
+            .is_none());
+        let first = store
+            .put_pointer(
+                &pointer_key,
+                manifest_digest.as_bytes(),
+                Precond::IfNoneMatchStar,
+            )
+            .await
+            .expect("create pointer");
+        let first_etag = match first {
+            CasOutcome::Won(etag) => etag,
+            CasOutcome::LostRace => panic!("fresh pointer create must win"),
+        };
+        assert_eq!(
+            store
+                .put_pointer(&pointer_key, b"stale", Precond::IfNoneMatchStar)
+                .await
+                .expect("second create-only pointer write"),
+            CasOutcome::LostRace
+        );
+        let second = store
+            .put_pointer(&pointer_key, b"next", Precond::IfMatch(first_etag.clone()))
+            .await
+            .expect("matching pointer swap");
+        assert!(matches!(second, CasOutcome::Won(_)));
+        assert_eq!(
+            store
+                .put_pointer(&pointer_key, b"stale", Precond::IfMatch(first_etag))
+                .await
+                .expect("stale pointer swap"),
+            CasOutcome::LostRace
+        );
+        assert_eq!(
+            store
+                .get_pointer(&pointer_key)
+                .await
+                .expect("pointer snapshot")
+                .expect("pointer exists")
+                .1,
+            b"next".as_slice()
+        );
+
+        vec![pack_key, format!("idx/{digest}"), manifest_key, pointer_key]
     }
 
     #[tokio::test]
@@ -1552,6 +1511,17 @@ mod probe {
         // Cleanup.
         let _ = st.bucket.delete_object(&pkey).await;
         let _ = st.bucket.delete_object(&key).await;
+    }
+
+    #[tokio::test]
+    async fn probe_backend_neutral_storage_contract() {
+        if !probe_enabled() {
+            return;
+        }
+        let store = store();
+        for key in run_git_storage_contract(&store).await {
+            let _ = store.bucket.delete_object(&key).await;
+        }
     }
 
     /// End-to-end conformance probe against MinIO. This is the same code path

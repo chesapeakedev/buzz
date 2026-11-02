@@ -75,7 +75,9 @@ use crate::api::git::manifest::{
     pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS, MAX_MANIFEST_REFS,
     PACK_COMPACTION_THRESHOLD,
 };
-use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
+#[cfg(test)]
+use crate::api::git::store::GitStore;
+use crate::api::git::store::{CasOutcome, ETag, GitStorage, Precond, StoreError};
 use buzz_core::TenantContext;
 
 const PACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -393,7 +395,7 @@ fn digest_from_pack_key(key: &str) -> Result<String, CasError> {
 }
 
 async fn write_idx_sidecar(
-    store: &GitStore,
+    store: &dyn GitStorage,
     pack_key: &str,
     pack_bytes: &[u8],
     scratch_dir: &Path,
@@ -810,7 +812,7 @@ async fn capture_compacted_packs(
 }
 
 async fn upload_compacted_packs(
-    store: &GitStore,
+    store: &dyn GitStorage,
     compacted: &CompactedPacks,
 ) -> Result<Vec<String>, CasError> {
     let mut pack_keys = Vec::with_capacity(compacted.packs.len());
@@ -851,7 +853,7 @@ async fn upload_compacted_packs(
 }
 
 async fn prepare_compaction(
-    store: &GitStore,
+    store: &dyn GitStorage,
     repo_path: &Path,
     refs_after: &BTreeMap<String, String>,
     limits: PublishLimits,
@@ -995,7 +997,7 @@ fn record_compaction(
 /// advisory lock — adding one would hide exactly the interleavings the
 /// model proves safe.
 pub async fn cas_publish(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     repo_path: &Path,
     owner: &str,
@@ -1019,7 +1021,7 @@ pub async fn cas_publish(
 }
 
 async fn cas_publish_inner(
-    store: &GitStore,
+    store: &dyn GitStorage,
     ctx: &TenantContext,
     repo_path: &Path,
     owner: &str,
@@ -1292,7 +1294,7 @@ async fn cas_publish_inner(
 /// `ManifestReadFailed` so the caller emits 5xx rather than pretending
 /// reconciliation is possible.
 async fn read_winner_after_conflict(
-    store: &GitStore,
+    store: &dyn GitStorage,
     pkey: &str,
 ) -> Result<(Box<Manifest>, String), CasError> {
     let Some((_etag, body)) = store.get_pointer(pkey).await? else {

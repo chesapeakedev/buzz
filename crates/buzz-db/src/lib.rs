@@ -51,13 +51,15 @@ pub mod concurrency_gate;
 
 /// Database error types.
 pub mod error;
+/// SQLite connection policy and backend resources.
+pub mod sqlite;
 
 #[cfg(test)]
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, AdmittedTx, ColdStartError, Db, DbConfig,
-    DbConnectionOutcome, DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome,
+    insert_mentions, migration, replica_fence, AdmittedTx, ColdStartError, DatabaseBackendKind, Db,
+    DbConfig, DbConnectionOutcome, DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome,
     ReadSession,
 };
 
@@ -113,6 +115,10 @@ pub use leader_lock::SessionLeader;
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
+pub use sqlite::git_pointers::{
+    cas_swap_pointer, get_pointer_metadata, GitPointerRow, PointerCasOutcome,
+};
+pub use sqlite::media_objects::SqliteBlobMetadata;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
 
 /// A value read from the database, with when its reading connection was
@@ -134,3 +140,12 @@ use buzz_core::CommunityId;
 
 /// Durable NIP-FI verified-profile projection state.
 pub use store::verified_profiles;
+
+/// Result of an atomic command event and domain mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandExecution<T> {
+    /// The event was already stored, so its mutation was not executed again.
+    Duplicate,
+    /// The event and domain mutation committed together.
+    Applied(T),
+}

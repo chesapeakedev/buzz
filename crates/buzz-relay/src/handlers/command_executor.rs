@@ -19,15 +19,18 @@ use uuid::Uuid;
 
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
+#[cfg(test)]
 use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
-use buzz_db::DbError;
+use buzz_db::{CommandExecution, DbError};
 use buzz_workflow::executor::TriggerContext;
 
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
+#[cfg(test)]
+use super::ingest::extract_channel_id;
+use super::ingest::{IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
@@ -78,6 +81,7 @@ pub async fn handle_command(
 
 /// Result of persisting a command event: either a duplicate (already processed)
 /// or an open transaction that the handler must commit after executing mutations.
+#[cfg(test)]
 enum PersistResult {
     /// Event was already processed — return idempotent success.
     Duplicate,
@@ -92,12 +96,14 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
+/// NOTE: Remaining legacy domain mutations (upsert_workflow, etc.) execute on the
 /// connection pool, NOT inside this transaction. The pattern is idempotent but
 /// not strictly atomic: if a mutation succeeds but commit fails, the mutation
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// operations such as workflow upserts. DM and approval commands use
+/// database-owned atomic command APIs below and are not part of this legacy path.
+#[cfg(test)]
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -192,6 +198,7 @@ async fn persist_command_event(
     }
 }
 
+#[cfg(test)]
 fn parse_expected_workflow_revision(
     kind: i32,
     expected_revision: Option<&str>,
@@ -329,30 +336,23 @@ async fn handle_dm_open(
         }
     }
 
-    // Persist the command event (idempotency) — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist and open the DM atomically behind the database facade.
+    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
+    let (channel, was_created) = match state
+        .db
+        .execute_dm_open_command(tenant.community(), event, &all_refs, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db open DM command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandExecution::Applied(result) => result,
     };
-
-    // 4. Execute: open_dm
-    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (channel, was_created) = state
-        .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
-
-    // Finalize the idempotency record after the separate mutation succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Side effects if newly created (post-commit, best-effort)
     if was_created {
@@ -491,30 +491,29 @@ async fn handle_dm_add_member(
         ));
     }
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 6. Persist the command and open the expanded immutable DM atomically.
+    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
+    let (new_channel, was_created) = match state
+        .db
+        .execute_dm_add_member_command(
+            tenant.community(),
+            event,
+            channel_id,
+            &all_refs,
+            &self_bytes,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db add DM member command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandExecution::Applied(result) => result,
     };
-
-    // 6. Execute: open_dm with expanded set (creates NEW DM — DM sets are immutable)
-    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (new_channel, was_created) = state
-        .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
-
-    // Finalize the idempotency record after the separate mutation succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 7. Cache invalidation + notifications for new DM (post-commit, best-effort)
     if was_created {
@@ -597,37 +596,31 @@ async fn handle_dm_hide(
         return Err(IngestError::Rejected("invalid: channel is not a DM".into()));
     }
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // Persist the command event and hide mutation in one database-owned
+    // transaction. Relay code never handles a concrete SQL transaction.
+    match state
+        .db
+        .execute_dm_hide_command(tenant.community(), event, channel_id, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db hide_dm command: {e}")))?
+    {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
+        CommandExecution::Applied(()) => {}
+    }
 
-    // 4. Execute: hide_dm
-    state
-        .db
-        .hide_dm(tenant.community(), channel_id, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db hide_dm: {e}")))?;
-
-    // Finalize the idempotency record after the separate mutation succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 5. Side effect (post-commit, best-effort): refresh the caller's NIP-DV
+    // 4. Side effect (post-commit, best-effort): refresh the caller's NIP-DV
     // visibility snapshot so clients can filter this DM out of the sidebar.
     if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
         warn!("DM hide: visibility snapshot failed: {e}");
     }
 
-    // 6. Return response
+    // 5. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
@@ -749,18 +742,6 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
     // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
     // row instead of creating another enabled workflow that would fan out on
     // every matching event. The workflow's community is the request's
@@ -779,12 +760,13 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
-    state
+    match state
         .db
-        .upsert_workflow(
+        .execute_workflow_definition_command(
             community_id,
+            event,
             workflow_id,
-            Some(channel_id),
+            channel_id,
             &self_bytes,
             &workflow_name,
             &definition_json_final,
@@ -795,19 +777,24 @@ async fn handle_workflow_def(
             DbError::AccessDenied(_) => IngestError::Rejected(
                 "forbidden: workflow belongs to a different owner or channel".into(),
             ),
-            other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
-        })?;
+            DbError::InvalidData(message) => IngestError::Rejected(format!("invalid: {message}")),
+            other => IngestError::Internal(format!("error: db workflow definition: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        CommandExecution::Applied(()) => {}
+    }
 
     // Drop the trigger-path cache entry so the new/updated definition fires on
     // the next matching event instead of after the cache TTL.
     state
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
-
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -889,20 +876,6 @@ async fn handle_workflow_trigger(
             IngestError::Rejected("forbidden: not authorized to trigger this workflow".into())
         })?;
 
-    // Persist the command event under the workflow channel even though the
-    // trigger event itself only carries the workflow UUID. Storing channel
-    // triggers as global events leaks workflow IDs to unrelated relay members.
-    let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
     // 4. Execute: create workflow run
     let mut trigger_ctx = TriggerContext {
         channel_id: workflow
@@ -925,22 +898,30 @@ async fn handle_workflow_trigger(
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
-    let event_id_bytes = event.id.as_bytes().to_vec();
-    let run_id = state
+    // Store the command under its workflow channel and create the run in one
+    // database-owned transaction. The trigger carries only a workflow UUID, so
+    // persisting it globally would leak that ID to unrelated relay members.
+    let run_id = match state
         .db
-        .create_workflow_run(
+        .execute_workflow_trigger_command(
             community_id,
+            event,
+            wf_channel_id,
             workflow_id,
-            Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
-
-    // Finalize the idempotency record after the separate run creation succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+        .map_err(|e| IngestError::Internal(format!("error: db workflow trigger: {e}")))?
+    {
+        buzz_db::CommandExecution::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        buzz_db::CommandExecution::Applied(run_id) => run_id,
+    };
 
     // 5. Spawn workflow execution
     let engine = Arc::clone(&state.workflow_engine);
@@ -1059,65 +1040,43 @@ async fn handle_approval_grant(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
-    if approval.status != ApprovalStatus::Pending {
-        return Err(IngestError::Rejected(format!(
-            "invalid: approval already {}",
-            approval.status
-        )));
-    }
-    if Utc::now() > approval.expires_at {
-        return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
-        ));
-    }
-
-    // 4. Validate caller is authorized approver
+    // 3. Validate caller is authorized approver. Pending/expiry checks happen
+    // in the atomic update so an exact command replay remains idempotent.
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist the command and conditional approval update atomically.
+    let note = if event.content.is_empty() {
+        None
+    } else {
+        Some(event.content.as_str())
+    };
+    match state
+        .db
+        .execute_approval_grant_command(tenant.community(), event, &token_hash, &self_bytes, note)
+        .await
+        .map_err(|e| match e {
+            DbError::Conflict(_) if approval.status != ApprovalStatus::Pending => {
+                IngestError::Rejected(format!("invalid: approval already {}", approval.status))
+            }
+            DbError::Conflict(_) if Utc::now() > approval.expires_at => {
+                IngestError::Rejected("invalid: approval token has expired".into())
+            }
+            DbError::Conflict(_) => {
+                IngestError::Rejected("invalid: approval already acted on (race)".into())
+            }
+            other => IngestError::Internal(format!("error: db execute approval grant: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
-
-    // 5. Execute: update approval status to granted
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
-        .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Granted,
-            Some(&self_bytes),
-            note,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
-        return Err(IngestError::Rejected(
-            "invalid: approval already acted on (race)".into(),
-        ));
+        CommandExecution::Applied(()) => {}
     }
 
-    // Finalize the idempotency record after the separate approval update succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Resume workflow execution (post-commit, async)
+    // 5. Resume workflow execution (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
     let workflow_id = approval.workflow_id;
@@ -1130,7 +1089,7 @@ async fn handle_approval_grant(
             .await;
     });
 
-    // 7. Return response
+    // 6. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
@@ -1170,65 +1129,43 @@ async fn handle_approval_deny(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
-    if approval.status != ApprovalStatus::Pending {
-        return Err(IngestError::Rejected(format!(
-            "invalid: approval already {}",
-            approval.status
-        )));
-    }
-    if Utc::now() > approval.expires_at {
-        return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
-        ));
-    }
-
-    // 4. Validate caller is authorized approver
+    // 3. Validate caller is authorized approver. Pending/expiry checks happen
+    // in the atomic update so an exact command replay remains idempotent.
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+    // 4. Persist the command and conditional approval update atomically.
+    let note = if event.content.is_empty() {
+        None
+    } else {
+        Some(event.content.as_str())
+    };
+    match state
+        .db
+        .execute_approval_deny_command(tenant.community(), event, &token_hash, &self_bytes, note)
+        .await
+        .map_err(|e| match e {
+            DbError::Conflict(_) if approval.status != ApprovalStatus::Pending => {
+                IngestError::Rejected(format!("invalid: approval already {}", approval.status))
+            }
+            DbError::Conflict(_) if Utc::now() > approval.expires_at => {
+                IngestError::Rejected("invalid: approval token has expired".into())
+            }
+            DbError::Conflict(_) => {
+                IngestError::Rejected("invalid: approval already acted on (race)".into())
+            }
+            other => IngestError::Internal(format!("error: db execute approval deny: {other}")),
+        })? {
+        CommandExecution::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
-    };
-
-    // 5. Execute: update approval status to denied
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
-        .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Denied,
-            Some(&self_bytes),
-            note,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
-        return Err(IngestError::Rejected(
-            "invalid: approval already acted on (race)".into(),
-        ));
+        CommandExecution::Applied(()) => {}
     }
 
-    // Finalize the idempotency record after the separate approval denial succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Cancel the workflow run (post-commit, async)
+    // 5. Cancel the workflow run (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
     let pubkey_hex = self_hex.clone();
@@ -1270,7 +1207,7 @@ async fn handle_approval_deny(
         }
     });
 
-    // 7. Return response
+    // 6. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
@@ -1380,7 +1317,6 @@ async fn resume_workflow_after_approval(
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
 }
-
 #[cfg(test)]
 mod postgres_tests {
     use super::*;

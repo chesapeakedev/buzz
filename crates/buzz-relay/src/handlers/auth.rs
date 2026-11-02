@@ -576,10 +576,22 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
     let _shadow_attempt = crate::nip_fi_shadow_session::AuthAttempt::new(&conn.community_control);
     // Pure NIP-42 verification — crypto only, no DB lookups.
-    match auth_svc
-        .verify_auth_event(event, &challenge, &relay_url)
-        .await
-    {
+    let auth_result = if state.db.backend_kind() == buzz_db::DatabaseBackendKind::Sqlite {
+        buzz_auth::nip42::verify_nip42_event(&event, &challenge, &relay_url).map(|_| {
+            buzz_auth::AuthContext {
+                pubkey: event.pubkey,
+                scopes: buzz_auth::Scope::all_known(),
+                channel_ids: None,
+                auth_method: buzz_auth::AuthMethod::Nip42,
+                agent_owner_pubkey: None,
+            }
+        })
+    } else {
+        auth_svc
+            .verify_auth_event(event, &challenge, &relay_url)
+            .await
+    };
+    match auth_result {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
             let attempt = AuthAttempt::nip42(&conn, pubkey, true);

@@ -6,13 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, ReadAt, Result};
-
-// Admission and policy must select the same serving row. A deletion request
-// alone does not stop serving; begin_quiescing changes deletion_state.
-pub(super) const SERVING_HOST_QUERY: &str = "SELECT id, host, requires_nip_fi, policy_generation
-    FROM communities WHERE lower(host) = lower($1)
-    AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'";
+use crate::{relay_members, Db, DbError, Result};
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,10 +35,6 @@ pub struct CreatedCommunityRecord {
     pub id: CommunityId,
     /// Normalized host stored for the community.
     pub host: String,
-    /// Whether this transaction inserted the community.
-    pub created: bool,
-    /// Stored policy read from the inserted or existing row.
-    pub requires_nip_fi: bool,
 }
 
 /// Result of atomically creating a community with its initial owner.
@@ -120,73 +110,63 @@ impl Db {
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
     /// request/connection error. buzz-db only reads the durable host map.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
     pub async fn lookup_community_by_host(
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
-        Ok(self
-            .lookup_community_by_host_read_at(normalized_host)
-            .await?
-            .value)
-    }
-
-    /// [`Self::lookup_community_by_host`], with when its connection was
-    /// checked out, for caches that bound staleness from the read.
-    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
-    pub async fn lookup_community_by_host_read_at(
-        &self,
-        normalized_host: &str,
-    ) -> Result<ReadAt<Option<CommunityRecord>>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.lookup_community_by_host(normalized_host).await;
+        }
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::TenantResolution,
         )
         .await?;
-        let read_at = std::time::Instant::now();
-        let row = sqlx::query(SERVING_HOST_QUERY)
-            .bind(normalized_host)
-            .fetch_optional(&mut *connection)
-            .await?;
+        let row = sqlx::query(
+            r#"
+            SELECT id, host
+            FROM communities
+            WHERE lower(host) = lower($1)
+              AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *connection)
+        .await?;
 
-        let value = row
-            .map(|row| {
-                let id: Uuid = row.try_get("id")?;
-                let host: String = row.try_get("host")?;
+        row.map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
 
-                Ok::<_, DbError>(CommunityRecord {
-                    id: CommunityId::from_uuid(id),
-                    host,
-                })
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
             })
-            .transpose()?;
-        Ok(ReadAt { value, read_at })
+        })
+        .transpose()
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
-    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
-        Ok(self.is_community_active_read_at(community_id).await?.value)
-    }
-
-    /// [`Self::is_community_active`], with when its connection was checked
-    /// out, for caches that bound staleness from the read.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
-    pub async fn is_community_active_read_at(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<ReadAt<bool>> {
+    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.is_community_active(community_id).await;
+        }
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let read_at = std::time::Instant::now();
-        let value = sqlx::query_scalar::<_, bool>(
+        let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&mut *connection)
         .await?;
-        Ok(ReadAt { value, read_at })
+        Ok(active)
     }
 
     /// Runs `apply` while holding the community row lock only when the exact
@@ -526,6 +506,12 @@ impl Db {
         normalized_host: &str,
         nip_fi_issuers: &[String],
     ) -> Result<EnsuredCommunityRecord> {
+        if let Some(sqlite) = &self.sqlite {
+            // Embedded provisioning currently has no NIP-FI issuer registry;
+            // the host row is still durable and request-resolvable.
+            let _ = nip_fi_issuers;
+            return sqlite.ensure_configured_community(normalized_host).await;
+        }
         self.ensure_configured_community_with_operation(
             normalized_host,
             nip_fi_issuers,
@@ -545,6 +531,10 @@ impl Db {
         normalized_host: &str,
         nip_fi_issuers: &[String],
     ) -> Result<EnsuredCommunityRecord> {
+        if let Some(sqlite) = &self.sqlite {
+            let _ = nip_fi_issuers;
+            return sqlite.ensure_configured_community(normalized_host).await;
+        }
         self.ensure_configured_community_with_operation(
             normalized_host,
             nip_fi_issuers,
@@ -615,9 +605,7 @@ impl Db {
 
     /// Like [`Db::create_community_with_owner`], binding `nip_fi_issuers` to
     /// the new community in the same transaction. Identical retries return the
-    /// original record without touching its bindings. Operator tenant creation
-    /// must use [`Db::create_community_with_owner_and_nip_fi_policy`] to apply
-    /// the configured creation requirement.
+    /// original record without touching its bindings.
     #[datastore_span(
         name = "create_community_with_owner_and_nip_fi_issuers",
         system = "postgresql"
@@ -627,31 +615,6 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
         nip_fi_issuers: &[String],
-        relay_keypair: &nostr::Keys,
-    ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
-        self.create_community_with_owner_and_nip_fi_policy(
-            normalized_host,
-            owner_pubkey,
-            nip_fi_issuers,
-            false,
-            relay_keypair,
-        )
-        .await
-    }
-
-    /// Atomically create a community, owner, issuer bindings and initial NIP-FI
-    /// policy (generation 1 when required, otherwise 0). Identical retries keep
-    /// the original policy and bindings. Required creation needs issuers.
-    #[datastore_span(
-        name = "create_community_with_owner_and_nip_fi_policy",
-        system = "postgresql"
-    )]
-    pub async fn create_community_with_owner_and_nip_fi_policy(
-        &self,
-        normalized_host: &str,
-        owner_pubkey: &str,
-        nip_fi_issuers: &[String],
-        requires_nip_fi: bool,
         relay_keypair: &nostr::Keys,
     ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
         use relay_members::MembershipWrite;
@@ -675,21 +638,17 @@ impl Db {
 
         let row = sqlx::query(
             r#"
-            INSERT INTO communities (host, requires_nip_fi, policy_generation)
-            VALUES ($1, $2, CASE WHEN $2 THEN 1 ELSE 0 END)
+            INSERT INTO communities (host)
+            VALUES ($1)
             ON CONFLICT (lower(host)) DO NOTHING
-            RETURNING id, host, requires_nip_fi
+            RETURNING id, host
             "#,
         )
         .bind(normalized_host)
-        .bind(requires_nip_fi)
         .fetch_optional(&mut *tx)
         .await?;
 
         if let Some(row) = row {
-            if requires_nip_fi && nip_fi_issuers.is_empty() {
-                return Err(DbError::NipFiBindingRequired);
-            }
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;
 
@@ -729,14 +688,12 @@ impl Db {
             let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
                 id: CommunityId::from_uuid(id),
                 host,
-                created: true,
-                requires_nip_fi: row.try_get("requires_nip_fi")?,
             });
             relay_members::commit_membership_write(tx, record, true, relay_keypair).await
         } else {
             let existing = sqlx::query(
                 r#"
-                SELECT c.id, c.host, c.requires_nip_fi
+                SELECT c.id, c.host
                 FROM communities c
                 JOIN relay_members rm ON rm.community_id = c.id
                 WHERE lower(c.host) = lower($1)
@@ -760,8 +717,6 @@ impl Db {
             let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
                 id: CommunityId::from_uuid(existing.try_get("id")?),
                 host: existing.try_get("host")?,
-                created: false,
-                requires_nip_fi: existing.try_get("requires_nip_fi")?,
             });
             tx.commit().await?;
             Ok(MembershipWrite::unchanged(record))
@@ -951,6 +906,9 @@ impl Db {
         &self,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.communities_of_channels(channel_ids).await;
+        }
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -1191,10 +1149,7 @@ mod postgres_tests {
             .expect("same-owner retry");
         assert_eq!(
             retry,
-            CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
-                created: false,
-                ..created.clone()
-            }),
+            CreateCommunityWithOwnerResult::Created(created.clone()),
             "retry returns the original row"
         );
 
@@ -1671,23 +1626,8 @@ mod postgres_tests {
         let first = first.expect("first concurrent create");
         let second = second.expect("second concurrent create");
 
-        let (
-            CreateCommunityWithOwnerResult::Created(first),
-            CreateCommunityWithOwnerResult::Created(second),
-        ) = (first, second)
-        else {
-            panic!("both concurrent callers must receive the stored community");
-        };
-        assert_eq!(
-            first.id, second.id,
-            "conflict loser re-reads the winning row"
-        );
-        assert_eq!(first.host, second.host);
-        assert_eq!(first.requires_nip_fi, second.requires_nip_fi);
-        assert_ne!(
-            first.created, second.created,
-            "exactly one caller inserted the row"
-        );
+        assert!(matches!(first, CreateCommunityWithOwnerResult::Created(_)));
+        assert_eq!(first, second, "conflict loser re-reads the winning row");
     }
 
     #[tokio::test]

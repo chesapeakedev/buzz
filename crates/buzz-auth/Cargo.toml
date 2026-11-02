@@ -37,3 +37,4 @@ hex          = { workspace = true }
 rand         = { workspace = true }
 uuid         = { workspace = true }
 url          = { workspace = true }
+async-trait  = "0.1"

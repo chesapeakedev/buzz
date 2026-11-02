@@ -1,13 +1,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! Buzz search — community-scoped Postgres full-text search over Buzz events.
+//! Buzz search — community-scoped full-text search over Buzz events.
 //!
-//! The index lives in the `events` table: `search_tsv TSVECTOR GENERATED
-//! ALWAYS AS (to_tsvector('simple', content)) STORED`, with `GIN
-//! (search_tsv)` as the access path. Because the column is `GENERATED ALWAYS`,
-//! every row write *is* the index update — there is no separate indexer, no
-//! mpsc queue, no reindex job, no consistency window to reason about. A
-//! client cannot forge the tsvector out of sync with the content it signed.
+//! PostgreSQL uses an `events.search_tsv` generated column and GIN index.
+//! SQLite uses an external-content FTS5 table maintained by database triggers
+//! in the event mutation transaction. In both adapters every row write is the
+//! index update—there is no separate indexer or consistency window.
 //!
 //! This crate is the **query** side. Indexing is the SQL row insert — owned
 //! by `buzz-db`. The relay refetches canonical events through `buzz-db`'s
@@ -18,11 +16,9 @@
 //!
 //! Every [`SearchQuery`] carries a [`CommunityId`]. There is no construction
 //! path through this crate that omits it, and every SQL execution binds
-//! `community_id = $ctx` as the first predicate. A query bound to community
-//! A cannot return events stored under community B, by construction.
+//! `community_id = $ctx` as the first predicate. A query bound to community A
+//! cannot return events stored under community B, by construction.
 
-#[doc(hidden)]
-pub mod cancel;
 /// Search error types.
 pub mod error;
 /// Search query execution.
@@ -35,50 +31,218 @@ pub use query::{
     SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
 };
 
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use std::time::Duration;
 
-/// Options for the pool behind [`SearchService`]: every new connection's
-/// session `statement_timeout` is lowered to buzz-db's event-read deadline
-/// ([`buzz_db::event::READ_STATEMENT_TIMEOUT`]) unless it is already
-/// tighter. Searches cancel their statement when abandoned (see
-/// [`cancel`]); this bounds the ones a cancel cannot reach.
-pub fn pool_options() -> PgPoolOptions {
-    PgPoolOptions::new().after_connect(|conn, _meta| {
-        Box::pin(buzz_db::event::tighten_session_read_statement_timeout(conn))
-    })
+use sqlx::{PgPool, SqlitePool};
+
+/// Backend-specific search resources.
+#[derive(Debug, Clone)]
+enum SearchBackend {
+    Postgres(PgPool),
+    Sqlite {
+        pool: SqlitePool,
+        cache: Option<moka::future::Cache<SearchCacheKey, query::SearchResult>>,
+    },
 }
 
-/// Thin handle around a `PgPool` for community-scoped FTS.
-///
-/// Holds nothing the pool itself doesn't already own. The whole purpose of
-/// this type is a stable injection point for the relay's `AppState`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SearchCacheKey {
+    community: CommunityId,
+    text: String,
+    mode: u8,
+    scope: u8,
+    channels: Vec<uuid::Uuid>,
+    kinds: Vec<i32>,
+    authors: Vec<Vec<u8>>,
+    since: Option<i64>,
+    until: Option<i64>,
+    page: u32,
+    per_page: u32,
+}
+
+impl From<&query::SearchQuery> for SearchCacheKey {
+    fn from(value: &query::SearchQuery) -> Self {
+        let (scope, mut channels) = match &value.channel_scope {
+            query::ChannelScope::Any => (0, Vec::new()),
+            query::ChannelScope::ChannelLessOnly => (1, Vec::new()),
+            query::ChannelScope::Channels(channels) => (2, channels.clone()),
+            query::ChannelScope::ChannelsOrChannelLess(channels) => (3, channels.clone()),
+        };
+        channels.sort_unstable();
+        channels.dedup();
+        let mut kinds = value.kinds.clone().unwrap_or_default();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut authors = value.authors.clone().unwrap_or_default();
+        authors.sort_unstable();
+        authors.dedup();
+        Self {
+            community: value.community,
+            text: value.q.trim().to_owned(),
+            mode: match value.mode {
+                query::SearchMode::FullText => 0,
+                query::SearchMode::Prefix => 1,
+            },
+            scope,
+            channels,
+            kinds,
+            authors,
+            since: value.since,
+            until: value.until,
+            page: value.page,
+            per_page: value.per_page,
+        }
+    }
+}
+
+/// Backend-neutral handle for community-scoped full-text search.
 #[derive(Debug, Clone)]
 pub struct SearchService {
-    pool: PgPool,
+    backend: SearchBackend,
 }
 
 impl SearchService {
-    /// Build a search service over an existing Postgres pool.
+    /// Build a search service over an existing PostgreSQL pool.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            backend: SearchBackend::Postgres(pool),
+        }
+    }
+
+    /// Build a search service over an existing SQLite pool.
+    pub fn new_sqlite(pool: SqlitePool) -> Self {
+        Self::new_sqlite_with_ttl(pool, Duration::ZERO)
+    }
+
+    /// Build a SQLite search service with a bounded embedded result cache.
+    pub fn new_sqlite_with_ttl(pool: SqlitePool, ttl: Duration) -> Self {
+        let cache = (!ttl.is_zero()).then(|| {
+            moka::future::Cache::builder()
+                .max_capacity(512)
+                .time_to_live(ttl)
+                .build()
+        });
+        Self {
+            backend: SearchBackend::Sqlite { pool, cache },
+        }
+    }
+
+    /// Connect the PostgreSQL search adapter.
+    ///
+    /// Keeping pool construction inside the owning adapter lets relay startup
+    /// select this implementation without importing PostgreSQL driver types.
+    pub async fn connect_postgres(database_url: &str) -> Result<Self, SearchError> {
+        Ok(Self::new(PgPool::connect(database_url).await?))
+    }
+
+    /// Connect the SQLite search adapter.
+    ///
+    /// The caller owns migration and connection-policy setup; this constructor
+    /// only creates the search-side pool.
+    pub async fn connect_sqlite(database_url: &str) -> Result<Self, SearchError> {
+        Ok(Self::new_sqlite(SqlitePool::connect(database_url).await?))
     }
 
     /// Execute a community-scoped FTS query.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        query::search(&self.pool, query).await
+        if matches!(&self.backend, SearchBackend::Sqlite { .. }) {
+            metrics::counter!("buzz_sqlite_read_requests_total", "lane" => "search", "outcome" => "started").increment(1);
+        }
+        match &self.backend {
+            SearchBackend::Postgres(pool) => query::search(pool, query).await,
+            SearchBackend::Sqlite { pool, cache } => {
+                let Some(cache) = cache else {
+                    return query::search_sqlite(pool, query).await;
+                };
+                let key = SearchCacheKey::from(query);
+                if let Some(result) = cache.get(&key).await {
+                    metrics::counter!("buzz_sqlite_read_cache_total", "lane" => "search", "outcome" => "hit").increment(1);
+                    return Ok(result);
+                }
+                metrics::counter!("buzz_sqlite_read_cache_total", "lane" => "search", "outcome" => "miss").increment(1);
+                let pool = pool.clone();
+                let query = query.clone();
+                cache
+                    .try_get_with(key, async move {
+                        metrics::gauge!("buzz_sqlite_read_loaders_in_flight", "lane" => "search")
+                            .increment(1.0);
+                        let started = std::time::Instant::now();
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            query::search_sqlite(&pool, &query),
+                        )
+                        .await;
+                        metrics::gauge!("buzz_sqlite_read_loaders_in_flight", "lane" => "search")
+                            .decrement(1.0);
+                        metrics::histogram!("buzz_sqlite_read_loader_seconds", "lane" => "search")
+                            .record(started.elapsed().as_secs_f64());
+                        result.map_err(|_| {
+                            SearchError::ReadUnavailable(
+                                "search loader deadline exceeded".to_owned(),
+                            )
+                        })?
+                    })
+                    .await
+                    .map_err(|error| SearchError::ReadUnavailable(error.to_string()))
+            }
+        }
     }
 
-    /// Find people by profile name, and by verified profile names signed by
-    /// `verified_by`; see [`search_profile_names`].
+    /// Find current profiles by `name` and `display_name`; see
+    /// [`search_profile_names`].
     pub async fn search_profile_names(
         &self,
         community: CommunityId,
         q: &str,
-        verified_by: Option<[u8; 32]>,
         page: u32,
         per_page: u32,
     ) -> Result<SearchResult, SearchError> {
-        query::search_profile_names(&self.pool, community, q, verified_by, page, per_page).await
+        match &self.backend {
+            SearchBackend::Postgres(pool) => {
+                query::search_profile_names(pool, community, q, page, per_page).await
+            }
+            SearchBackend::Sqlite { .. } => Err(SearchError::Unsupported),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn query(community: CommunityId, channels: Vec<Uuid>) -> query::SearchQuery {
+        query::SearchQuery {
+            community,
+            q: " hello ".to_owned(),
+            channel_scope: query::ChannelScope::Channels(channels),
+            kinds: Some(vec![9, 1, 9]),
+            authors: Some(vec![vec![2; 32], vec![1; 32]]),
+            since: Some(1),
+            until: Some(2),
+            page: 1,
+            per_page: 100,
+            mode: query::SearchMode::FullText,
+            sort: query::SearchSort::Relevance,
+        }
+    }
+
+    #[test]
+    fn embedded_cache_key_normalizes_filters_and_preserves_tenant_scope() {
+        let community_a = CommunityId::from_uuid(Uuid::new_v4());
+        let community_b = CommunityId::from_uuid(Uuid::new_v4());
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let left = SearchCacheKey::from(&query(community_a, vec![channel_b, channel_a]));
+        let right = SearchCacheKey::from(&query(community_a, vec![channel_a, channel_b]));
+        assert_eq!(left, right);
+        assert_ne!(
+            left,
+            SearchCacheKey::from(&query(community_b, vec![channel_a, channel_b]))
+        );
+        assert_ne!(
+            left,
+            SearchCacheKey::from(&query(community_a, vec![channel_a]))
+        );
     }
 }

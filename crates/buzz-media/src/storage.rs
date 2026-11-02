@@ -201,6 +201,121 @@ fn parse_object_versions_page(xml: &[u8]) -> Result<ObjectVersionsPage, MediaErr
     })
 }
 
+/// Build the community-scoped sidecar key for one bare SHA-256 digest.
+pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
+    format!("_meta/{community}/{sha256}.json")
+}
+
+/// Build a community-scoped sidecar key from the resolved request tenant.
+pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
+    sidecar_key(ctx.community(), sha256)
+}
+
+/// Backend-neutral media blob operations used by upload, download, and sweep paths.
+///
+/// Implementations must preserve object keys and existing not-found semantics,
+/// and keep community sidecars as the read-authorization boundary for shared
+/// content-addressed bytes.
+#[async_trait::async_trait]
+pub trait BlobStorage: Send + Sync {
+    /// Store an object from memory.
+    async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError>;
+
+    /// Store an object by streaming a local file.
+    async fn put_file(&self, key: &str, path: &Path, content_type: &str) -> Result<(), MediaError>;
+
+    /// Retrieve a complete object.
+    async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError>;
+
+    /// Retrieve an inclusive byte range.
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError>;
+
+    /// Stream an object without buffering the complete body.
+    async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError>;
+
+    /// Return whether an object exists.
+    async fn head(&self, key: &str) -> Result<bool, MediaError>;
+
+    /// Delete an object.
+    async fn delete(&self, key: &str) -> Result<(), MediaError>;
+
+    /// Read object metadata without retrieving its body.
+    async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError>;
+
+    /// Read one tenant-scoped metadata sidecar.
+    async fn get_sidecar(&self, ctx: &TenantContext, sha256: &str) -> Result<BlobMeta, MediaError>;
+
+    /// Write one tenant-scoped metadata sidecar.
+    async fn put_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError>;
+
+    /// Read a tenant-scoped MIME type, hiding missing and failed sidecars.
+    async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String>;
+
+    /// List one bounded page for storage accounting.
+    async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError>;
+}
+
+/// Backend-neutral community-scoped blob metadata.
+///
+/// The distributed S3 adapter persists this as sidecar JSON under
+/// `_meta/{community}/{sha256}.json` (see [`BlobStorage::get_sidecar`]). The
+/// embedded SQLite adapter stores the same [`BlobMeta`] fields as a relational
+/// `media_objects` row, making the metadata row the atomic publication gate
+/// for a blob write. The `BlobMeta` wire shape and community-scoped keying stay
+/// identical across backends so objects remain portable between S3 and
+/// filesystem storage.
+///
+/// `ctx` must always be the server-resolved request tenant. Callers must never
+/// derive the community from client-supplied blob metadata, URLs, or event
+/// tags; the community scope is the read-authorization boundary for otherwise
+/// shared content-addressed bytes.
+#[async_trait::async_trait]
+pub trait BlobMetadata: Send + Sync {
+    /// Read community-scoped blob metadata for a bare SHA-256 digest.
+    ///
+    /// Returns `Ok(None)` when no metadata has been published for this
+    /// community + digest. Absence is not an error — it is the normal state
+    /// of an uploaded blob whose serve gate has not yet been published.
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError>;
+
+    /// Publish community-scoped blob metadata.
+    ///
+    /// This is the atomic serve gate: until it succeeds the blob is not
+    /// readable through the media API. Idempotent for identical metadata.
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError>;
+
+    /// Read just the MIME type for a `sha256.ext` (or bare) digest.
+    ///
+    /// Returns `None` for absent metadata and unreadable sidecars, collapsing
+    /// the distinction so a cross-community request cannot distinguish a
+    /// B-only blob from a missing blob.
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String>;
+
+    /// Remove community-scoped blob metadata.
+    ///
+    /// Must be called when the blob is deleted so the serve gate tears down
+    /// with the content. No-op for already-absent metadata.
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError>;
+}
+
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
@@ -444,12 +559,12 @@ impl MediaStorage {
     /// community must never be observable through a global `_meta/{sha}.json`
     /// lookup.
     pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
-        format!("_meta/{community}/{sha256}.json")
+        sidecar_key(community, sha256)
     }
 
     /// Build the community-scoped sidecar key from the resolved request tenant.
     pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
-        Self::sidecar_key(ctx.community(), sha256)
+        ctx_sidecar_key(ctx, sha256)
     }
 
     /// Read community-scoped sidecar JSON for a given sha256 (bare hash).
@@ -676,6 +791,107 @@ fn fold_delete_result(
         }
     }
     outcome
+}
+
+#[async_trait::async_trait]
+impl BlobStorage for MediaStorage {
+    async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
+        MediaStorage::put(self, key, bytes, content_type).await
+    }
+
+    async fn put_file(&self, key: &str, path: &Path, content_type: &str) -> Result<(), MediaError> {
+        MediaStorage::put_file(self, key, path, content_type).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError> {
+        MediaStorage::get(self, key).await
+    }
+
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError> {
+        MediaStorage::get_range(self, key, start, end).await
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError> {
+        MediaStorage::get_stream(self, key).await
+    }
+
+    async fn head(&self, key: &str) -> Result<bool, MediaError> {
+        MediaStorage::head(self, key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), MediaError> {
+        MediaStorage::delete(self, key).await
+    }
+
+    async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError> {
+        MediaStorage::head_with_metadata(self, key).await
+    }
+
+    async fn get_sidecar(&self, ctx: &TenantContext, sha256: &str) -> Result<BlobMeta, MediaError> {
+        MediaStorage::get_sidecar(self, ctx, sha256).await
+    }
+
+    async fn put_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        MediaStorage::put_sidecar(self, ctx, sha256, meta).await
+    }
+
+    async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        MediaStorage::read_sidecar_mime(self, ctx, sha256_ext).await
+    }
+
+    async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError> {
+        MediaStorage::list_page(self, continuation_token, max_keys).await
+    }
+}
+
+/// Distributed adapter: persist blob metadata as community-scoped sidecar JSON.
+///
+/// This preserves the existing S3 behavior exactly — the sidecar write goes
+/// through the same `put` path and `read_mime` collapses absence and failure
+/// to `None`. `get_metadata` maps an S3 404 to `Ok(None)` so absent metadata is
+/// distinguishable from a genuine storage failure, which the SQLite adapter
+/// (the embedded `media_objects` row) provides natively.
+#[async_trait::async_trait]
+impl BlobMetadata for MediaStorage {
+    async fn get_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<Option<BlobMeta>, MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        match self.bucket.get_object(&key).await {
+            Ok(resp) => Ok(Some(serde_json::from_slice(&resp.to_vec())?)),
+            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn put_metadata(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        MediaStorage::put_sidecar(self, ctx, sha256, meta).await
+    }
+
+    async fn read_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
+        MediaStorage::read_sidecar_mime(self, ctx, sha256_ext).await
+    }
+
+    async fn delete_metadata(&self, ctx: &TenantContext, sha256: &str) -> Result<(), MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        self.delete(&key).await
+    }
 }
 
 #[cfg(test)]
@@ -1045,6 +1261,12 @@ mod tests {
                 "tenant writer key {key} is not recognized by deletion taxonomy"
             );
         }
+    }
+
+    #[test]
+    fn media_storage_implements_blob_metadata() {
+        fn assert_blob_metadata<T: BlobMetadata>() {}
+        assert_blob_metadata::<MediaStorage>();
     }
 
     #[test]

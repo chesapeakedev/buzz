@@ -42,6 +42,7 @@ impl RelayProcess {
             .env_clear()
             .env("RUST_BACKTRACE", "0")
             .env("RUST_LOG", "buzz_relay=info")
+            .env("BUZZ_DATA_DIR", &scratch_dir)
             .env("BUZZ_GIT_REPO_PATH", scratch_dir.join("repos"))
             .env("BUZZ_GIT_PACK_CACHE_PATH", scratch_dir.join("pack-cache"))
             .stdout(Stdio::piped())

@@ -1,7 +1,6 @@
 mod admitted_tx;
 mod cold_start;
 mod connection_observability;
-mod history_reads;
 pub mod migration;
 pub(crate) mod observability;
 pub(crate) mod push_enqueue;
@@ -15,6 +14,7 @@ pub(crate) use connection_observability::{
     CONNECTION_TERMINALS,
 };
 
+use crate::sqlite::SqliteStore;
 use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -260,13 +260,21 @@ where
     committed
 }
 
+/// Relational backend selected by [`Db`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBackendKind {
+    /// Distributed PostgreSQL storage.
+    Postgres,
+    /// Single-process SQLite storage.
+    Sqlite,
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {
+    /// Embedded SQLite resources, when the single-process backend is selected.
+    pub(crate) sqlite: Option<SqliteStore>,
     pub(crate) pool: PgPool,
-    /// Shared across clones; media authorization may use at most a quarter of
-    /// the writer pool (capped at eight), leaving capacity for ordinary writes.
-    pub(crate) media_authorization_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
@@ -299,6 +307,10 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
+    /// Replica freshness budget used only by the leader's fleet telemetry
+    /// queries. This is independent of serving-read rollout policy: telemetry
+    /// may be stale or skipped, but it must never fall back to the writer.
+    pub(crate) usage_metrics_replica_max_age: Option<Duration>,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -306,10 +318,6 @@ pub struct Db {
     /// not yet probed (or the probe hit a transient error and will retry).
     /// Shared across `Db` clones.
     pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
-    /// Concurrency cap on replica-served subscription-history reads, sized
-    /// from [`Db::read_max_connections`] (see [`history_reads`]). Shared
-    /// across `Db` clones.
-    pub(crate) history_reads: crate::concurrency_gate::ConcurrencyGate,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -337,7 +345,7 @@ pub(crate) enum ReadSessionInner {
     /// to the writer instead of surfacing an error: degraded capacity,
     /// never holes — and never a 500 the writer could have served.
     Replica {
-        tx: history_reads::ReaderTx,
+        tx: sqlx::Transaction<'static, sqlx::Postgres>,
         writer: PgPool,
     },
     /// The writer pool (cheap clone; Arc-backed).
@@ -359,7 +367,7 @@ impl ReadSession {
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => {
-                match event::query_events_on(tx, q, event::ReadDeadline::Session).await {
+                match event::query_events_on(tx, q).await {
                     Ok(rows) => return Ok(rows),
                     // Surface a cancel instead of re-running it on the writer; see
                     // `DbError::is_statement_cancelled` for the trade-off.
@@ -400,11 +408,8 @@ pub(crate) enum RouteDecision {
     /// replica, so a post-verification writer re-run or a mid-query replica
     /// failure emits exactly one `buzz_db_route_decision` event per request
     /// (the offload percentage is read straight off `decision="replica"`).
-    ///
-    /// A history read's transaction carries its [`history_reads`] permit, so
-    /// the permit is released when the transaction is dropped.
     Replica(
-        history_reads::ReaderTx,
+        sqlx::Transaction<'static, sqlx::Postgres>,
         replica_fence::TokenEntry,
         &'static str,
     ),
@@ -700,6 +705,10 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Replica freshness budget for usage telemetry, in milliseconds
+    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). `0` disables fleet database
+    /// telemetry. This does not enable replica routing for serving reads.
+    pub usage_metrics_replica_max_age_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -732,9 +741,10 @@ impl Default for DbConfig {
             read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
-            max_lifetime_secs: 300,
+            max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            usage_metrics_replica_max_age_ms: 30_000,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -799,6 +809,94 @@ impl DbConfig {
 }
 
 impl Db {
+    /// Borrows the PostgreSQL writer pool for legacy contract helpers.
+    pub fn postgres_pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Soft-deletes an event using the selected backend.
+    pub async fn soft_delete_event(&self, community: CommunityId, id: &[u8]) -> Result<bool> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.soft_delete_event(community, id).await;
+        }
+        crate::store::event::soft_delete_event_and_update_thread(
+            self.postgres_pool(),
+            community,
+            id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Decrements thread counters on the selected backend.
+    pub async fn decrement_reply_count(
+        &self,
+        community: CommunityId,
+        parent_event_id: &[u8],
+        root_event_id: Option<&[u8]>,
+    ) -> Result<()> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite
+                .decrement_reply_count(community, parent_event_id, root_event_id)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Deletes an owned workflow using the selected backend.
+    pub async fn delete_workflow_for_owner(
+        &self,
+        community: CommunityId,
+        id: uuid::Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<Option<uuid::Uuid>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite
+                .delete_workflow_for_owner(community, id, owner_pubkey)
+                .await;
+        }
+        Err(crate::DbError::NotFound(format!("workflow {id}")))
+    }
+
+    /// Selected relational backend.
+    pub fn backend_kind(&self) -> DatabaseBackendKind {
+        if self.sqlite.is_some() {
+            DatabaseBackendKind::Sqlite
+        } else {
+            DatabaseBackendKind::Postgres
+        }
+    }
+
+    /// Returns the embedded SQLite resources, when selected.
+    pub fn sqlite_store(&self) -> Option<SqliteStore> {
+        self.sqlite.clone()
+    }
+
+    /// Opens the embedded SQLite backend.
+    pub async fn new_sqlite(
+        path: &std::path::Path,
+        config: &crate::sqlite::SqliteConfig,
+    ) -> Result<Self> {
+        let sqlite = SqliteStore::connect(path, config).await?;
+        sqlite.migrate().await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/embedded-unused")?;
+        Ok(Self {
+            sqlite: Some(sqlite),
+            pool,
+            push_enqueue: None,
+            max_connections: config.max_connections,
+            read_pool: None,
+            read_max_connections: 0,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+            replica_read_max_age: None,
+            usage_metrics_replica_max_age: None,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+        })
+    }
+
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
     /// When `config.read_database_url` is set, a second pool with the same
@@ -818,11 +916,13 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
+        let usage_metrics_replica_max_age =
+            read_budget_from_ms(config.usage_metrics_replica_max_age_ms);
         let push_enqueue = config
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
-            media_authorization_slots: media_authorization_slots(&pool),
+            sqlite: None,
             push_enqueue,
             pool,
             max_connections: config.max_connections,
@@ -830,8 +930,8 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
+            usage_metrics_replica_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-            history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
     }
 
@@ -977,14 +1077,12 @@ impl Db {
     }
 
     /// Reader acquire timeout — deliberately far below the writer's
-    /// (seconds-denominated) timeout. A miss must resolve fast: a saturated
-    /// reader pool that made routed reads wait the full writer-style timeout
-    /// would add dead latency during exactly the load spike the offload
-    /// exists for. A miss surfaces as `writer/reader_acquire_timeout`, or as
-    /// `rejected/reader_acquire_timeout` for a history read, which is not
-    /// moved to the writer (see [`Db::route_read`], and
-    /// [`Db::proved_reader`] for why the reason names the mechanism rather
-    /// than a diagnosis).
+    /// (seconds-denominated) timeout. Failing closed to the writer must be
+    /// fast: a saturated reader pool that made routed reads wait the full
+    /// writer-style timeout would add dead latency during exactly the load
+    /// spike the offload exists for. A miss here surfaces as
+    /// `writer/reader_acquire_timeout` (see [`Db::proved_reader`] for why
+    /// the reason names the mechanism rather than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
     /// Client-side bound on a routed read's fence proof (Aurora capability
@@ -1061,30 +1159,40 @@ impl Db {
         options.options([("default_transaction_isolation", "read committed")])
     }
 
-    /// Leave headroom inside SQLx's five-second whole-return deadline so this
-    /// check records the reason before SQLx cancels the release future.
-    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
+    /// Upper bound on a reader connection's release check (see
+    /// [`Db::read_pool_options`]); matches sqlx's own close-on-drop bound.
+    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Reader pool options apart from connection lifetimes (see
     /// [`Db::connect_read_pool`]).
     ///
     /// Every checkout that goes back to the pool first passes a release
-    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. A check that times
-    /// out or errors records the reason, closes the socket, and frees the
-    /// slot. SQLx bounds the whole return, including its subsequent ping,
-    /// so a reader that stops answering without closing cannot strand pool
-    /// capacity. Its floor maintenance dials a replacement.
+    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. sqlx's own release
+    /// ping has no timeout, so a socket whose reader stopped answering
+    /// without closing it (a failover, a partition) would otherwise hold its
+    /// slot until the kernel gives up on it; with every slot held that way,
+    /// the pool cannot dial the reader that replaced it. A check that times
+    /// out or errors closes the socket and frees the slot, and sqlx's floor
+    /// maintenance dials a replacement.
     ///
     /// The check also closes, rather than returns, a connection still inside
-    /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
-    /// was in flight (a timed-out proof, a cancelled caller) since
-    /// transact-rs/sqlx#4394, so this is a backstop: a connection that still
-    /// came back inside a transaction would otherwise go back to the pool
+    /// a transaction. A checkout dropped while its `BEGIN` was in flight (a
+    /// timed-out proof, a cancelled caller) has no `ROLLBACK` queued: sqlx
+    /// counts the transaction only once `BEGIN` is acknowledged. Once the
+    /// reader answers, that connection would otherwise go back to the pool
     /// `idle in transaction`. Closing it ends the session, and the server
     /// rolls the transaction back. Routed reads only begin `REPEATABLE READ`
     /// (see [`Db::proved_reader`]) and reader sessions default to `READ
     /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
     /// other than the session default means a transaction is still open.
+    ///
+    /// Residual window: after the check passes, sqlx sends its own release
+    /// ping, which has no timeout. A reader that goes silent in that one
+    /// round trip strands that one slot until the socket fails. That is
+    /// bounded by the releases in flight at that instant, and later checkouts
+    /// of silent connections go through the proof timeout and this check.
+    /// Checkouts that must never strand a slot use `close_on_drop` (see
+    /// `ReaderOperation::bounded_release`).
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1092,7 +1200,14 @@ impl Db {
             .test_before_acquire(false)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .after_connect(|conn, _meta| {
-                Box::pin(crate::event::tighten_session_read_statement_timeout(conn))
+                Box::pin(async move {
+                    sqlx::query(crate::event::TIGHTEN_STATEMENT_TIMEOUT_SQL)
+                        .bind(crate::event::READ_STATEMENT_TIMEOUT)
+                        .bind(false)
+                        .execute(&mut *conn)
+                        .await
+                        .map(|_| ())
+                })
             })
             .after_release(|conn, _meta| Box::pin(Self::reader_release_check(conn)))
     }
@@ -1373,15 +1488,15 @@ impl Db {
     /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
-            media_authorization_slots: media_authorization_slots(&pool),
+            sqlite: None,
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
-            history_reads: history_reads::gate_for_read_pool(pool.options().get_max_connections()),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            usage_metrics_replica_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1395,17 +1510,15 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
-            media_authorization_slots: media_authorization_slots(&pool),
+            sqlite: None,
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
-            history_reads: history_reads::gate_for_read_pool(
-                read_pool.options().get_max_connections(),
-            ),
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            usage_metrics_replica_max_age: Some(replica_fence::FENCE_STALENESS),
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1478,13 +1591,6 @@ impl Db {
         self.read_pool.is_some()
     }
 
-    /// The cap on concurrent subscription-history reads (see
-    /// [`history_reads`]). Its ceiling is the share of the reader pool that
-    /// leaves room for authorization reads; operators may lower it at runtime.
-    pub fn history_read_gate(&self) -> &crate::concurrency_gate::ConcurrencyGate {
-        &self.history_reads
-    }
-
     /// Open a reader request transaction and complete the connection-local
     /// half of the fence proof: `BEGIN ISOLATION LEVEL REPEATABLE READ, READ
     /// ONLY`, then observe the heartbeat token/epoch as the transaction's
@@ -1518,7 +1624,7 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let mut conn =
+        let conn =
             match observability::acquire_reader_with_legacy_metrics(read_pool, operation).await {
                 Ok(conn) => conn,
                 Err(sqlx::Error::PoolTimedOut) => {
@@ -1530,6 +1636,12 @@ impl Db {
                     return Err("reader_validation_error");
                 }
             };
+        let mut conn = conn;
+        if operation.bounded_release() {
+            // Must precede the first post-acquire await: a caller deadline
+            // can drop this checkout at any of them.
+            conn.close_on_drop();
+        }
         // The proof is the reader's first wire round trip (no pre-acquire
         // ping, see `connect_read_pool`), so it carries the liveness bound:
         // a half-open socket to a vanished reader would otherwise hang the
@@ -1652,11 +1764,20 @@ impl Db {
     /// Run pending database migrations.
     #[datastore_span(name = "migrate", system = "postgresql")]
     pub async fn migrate(&self) -> Result<()> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.migrate().await;
+        }
         migration::run_migrations(&self.pool).await
     }
 
     /// Returns `true` if the database is reachable.
     pub async fn ping(&self) -> bool {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlx::query("SELECT 1")
+                .execute(&sqlite.adapter_pool())
+                .await
+                .is_ok();
+        }
         let Ok(mut connection) =
             observability::acquire_writer(&self.pool, observability::WriterOperation::Readiness)
                 .await
@@ -1857,40 +1978,57 @@ impl Db {
         Ok(result)
     }
 
+    /// Route a usage-telemetry query only to a proved, sufficiently fresh
+    /// reader. Unlike serving reads, an unavailable reader is recorded as
+    /// skipped and never represented as or executed on the writer.
+    pub(crate) async fn route_usage_read(
+        &self,
+        path: &'static str,
+    ) -> Option<(sqlx::Transaction<'static, sqlx::Postgres>, &'static str)> {
+        let skip = |reason| {
+            Self::record_route(path, "skipped", reason);
+            None
+        };
+        let Some(read_pool) = &self.read_pool else {
+            return skip("disabled");
+        };
+        let Some(budget) = self.usage_metrics_replica_max_age else {
+            return skip("disabled");
+        };
+        let Some(newest) = self.fence.newest() else {
+            return skip("uninitialized");
+        };
+        if newest.committed_at.elapsed() > budget {
+            return skip("stale");
+        }
+        match self
+            .proved_reader(read_pool, observability::ReaderOperation::Maintenance)
+            .await
+        {
+            Ok((tx, entry)) if entry.committed_at.elapsed() <= budget => Some((tx, "fresh")),
+            Ok((_tx, _entry)) => skip("stale"),
+            Err(reason) => skip(reason),
+        }
+    }
+
     /// Shared route decision for one read: evaluate the predicate against a
     /// proved reader session and record the decision. Fail closed to the
-    /// writer, with one exception for subscription-history reads.
-    ///
-    /// History reads are the heavy, high-volume routed reads. They hold a
-    /// [`history_reads`] permit for as long as their reader transaction, so
-    /// they never fill the reader pool, and they are never moved to the
-    /// writer merely because the reader is busy: a history read that waits
-    /// out its permit ([`history_reads::PERMIT_WAIT`]) or
-    /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) on a saturated
-    /// reader pool ([`Db::reader_saturated`]) is rejected with
-    /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
-    /// retryable `CLOSED`. Spilling that load onto the writer starved the
-    /// authentication, tenant and moderation reads only the writer serves.
-    /// A reader that is wrong rather than busy (unreachable, validation
-    /// failure, proof timeout, stale token) still falls back to the writer,
-    /// as do prechecks that never reach the reader. Recorded as
-    /// `decision="rejected"` with `reason="history_read_cap"` or
-    /// `"reader_acquire_timeout"`.
+    /// writer everywhere.
     pub(crate) async fn route_read(
         &self,
         path: &'static str,
         predicate: RoutePredicate,
         operation: observability::ReaderOperation,
-    ) -> Result<RouteDecision> {
+    ) -> RouteDecision {
         let Some(read_pool) = &self.read_pool else {
             Self::record_route(path, "writer", "disabled");
-            return Ok(RouteDecision::Writer);
+            return RouteDecision::Writer;
         };
         // Cheap prechecks on the shared ring before spending a reader
         // checkout; the connection-local observation still has to prove it.
         let Some(newest) = self.fence.newest() else {
             Self::record_route(path, "writer", "uninitialized");
-            return Ok(RouteDecision::Writer);
+            return RouteDecision::Writer;
         };
         // Precheck helpers against the newest shared entry: if the newest
         // cannot satisfy an arm, no proved (older-or-equal) entry can.
@@ -1921,17 +2059,8 @@ impl Db {
         };
         if let Err(reason) = precheck {
             Self::record_route(path, "writer", reason);
-            return Ok(RouteDecision::Writer);
+            return RouteDecision::Writer;
         }
-        let history = operation == observability::ReaderOperation::SubscriptionHistory;
-        let permit = if history {
-            let Some(permit) = self.history_reads.admit(history_reads::PERMIT_WAIT).await else {
-                return Err(Self::reject_history_read(path, "history_read_cap"));
-            };
-            Some(permit)
-        } else {
-            None
-        };
         match self.proved_reader(read_pool, operation).await {
             Ok((tx, entry)) => {
                 // Re-evaluate against the entry the session actually proved
@@ -1957,49 +2086,20 @@ impl Db {
                     }
                 };
                 match verdict {
-                    Some(reason) => Ok(RouteDecision::Replica(
-                        history_reads::ReaderTx::new(tx, permit),
-                        entry,
-                        reason,
-                    )),
+                    Some(reason) => RouteDecision::Replica(tx, entry, reason),
                     None => {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
                         Self::record_route(path, "writer", "stale");
-                        Ok(RouteDecision::Writer)
+                        RouteDecision::Writer
                     }
                 }
             }
-            Err(reason @ "reader_acquire_timeout")
-                if history && Self::reader_saturated(read_pool) =>
-            {
-                Err(Self::reject_history_read(path, reason))
-            }
             Err(reason) => {
                 Self::record_route(path, "writer", reason);
-                Ok(RouteDecision::Writer)
+                RouteDecision::Writer
             }
         }
-    }
-
-    /// Whether a reader acquire timeout means the reader is busy rather than
-    /// unreachable: every connection the pool may hold exists and none is
-    /// idle. `PoolTimedOut` alone cannot tell them apart, because sqlx keeps
-    /// retrying a refused or failing dial until the acquire budget runs out.
-    /// A reader that refuses or drops dials leaves the pool below its ceiling,
-    /// so its history reads still fall back to the writer. A reader that
-    /// accepts no TCP at all can fill the ceiling with in-flight dials and
-    /// read as busy; those reads are rejected as retryable, the same outcome
-    /// as a full gate.
-    fn reader_saturated(read_pool: &PgPool) -> bool {
-        read_pool.size() >= read_pool.options().get_max_connections() && read_pool.num_idle() == 0
-    }
-
-    /// Record a rejected history read (see [`Db::route_read`]) and build its
-    /// retryable error.
-    fn reject_history_read(path: &'static str, reason: &'static str) -> DbError {
-        Self::record_route(path, "rejected", reason);
-        DbError::Sqlx(sqlx::Error::PoolTimedOut)
     }
 }
 
@@ -2170,9 +2270,3 @@ mod pool_role_tests {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod postgres_tests;
-
-fn media_authorization_slots(pool: &PgPool) -> std::sync::Arc<tokio::sync::Semaphore> {
-    std::sync::Arc::new(tokio::sync::Semaphore::new(
-        (pool.options().get_max_connections() as usize / 4).clamp(1, 8),
-    ))
-}

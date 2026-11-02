@@ -1198,6 +1198,7 @@ mod postgres_tests {
                         expires_at: i64::MAX / 2,
                     },
                     buzz_db::push::ActiveLease {
+                        app_profile: "ios-production",
                         endpoint_hash: &[n as u8 + 42; 32],
                         endpoint_grant: "opaque-grant",
                         max_class: "default",
@@ -1342,6 +1343,7 @@ mod postgres_tests {
                         expires_at: i64::MAX / 2,
                     },
                     buzz_db::push::ActiveLease {
+                        app_profile: "ios-production",
                         endpoint_hash: &[n as u8 + 42; 32],
                         endpoint_grant: "opaque-grant",
                         max_class: "default",

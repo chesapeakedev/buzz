@@ -5,9 +5,9 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
-    /// Media authorization could not reserve capacity within its bounded wait.
-    #[error("media authorization capacity exceeded")]
-    MediaAuthorizationCapacity,
+    /// An embedded read bulkhead could not admit work before its deadline.
+    #[error("embedded read temporarily unavailable: {0}")]
+    ReadUnavailable(String),
 
     /// A SQLx driver-level error.
     #[error("database error: {0}")]
@@ -30,7 +30,7 @@ pub enum DbError {
     ChannelNotFound(uuid::Uuid),
 
     /// Another listed open channel in the community already has this name
-    /// (the `idx_channels_listed_name` index, migration 0083).
+    /// (see `channel::ensure_listed_channel_name_unique`).
     #[error("an open channel named \"{0}\" already exists")]
     ChannelNameTaken(String),
 
@@ -46,10 +46,6 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
-    /// Required initial policy cannot be created without issuer bindings.
-    #[error("required community creation needs NIP-FI issuer bindings")]
-    NipFiBindingRequired,
-
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
     InviteRestricted,
@@ -57,6 +53,10 @@ pub enum DbError {
     /// A verified invitation owner conflicts with the recorded owner.
     #[error("invitation owner does not match the recorded owner")]
     InviteOwnerMismatch,
+
+    /// A conditional mutation lost a race or conflicts with current state.
+    #[error("conflict: {0}")]
+    Conflict(String),
 
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
@@ -97,10 +97,6 @@ pub enum DbError {
     /// A complete read-state snapshot exceeds its bounded resource budget.
     #[error("read-state snapshot exceeds event or byte limit")]
     ReadStateSnapshotTooLarge,
-
-    /// A complete membership snapshot exceeds its bounded resource budget.
-    #[error("membership snapshot exceeds channel or byte limit")]
-    MembershipSnapshotTooLarge,
 
     /// A complete thread window exceeds its request-wide work allowance.
     #[error("thread window exceeds {0} budget")]
@@ -151,45 +147,6 @@ impl DbError {
 
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;
-
-/// A fixed description of a driver error for log lines. Postgres primary
-/// messages can repeat a bound value (`invalid input syntax for type uuid:
-/// "<value>"`), so only the SQLSTATE code is kept.
-pub fn sqlx_error_kind(e: &sqlx::Error) -> String {
-    let kind = match e {
-        sqlx::Error::Database(db) => {
-            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
-        }
-        sqlx::Error::RowNotFound => "row_not_found",
-        sqlx::Error::PoolTimedOut => "pool_timed_out",
-        sqlx::Error::PoolClosed => "pool_closed",
-        sqlx::Error::Io(_) => "io",
-        sqlx::Error::Tls(_) => "tls",
-        sqlx::Error::Protocol(_) => "protocol",
-        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
-        sqlx::Error::Encode(_) => "encode",
-        _ => "other",
-    };
-    kind.to_owned()
-}
-
-impl DbError {
-    /// A fixed description of this error for log lines: never the
-    /// message, which can repeat bound values.
-    pub fn kind(&self) -> String {
-        use DbError as E;
-        let kind = match self {
-            E::Sqlx(e) => return sqlx_error_kind(e),
-            E::Serde(_) => "serde",
-            E::InvalidData(_) => "invalid_data",
-            E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
-            E::AccessDenied(_) => "access_denied",
-            E::NipFiBindingRequired => "nip_fi_binding_required",
-            _ => "other",
-        };
-        kind.to_owned()
-    }
-}
 
 #[cfg(test)]
 mod tests {

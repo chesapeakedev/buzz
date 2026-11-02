@@ -10,6 +10,7 @@ description = "Postgres event store and data access layer for Buzz"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
+buzz-media = { workspace = true }
 sqlx        = { workspace = true }
 tokio       = { workspace = true }
 tokio-util  = { workspace = true }
@@ -21,11 +22,14 @@ hex         = { workspace = true }
 futures-util = { workspace = true }
 sha2        = { workspace = true }
 tracing     = { workspace = true }
+metrics     = { workspace = true }
+moka        = { workspace = true }
 thiserror   = { workspace = true }
 nostr       = { workspace = true }
+async-trait = "0.1"
 rand        = { workspace = true }
-metrics     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
+tempfile = "3"

@@ -21,6 +21,8 @@
 use buzz_media::config::MediaConfig;
 use buzz_media::storage::MediaStorage;
 
+mod support;
+
 fn minio_config() -> MediaConfig {
     MediaConfig {
         s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
@@ -51,30 +53,6 @@ fn minio_config() -> MediaConfig {
 async fn static_creds_round_trip_against_minio() {
     let storage =
         MediaStorage::new(&minio_config()).expect("static creds should build a storage client");
-
-    let key = format!("_test/static-creds-{}.bin", std::process::id());
-    let body = b"hardcoded-creds-still-work";
-
-    // PUT
-    storage
-        .put(&key, body, "application/octet-stream")
-        .await
-        .expect("put with static creds should succeed");
-
-    // HEAD -> exists with correct size
-    assert!(storage.head(&key).await.expect("head should succeed"));
-    let meta = storage
-        .head_with_metadata(&key)
-        .await
-        .expect("head_with_metadata should succeed")
-        .expect("object should exist");
-    assert_eq!(meta.size, body.len() as u64);
-
-    // GET round-trips the bytes
-    let got = storage.get(&key).await.expect("get should succeed");
-    assert_eq!(got, body);
-
-    // DELETE, then HEAD reports absence
-    storage.delete(&key).await.expect("delete should succeed");
-    assert!(!storage.head(&key).await.expect("head after delete"));
+    support::run_blob_storage_contract(&storage).await;
+    support::run_blob_metadata_contract(&storage).await;
 }

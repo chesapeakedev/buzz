@@ -106,6 +106,24 @@ pub async fn create_dm(
     participants: &[&[u8]],
     created_by: &[u8],
 ) -> Result<ChannelRecord> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let record = create_dm_tx(&mut tx, community_id, participants, created_by).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Create or retrieve a DM inside a caller-owned transaction.
+pub(crate) async fn create_dm_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    participants: &[&[u8]],
+    created_by: &[u8],
+) -> Result<ChannelRecord> {
     if participants.len() < 2 {
         return Err(DbError::InvalidData(
             "DM requires at least 2 participants".to_string(),
@@ -126,13 +144,6 @@ pub async fn create_dm(
     }
 
     let hash = compute_participant_hash(participants);
-
-    let mut tx = crate::begin_community_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
 
     // Idempotency check inside the transaction.
     let existing = sqlx::query(
@@ -157,7 +168,6 @@ pub async fn create_dm(
     .await?;
 
     if let Some(row) = existing {
-        tx.commit().await?;
         return row_to_channel_record(row);
     }
 
@@ -222,9 +232,7 @@ pub async fn create_dm(
     .fetch_one(tx.conn())
     .await?;
 
-    let record = row_to_channel_record(row)?;
-    tx.commit().await?;
-    Ok(record)
+    row_to_channel_record(row)
 }
 
 /// List all DM conversations for a given user, ordered by most recent activity.
@@ -367,6 +375,24 @@ pub async fn open_dm(
     pubkeys: &[&[u8]],
     created_by: &[u8],
 ) -> Result<(ChannelRecord, bool)> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Open or retrieve a DM inside a caller-owned transaction.
+pub(crate) async fn open_dm_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+) -> Result<(ChannelRecord, bool)> {
     // Merge created_by into the participant set (dedup handled by compute_participant_hash).
     let mut all: Vec<&[u8]> = pubkeys.to_vec();
     if !all.contains(&created_by) {
@@ -382,15 +408,36 @@ pub async fn open_dm(
 
     let hash = compute_participant_hash(&all);
 
-    // Check for existing DM first (fast path, no transaction).
-    if let Some(existing) = find_dm_by_participants(pool, community_id, &hash).await? {
+    let existing = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at
+        FROM channels
+        WHERE community_id = $1
+          AND participant_hash = $2
+          AND channel_type = 'dm'
+          AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(hash.as_slice())
+    .fetch_optional(tx.conn())
+    .await?;
+
+    if let Some(row) = existing {
+        let existing = row_to_channel_record(row)?;
         // Clear hidden_at for the caller so the DM reappears in their sidebar.
-        unhide_dm(pool, community_id, existing.id, created_by).await?;
+        unhide_dm_tx(tx, community_id, existing.id, created_by).await?;
         return Ok((existing, false));
     }
 
     // Create new DM.
-    let channel = create_dm(pool, community_id, &all, created_by).await?;
+    let channel = create_dm_tx(tx, community_id, &all, created_by).await?;
 
     Ok((channel, true))
 }
@@ -414,6 +461,17 @@ pub async fn hide_dm(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    hide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    Ok(())
+}
+
+/// Hide a DM membership inside a caller-owned transaction.
+pub(crate) async fn hide_dm_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     let result = sqlx::query(
         r#"
         UPDATE channel_members
@@ -433,7 +491,6 @@ pub async fn hide_dm(
         )));
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -453,6 +510,18 @@ pub async fn unhide_dm(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    unhide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Unhide a DM membership inside a caller-owned transaction.
+pub(crate) async fn unhide_dm_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE channel_members
@@ -466,7 +535,6 @@ pub async fn unhide_dm(
     .execute(tx.conn())
     .await?;
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -620,6 +688,159 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         crate::dm::list_hidden_dms(&self.pool, community_id, pubkey).await
+    }
+}
+
+/// Atomically persist a DM-open command event and open its conversation.
+pub async fn execute_dm_open_command(
+    db: &Db,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+) -> Result<crate::CommandExecution<(ChannelRecord, bool)>> {
+    if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_OPEN {
+        return Err(DbError::InvalidData(format!(
+            "expected DM open command kind {}, got {}",
+            buzz_core::kind::KIND_DM_OPEN,
+            event.kind.as_u16()
+        )));
+    }
+    let mut tx = crate::begin_community_write_transaction(
+        &db.pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(db.push_enqueue.clone());
+    let (_, inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, None, None).await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(crate::CommandExecution::Duplicate);
+    }
+    crate::insert_mentions_in_transaction(&mut tx, event, None).await?;
+    let result = open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+    tx.commit().await?;
+    Ok(crate::CommandExecution::Applied(result))
+}
+
+/// Atomically persist a DM-add-member command event and open the expanded DM.
+pub async fn execute_dm_add_member_command(
+    db: &Db,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    source_channel_id: Uuid,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+) -> Result<crate::CommandExecution<(ChannelRecord, bool)>> {
+    if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_ADD_MEMBER {
+        return Err(DbError::InvalidData(format!(
+            "expected DM add-member command kind {}, got {}",
+            buzz_core::kind::KIND_DM_ADD_MEMBER,
+            event.kind.as_u16()
+        )));
+    }
+    let mut tx = crate::begin_community_write_transaction(
+        &db.pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(db.push_enqueue.clone());
+    let (_, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+        &mut tx,
+        event,
+        Some(source_channel_id),
+        None,
+    )
+    .await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(crate::CommandExecution::Duplicate);
+    }
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(source_channel_id)).await?;
+    let result = open_dm_tx(&mut tx, community_id, pubkeys, created_by).await?;
+    tx.commit().await?;
+    Ok(crate::CommandExecution::Applied(result))
+}
+
+/// Atomically persist a DM-hide command event and hide the caller's DM.
+pub async fn execute_dm_hide_command(
+    db: &Db,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<crate::CommandExecution<()>> {
+    if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_DM_HIDE {
+        return Err(DbError::InvalidData(format!(
+            "expected DM hide command kind {}, got {}",
+            buzz_core::kind::KIND_DM_HIDE,
+            event.kind.as_u16()
+        )));
+    }
+    let mut tx = crate::begin_community_write_transaction(
+        &db.pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(db.push_enqueue.clone());
+    let (_, inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, Some(channel_id), None)
+            .await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(crate::CommandExecution::Duplicate);
+    }
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+    hide_dm_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    tx.commit().await?;
+    Ok(crate::CommandExecution::Applied(()))
+}
+
+impl Db {
+    /// Atomically persist and execute a DM-open command.
+    pub async fn execute_dm_open_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<crate::CommandExecution<(ChannelRecord, bool)>> {
+        execute_dm_open_command(self, community_id, event, pubkeys, created_by).await
+    }
+
+    /// Atomically persist and execute a DM-add-member command.
+    pub async fn execute_dm_add_member_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        source_channel_id: Uuid,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<crate::CommandExecution<(ChannelRecord, bool)>> {
+        execute_dm_add_member_command(
+            self,
+            community_id,
+            event,
+            source_channel_id,
+            pubkeys,
+            created_by,
+        )
+        .await
+    }
+
+    /// Atomically persist and execute a DM-hide command.
+    pub async fn execute_dm_hide_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<crate::CommandExecution<()>> {
+        execute_dm_hide_command(self, community_id, event, channel_id, pubkey).await
     }
 }
 

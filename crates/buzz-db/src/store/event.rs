@@ -2347,6 +2347,9 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.insert_event(community_id, event, channel_id).await;
+        }
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -2371,6 +2374,9 @@ impl Db {
     /// explicit, per-callsite decision, never a change to this method.
     #[datastore_span(name = "query_events", system = "postgresql")]
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.query_events(q).await;
+        }
         crate::event::query_events_with_operation(
             &self.pool,
             q,
@@ -2383,6 +2389,9 @@ impl Db {
     /// mutation or its post-commit side effects.
     #[datastore_span(name = "query_events_for_event_write", system = "postgresql")]
     pub async fn query_events_for_event_write(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.query_events(q).await;
+        }
         crate::event::query_events_with_operation(
             &self.pool,
             q,
@@ -2437,6 +2446,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.query_events(q).await;
+        }
         if let Some(answer) = crate::event::answer_without_db(q) {
             return answer;
         }
@@ -2505,6 +2517,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.query_events(q).await;
+        }
         if let Some(answer) = crate::event::answer_without_db(q) {
             return answer;
         }
@@ -2698,6 +2713,9 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_event_by_id(community_id, id_bytes).await;
+        }
         crate::event::get_event_by_id(&self.pool, community_id, id_bytes).await
     }
 
@@ -2709,6 +2727,9 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_event_by_id(community_id, id_bytes).await;
+        }
         crate::event::get_event_by_id_with_operation(
             &self.pool,
             community_id,
@@ -2836,6 +2857,11 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite
+                .insert_event_with_thread_metadata(community_id, event, channel_id, thread_meta)
+                .await;
+        }
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,

@@ -209,7 +209,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
 pub async fn verify_imeta_blobs(
     ctx: &TenantContext,
     tags: &[Vec<String>],
-    storage: &buzz_media::MediaStorage,
+    storage: &dyn buzz_media::BlobStorage,
 ) -> Result<(), String> {
     for tag in tags {
         let mut x_value = String::new();

@@ -17,6 +17,25 @@ fn task_native_git_and_startup_shutdown_cleanup() {
 }
 
 fn check_native_git_and_startup_shutdown_cleanup(task: bool) {
+    // Git's credential protocol gained the `authtype`/`credential` response
+    // fields after the system Git shipped by older development images. Those
+    // clients cannot exercise NIP-98's non-password credential contract.
+    let supports_authtype = Command::new("git")
+        .args(["--version"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|version| {
+            let mut parts = version.split_whitespace().nth(2)?.split('.');
+            Some((
+                parts.next()?.parse::<u32>().ok()?,
+                parts.next()?.parse::<u32>().ok()?,
+            ))
+        })
+        .is_some_and(|(major, minor)| (major, minor) >= (2, 46));
+    if !supports_authtype {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     let adapter = workspace.join("adapter");

@@ -38,7 +38,7 @@ fn private_deletion_k_values() -> Vec<String> {
     AUTHOR_ONLY_KINDS.iter().map(u32::to_string).collect()
 }
 
-fn bounded_limit(limit: i64) -> i64 {
+pub(crate) fn bounded_limit(limit: i64) -> i64 {
     limit.clamp(1, MAX_PAGE_SIZE)
 }
 

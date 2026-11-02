@@ -35,7 +35,7 @@ pub const LIST_MAX_LIMIT: i64 = 1000;
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
 /// the raw token (same pattern as API tokens in buzz-auth).
-fn hash_approval_token(token: &str) -> Vec<u8> {
+pub(crate) fn hash_approval_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
@@ -341,6 +341,32 @@ pub async fn upsert_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    upsert_workflow_tx(
+        &mut tx,
+        community_id,
+        id,
+        channel_id,
+        owner_pubkey,
+        name,
+        definition_json,
+        definition_hash,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upsert_workflow_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()> {
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -365,8 +391,6 @@ pub async fn upsert_workflow(
     .bind(definition_hash)
     .fetch_optional(tx.conn())
     .await?;
-    tx.commit().await?;
-
     if row.is_none() {
         return Err(DbError::AccessDenied(format!(
             "workflow {id} belongs to a different owner or channel"
@@ -869,6 +893,25 @@ pub async fn create_workflow_run(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let id = create_workflow_run_tx(
+        &mut tx,
+        community_id,
+        workflow_id,
+        trigger_event_id,
+        trigger_context,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(crate) async fn create_workflow_run_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_event_id: Option<&[u8]>,
+    trigger_context: Option<&serde_json::Value>,
+) -> Result<Uuid> {
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -885,8 +928,6 @@ pub async fn create_workflow_run(
     .bind(trigger_context)
     .execute(tx.conn())
     .await?;
-    tx.commit().await?;
-
     Ok(id)
 }
 
@@ -1221,6 +1262,71 @@ pub async fn update_approval_by_stored_hash(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let updated = update_approval_by_stored_hash_tx(
+        &mut tx,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
+/// Update an approval by stored token hash inside a caller-owned transaction.
+pub(crate) async fn update_approval_by_stored_hash_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+) -> Result<bool> {
+    update_approval_by_stored_hash_tx_inner(
+        tx,
+        community_id,
+        token_hash,
+        status,
+        approver_pubkey,
+        note,
+        false,
+    )
+    .await
+}
+
+/// Resolve an unexpired pending approval inside a command transaction.
+pub(crate) async fn resolve_approval_command_tx(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: &[u8],
+    note: Option<&str>,
+) -> Result<bool> {
+    update_approval_by_stored_hash_tx_inner(
+        tx,
+        community_id,
+        token_hash,
+        status,
+        Some(approver_pubkey),
+        note,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_approval_by_stored_hash_tx_inner(
+    tx: &mut crate::AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+    require_unexpired: bool,
+) -> Result<bool> {
     let status_str = status.to_string();
     let affected = sqlx::query(
         r#"
@@ -1230,7 +1336,10 @@ pub async fn update_approval_by_stored_hash(
             note            = $3,
             granted_at      = CASE WHEN $4 = 'granted' THEN NOW() ELSE granted_at END,
             denied_at       = CASE WHEN $5 = 'denied'  THEN NOW() ELSE denied_at  END
-        WHERE community_id = $6 AND token = $7 AND status = 'pending'
+        WHERE community_id = $6
+          AND token = $7
+          AND status = 'pending'
+          AND ($8 = FALSE OR expires_at >= NOW())
         "#,
     )
     .bind(&status_str)
@@ -1240,10 +1349,10 @@ pub async fn update_approval_by_stored_hash(
     .bind(&status_str) // for denied_at CASE
     .bind(community_id.as_uuid())
     .bind(token_hash)
+    .bind(require_unexpired)
     .execute(tx.conn())
     .await?
     .rows_affected();
-    tx.commit().await?;
 
     Ok(affected > 0)
 }
@@ -1372,6 +1481,135 @@ impl Db {
             trigger_context,
         )
         .await
+    }
+
+    /// Atomically persist a manual workflow-trigger command and create its run.
+    pub async fn execute_workflow_trigger_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        workflow_id: Uuid,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<crate::CommandExecution<Uuid>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_TRIGGER {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow trigger kind {}, got {}",
+                buzz_core::kind::KIND_WORKFLOW_TRIGGER,
+                event.kind.as_u16()
+            )));
+        }
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let (_, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            Some(channel_id),
+            None,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(crate::CommandExecution::Duplicate);
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+        let run_id = crate::workflow::create_workflow_run_tx(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(event.id.as_bytes()),
+            trigger_context,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(crate::CommandExecution::Applied(run_id))
+    }
+
+    /// Atomically replace a workflow definition event and upsert its workflow.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_workflow_definition_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        workflow_id: Uuid,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<crate::CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_WORKFLOW_DEF {
+            return Err(DbError::InvalidData(format!(
+                "expected workflow definition kind {}, got {}",
+                event.kind.as_u16(),
+                event.kind.as_u16()
+            )));
+        }
+        if event.pubkey.to_bytes().as_slice() != owner_pubkey {
+            return Err(DbError::InvalidData(
+                "workflow owner does not match event author".into(),
+            ));
+        }
+        let d_tag = crate::event::extract_d_tag(event)
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing d tag".into()))?;
+        let tagged_id = Uuid::parse_str(&d_tag)
+            .map_err(|_| DbError::InvalidData("workflow d tag is not a UUID".into()))?;
+        if tagged_id != workflow_id {
+            return Err(DbError::InvalidData(
+                "workflow id does not match event d tag".into(),
+            ));
+        }
+        let tagged_channel = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 2 && parts[0] == "h").then(|| parts[1].as_str())
+            })
+            .ok_or_else(|| DbError::InvalidData("workflow definition missing h tag".into()))?;
+        if tagged_channel != channel_id.to_string() {
+            return Err(DbError::InvalidData(
+                "workflow channel does not match event h tag".into(),
+            ));
+        }
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let replaced = self
+            .replace_parameterized_event_in_transaction(
+                &mut tx,
+                event,
+                &d_tag,
+                Some(channel_id),
+                crate::replaceable::ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        if replaced.status != crate::replaceable::ParameterizedReplaceStatus::Inserted {
+            tx.rollback().await?;
+            return Ok(crate::CommandExecution::Duplicate);
+        }
+        crate::workflow::upsert_workflow_tx(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(channel_id),
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(crate::CommandExecution::Applied(()))
     }
 
     /// Fetch a single workflow run, scoped to its community.
@@ -1519,6 +1757,98 @@ impl Db {
             note,
         )
         .await
+    }
+
+    /// Atomically persist an approval-grant command and resolve its gate.
+    pub async fn execute_approval_grant_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        token_hash: &[u8],
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<crate::CommandExecution<()>> {
+        self.execute_approval_command(
+            community_id,
+            event,
+            buzz_core::kind::KIND_APPROVAL_GRANT,
+            token_hash,
+            crate::workflow::ApprovalStatus::Granted,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Atomically persist an approval-deny command and resolve its gate.
+    pub async fn execute_approval_deny_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        token_hash: &[u8],
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<crate::CommandExecution<()>> {
+        self.execute_approval_command(
+            community_id,
+            event,
+            buzz_core::kind::KIND_APPROVAL_DENY,
+            token_hash,
+            crate::workflow::ApprovalStatus::Denied,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_approval_command(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        expected_kind: u32,
+        token_hash: &[u8],
+        status: crate::workflow::ApprovalStatus,
+        approver_pubkey: &[u8],
+        note: Option<&str>,
+    ) -> Result<crate::CommandExecution<()>> {
+        if u32::from(event.kind.as_u16()) != expected_kind {
+            return Err(DbError::InvalidData(format!(
+                "expected approval command kind {expected_kind}, got {}",
+                event.kind.as_u16()
+            )));
+        }
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let (_, inserted) =
+            crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, None, None).await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(crate::CommandExecution::Duplicate);
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, None).await?;
+        let updated = crate::workflow::resolve_approval_command_tx(
+            &mut tx,
+            community_id,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await?;
+        if !updated {
+            tx.rollback().await?;
+            return Err(DbError::Conflict(
+                "approval already acted on or not found".to_string(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(crate::CommandExecution::Applied(()))
     }
 }
 

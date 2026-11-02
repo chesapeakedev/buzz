@@ -527,7 +527,7 @@ pub(crate) async fn handle_connection(
 // Collapsing into a struct would just move the fields without reducing coupling.
 #[allow(clippy::too_many_arguments)]
 async fn handle_active_connection(
-    socket: WebSocket,
+    mut socket: WebSocket,
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
@@ -648,7 +648,7 @@ async fn handle_active_connection(
     .increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
-    if tx
+    if socket
         .send(WsMessage::Text(challenge_msg.into()))
         .await
         .is_err()

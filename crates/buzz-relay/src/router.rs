@@ -3,32 +3,28 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use axum::http::header::RETRY_AFTER;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
-    middleware,
+    middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{get, post, put},
     Router,
 };
 use serde_json::json;
 use tower::ServiceExt;
-use tower_http::classify::{
-    ClassifiedResponse, ClassifyResponse, NeverClassifyEos, ServerErrorsAsFailures,
-    ServerErrorsFailureClass, SharedClassifier,
-};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
-use crate::access::{AuthMethod, AuthResult};
 use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_response, relay_info_handler};
+use crate::nip11::{nip11_document, relay_info_handler};
 use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
@@ -72,8 +68,8 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// Off skips FI policy reads and enforcement. Shadow preserves optional-community
-// admission and enforces stored requirements. Enforce requires FI everywhere.
+// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
+// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -155,14 +151,6 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/internal/git/policy",
 ];
 
-fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
-    slot.method(AuthMethod::NipFi);
-    slot.finish(AuthResult::Denied(
-        crate::access::AuthReason::AuthorizationUnavailable,
-    ));
-    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
-}
-
 /// Middleware: full offline assertion guard for NIP-FI protected paths.
 ///
 /// Fires before any handler.  In Enforce mode, if the request path is not
@@ -183,93 +171,23 @@ fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Respo
 /// Only a cryptographically verified assertion reaches the handler; the
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
+///
+/// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
-    slot: crate::access::AccessSlot,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    if state.config.nip_fi.mode.is_off() || nip_fi_guard_exempts(&state, &request) {
-        return next.run(request).await;
-    }
-    if state.config.nip_fi.mode.denies_unconditionally() {
-        return nip_fi_unavailable(&slot);
-    }
-    let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
-        Ok(policy) => policy,
-        Err(response) if response.status() == StatusCode::NOT_FOUND => {
-            // The authoritative read found no serving policy. Let the route
-            // retain its legacy rejection (e.g. Git's credential challenge).
-            // The shared admission gate refuses this scope unconditionally;
-            // this is never an optional-policy fallback or a data admission.
-            let mode = state.config.nip_fi.mode;
-            let policy = crate::nip_fi_policy::Policy {
-                community_id: uuid::Uuid::nil(),
-                mode,
-                required: mode.enforces(),
-                stored_required: false,
-
-                mapped: false,
-            };
-            return crate::nip_fi_policy::with_policy(
-                policy,
-                nip_fi_assertion_guard_with_policy(state, slot, request, next, mode),
-            )
-            .await;
-        }
-        Err(response) => {
-            slot.method(AuthMethod::NipFi);
-            slot.finish(AuthResult::Denied(
-                crate::access::AuthReason::AuthorizationUnavailable,
-            ));
-            if state.config.nip_fi.mode.observes_only() {
-                crate::nip_fi_shadow::record_for(
-                    "http",
-                    crate::nip_fi_shadow::label(&Err(
-                        buzz_auth::DenialClass::AuthorizationUnavailable,
-                    )),
-                    Err(crate::nip_fi_shadow::WouldDeny::new(
-                        crate::nip_fi_shadow::Stage::Community,
-                        buzz_auth::DenialClass::AuthorizationUnavailable,
-                        crate::nip_fi_shadow::UNRESOLVED,
-                    )),
-                );
-            }
-            return response;
-        }
-    };
-    if policy.stored_required && state.nip_fi_deny_map.is_none() {
-        return nip_fi_unavailable(&slot);
-    }
-    crate::nip_fi_policy::with_policy(
-        policy,
-        nip_fi_assertion_guard_with_policy(state, slot, request, next, policy.mode),
-    )
-    .await
-}
-
-async fn nip_fi_assertion_guard_with_policy(
-    state: Arc<AppState>,
-    slot: crate::access::AccessSlot,
-    request: Request<Body>,
-    next: middleware::Next,
-    mode: buzz_auth::NipFiMode,
-) -> axum::response::Response {
-    if mode.is_off() {
+    let mode = state.config.nip_fi.mode;
+    // Off: fully transparent. [FI-INV-15]
+    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
         return next.run(request).await;
     }
 
     // DenyProtected: unconditional 503 regardless of assertion presence.
     // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
-    // Refusals here end the request before any handler, so the guard logs
-    // them; shadow mode refuses nothing and logs nothing.
     if mode.denies_unconditionally() {
-        let denial = http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
-        slot.method(AuthMethod::NipFi);
-        slot.finish(AuthResult::Denied(
-            crate::access::AuthReason::AuthorizationUnavailable,
-        ));
-        return denial;
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
     }
 
     // Shadow resolves exactly as enforce does; enforce hands the binding to
@@ -282,57 +200,16 @@ async fn nip_fi_assertion_guard_with_policy(
     // rechecks the same deadline enforce does.
     if mode.observes_only() {
         let label = crate::nip_fi_shadow::label(&community);
-        let verdict = verdict.map_err(|(would_deny, _)| would_deny);
         let run = crate::nip_fi_http::with_resolved_community(community, next.run(request));
         return crate::nip_fi_shadow::observe_guard(label, verdict, run).await;
     }
     match (verdict, community) {
         (Ok(()), Ok(community)) => {
-            let run = crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request));
-            crate::nip_fi_http::with_enforce_verdict(run).await
+            crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
         }
-        (Err((deny, result)), community) => {
-            let label = crate::nip_fi_shadow::label(&community);
-            crate::nip_fi_shadow::record_denial("http", label, deny);
-            let denial = if community.is_err() {
-                crate::nip_fi_core::community_denial(
-                    state.nip_fi_communities(),
-                    request.headers(),
-                    deny.class,
-                )
-            } else {
-                http_denial(deny.class)
-            };
-            slot.method(AuthMethod::NipFi);
-            slot.finish(guard_result(&request, result));
-            denial
+        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
+            http_denial(class)
         }
-        (Ok(()), Err(class)) => {
-            let denial = crate::nip_fi_core::community_denial(
-                state.nip_fi_communities(),
-                request.headers(),
-                class,
-            );
-            slot.method(AuthMethod::NipFi);
-            slot.finish(AuthResult::Failed("community_unresolved"));
-            denial
-        }
-    }
-}
-
-/// A git request with no credentials at all is git's normal first step,
-/// asking for the challenge, so it is logged as `challenged`, not a failure.
-fn guard_result(request: &Request<Body>, result: AuthResult) -> AuthResult {
-    let bare = !request
-        .headers()
-        .contains_key(axum::http::header::AUTHORIZATION);
-    match result {
-        AuthResult::Failed("assertion_missing")
-            if bare && request.uri().path().starts_with("/git/") =>
-        {
-            AuthResult::Challenged
-        }
-        other => other,
     }
 }
 
@@ -347,15 +224,12 @@ fn nip_fi_guard_steps(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     community: Result<&buzz_auth::CommunityBinding, &buzz_auth::DenialClass>,
-) -> Result<(), (crate::nip_fi_shadow::WouldDeny, AuthResult)> {
+) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
     let community = community.map_err(|class| {
-        (
-            crate::nip_fi_shadow::WouldDeny::new(
-                crate::nip_fi_shadow::Stage::Community,
-                *class,
-                crate::nip_fi_shadow::UNRESOLVED,
-            ),
-            AuthResult::Failed("community_unresolved"),
+        crate::nip_fi_shadow::WouldDeny::new(
+            crate::nip_fi_shadow::Stage::Community,
+            *class,
+            crate::nip_fi_shadow::UNRESOLVED,
         )
     })?;
     crate::nip_fi_core::evaluate_attached_assertion(
@@ -364,12 +238,7 @@ fn nip_fi_guard_steps(
         state.nip_fi_verifier.as_deref(),
     )
     .map(drop)
-    .map_err(|rejection| {
-        (
-            crate::nip_fi_shadow::WouldDeny::assertion(rejection),
-            rejection.auth_result(),
-        )
-    })
+    .map_err(crate::nip_fi_shadow::WouldDeny::assertion)
 }
 
 /// Paths the assertion guard never checks.
@@ -412,6 +281,18 @@ fn nip_fi_guard_exempts(state: &AppState, request: &Request<Body>) -> bool {
     // exempt and stays protected.
     // [FI-TRACE-AUTHORITY-UNIFORM]
     is_admin_spa_path(path) && api::admin::is_admin_host(state, request.headers())
+}
+
+async fn add_retry_after_to_unavailable(request: Request<Body>, next: Next) -> impl IntoResponse {
+    let mut response = next.run(request).await;
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+        && !response.headers().contains_key(RETRY_AFTER)
+    {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -512,11 +393,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/operator/communities/nip-fi-binding",
             get(api::operator::community_nip_fi_binding),
-        )
-        .route(
-            "/operator/communities/nip-fi-policy",
-            get(api::operator::community_nip_fi_policy_status)
-                .post(api::operator::set_community_nip_fi_policy),
         )
         .route(
             "/operator/communities/transfer",
@@ -628,54 +504,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             nip_fi_assertion_guard,
         ))
         .layer(middleware::from_fn(track_metrics))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::access::http_access_log,
-        ))
+        .layer(middleware::from_fn(add_retry_after_to_unavailable))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
-        // Outside all rejection-producing layers, including the API body limit.
-        .layer(middleware::from_fn(api::operator::no_store_policy_response))
 }
 
-type MakeHttpSpan = fn(&Request<Body>) -> tracing::Span;
-
-fn http_trace_layer() -> TraceLayer<SharedClassifier<RelayResponseClassifier>, MakeHttpSpan> {
-    TraceLayer::new(SharedClassifier::new(RelayResponseClassifier))
-        .make_span_with(make_http_span as MakeHttpSpan)
-}
-
-/// tower-http's server-errors-as-failures rule, except that an enforce
-/// denial for a Host that maps to no community is not a failure. Probes of
-/// unserved hosts (for example an external scanner) would otherwise log one
-/// `tower_http::trace::on_failure` error per request.
-#[derive(Clone, Copy, Debug)]
-struct RelayResponseClassifier;
-
-impl ClassifyResponse for RelayResponseClassifier {
-    type FailureClass = ServerErrorsFailureClass;
-    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
-
-    fn classify_response<B>(
-        self,
-        res: &axum::http::Response<B>,
-    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
-        if res
-            .extensions()
-            .get::<crate::nip_fi_core::UnresolvedHost>()
-            .is_some()
-        {
-            return ClassifiedResponse::Ready(Ok(()));
-        }
-        ServerErrorsAsFailures::new().classify_response(res)
-    }
-
-    fn classify_error<E>(self, error: &E) -> Self::FailureClass
-    where
-        E: std::fmt::Display + 'static,
-    {
-        ServerErrorsAsFailures::new().classify_error(error)
-    }
+fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
+    TraceLayer::new_for_http().make_span_with(make_http_span as fn(&Request<Body>) -> tracing::Span)
 }
 
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
@@ -685,23 +520,6 @@ fn make_http_span(request: &Request<Body>) -> tracing::Span {
         otel.kind = "server",
         http.request.method = %request.method(),
     )
-}
-
-/// Whether the SPA fallback answers `req` with a document or static file
-/// (whatever the status), under the same host and config conditions it
-/// serves them. Only meaningful for a request that matched no route.
-pub(crate) fn is_document_request(state: &AppState, req: &Request<Body>) -> bool {
-    let path = req.uri().path();
-    if api::admin::is_admin_host(state, req.headers()) {
-        let admin_bundle = state
-            .config
-            .admin
-            .as_ref()
-            .is_some_and(|config| config.web_dir.is_some());
-        return admin_bundle && (is_admin_static_path(path) || is_admin_spa_path(path));
-    }
-    state.config.web_dir.is_some()
-        && (path.starts_with("/assets/") || should_serve_spa(path, state.config.serve_git_web_gui))
 }
 
 fn is_admin_spa_path(path: &str) -> bool {
@@ -788,7 +606,6 @@ pub fn build_health_router(state: Arc<AppState>) -> Router {
 /// Content-negotiated: NIP-11 JSON for plain HTTP, WebSocket upgrade otherwise.
 async fn nip11_or_ws_handler(
     State(state): State<Arc<AppState>>,
-    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
@@ -797,7 +614,6 @@ async fn nip11_or_ws_handler(
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0)
         .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
-    let client_ip = crate::access::client_ip(&headers, state.config.client_ip_header.as_ref());
 
     let accept = headers
         .get("accept")
@@ -817,7 +633,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return nip11_response(&state, raw_host).await;
+        return Json(nip11_document(&state, raw_host).await).into_response();
     }
 
     // NIP-FI assertion gate at WebSocket upgrade.
@@ -851,13 +667,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (
-        upgrade_checked,
-        mut nip_fi_assertion,
-        shadow_assertion,
-        mut nip_fi_deadline,
-        mut shadow_line,
-    ) = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -882,10 +692,10 @@ async fn nip11_or_ws_handler(
         if is_h1_ws_upgrade || is_h2_ws_connect {
             use crate::nip_fi_session::NipFiWsRoute::Root;
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-            let mode = crate::nip_fi_policy::mode(&state, &headers).await;
+            let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = state.nip_fi_communities();
-            match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
+            match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
                 .await
                 .into_assertions()
             {
@@ -921,16 +731,11 @@ async fn nip11_or_ws_handler(
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
             if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
-                crate::nip_fi_shadow::record_denial(
-                    "ws",
-                    crate::nip_fi_shadow::enforce_label(&state, raw_host),
-                    crate::nip_fi_shadow::DENY_SET.by(assertion.asserted_key()),
-                );
                 return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
     }
-    let mut shadow_assertion = shadow_assertion.filter(|(a, c)| {
+    let shadow_assertion = shadow_assertion.filter(|(a, c)| {
         !crate::nip_fi_shadow_session::upgrade_denied(&state, &c.shadow_label(), a)
     });
 
@@ -938,54 +743,28 @@ async fn nip11_or_ws_handler(
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
     // lookup failure fails closed with a generic rejection — never a default
-    // tenant. NIP-11 above resolves host policy independently and fails closed
-    // when that policy cannot be loaded.
+    // tenant. NIP-11 above is served before binding and stays fail-open: an
+    // unmapped host still gets the document (with host-scoped fields like
+    // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
-    {
-        Ok(binding) => binding,
-        Err(response) => return response,
-    };
-    // An initially missing/optional host may have become required while the
-    // early gate awaited. Only the policy read with the bound row authorizes
-    // this socket; a shadow observation is not an enforced admission.
-    if upgrade_checked
-        && bound_mode.restricts()
-        && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
-    {
-        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
-            &slot,
-            crate::nip_fi_session::NipFiWsRoute::Root,
-            &headers,
-            state.nip_fi_communities(),
-            state.nip_fi_verifier.as_deref(),
-            bound_mode,
-        )
-        .await
-        .into_assertions()
-        {
-            Ok(assertions) => {
-                (
-                    nip_fi_assertion,
-                    shadow_assertion,
-                    nip_fi_deadline,
-                    shadow_line,
-                ) = assertions
-            }
-            Err(response) => return (*response).into_response(),
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            // Generic rejection: do not distinguish "unmapped" from "lookup
+            // error", and never echo the host, so an unauthenticated caller
+            // cannot probe which communities exist on this deployment.
+            return (
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+                .into_response();
         }
-    }
+    };
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
     if let Err(class) = nip_fi_deadline.check() {
-        crate::nip_fi_upgrade::record_stale(
-            crate::nip_fi_session::NipFiWsRoute::Root,
-            crate::nip_fi_shadow::enforce_label(&state, raw_host),
-            nip_fi_assertion.as_ref(),
-            class,
-        );
         return http_denial(class).into_response();
     }
     let shadow_assertion = crate::nip_fi_upgrade::observe_deadline(
@@ -1011,11 +790,11 @@ async fn nip11_or_ws_handler(
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-                let mode = bound_mode;
+                let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = state.nip_fi_communities();
                 // Resolved after every await of this upgrade: nothing to re-check.
-                match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
+                match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
                     .await
                     .into_assertions()
                 {
@@ -1057,7 +836,6 @@ async fn nip11_or_ws_handler(
                         socket,
                         state,
                         addr,
-                        client_ip,
                         tenant,
                         nip_fi_assertion,
                         shadow,
@@ -1080,7 +858,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS upgrade request — serve NIP-11 as fallback.
-            nip11_response(&state, raw_host).await
+            Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
 }
@@ -1320,7 +1098,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &buzz_pubsub::RedisConnection,
+            _redis_pool: &deadpool_redis::Pool,
         ) -> DependencyReport {
             self.evaluations_started.fetch_add(1, Ordering::SeqCst);
             self.evaluations
@@ -1396,7 +1174,9 @@ mod tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1410,7 +1190,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (mut state, _audit_shutdown) = AppState::new(
+        let (state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -1422,7 +1202,6 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
-        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -1442,7 +1221,9 @@ mod tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1597,7 +1378,7 @@ mod tests {
         let state = readiness_state(evaluator).await;
         state
             .dependency_diagnostics
-            .sample(&state.db, &state.redis_pool)
+            .sample(&state.db, state.redis_pool.as_ref().expect("redis pool"))
             .await;
 
         let (status, payload) = status_request(build_health_router(state)).await;
@@ -1652,7 +1433,7 @@ mod tests {
         // Once the sampler has a report, and only then, the endpoint serves it.
         state
             .dependency_diagnostics
-            .sample(&state.db, &state.redis_pool)
+            .sample(&state.db, state.redis_pool.as_ref().expect("redis pool"))
             .await;
         let (status, payload) = status_request(health).await;
 
@@ -1702,7 +1483,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &buzz_pubsub::RedisConnection,
+            _redis_pool: &deadpool_redis::Pool,
         ) -> DependencyReport {
             self.started.fetch_add(1, Ordering::SeqCst);
             let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1907,7 +1688,7 @@ mod tests {
                 // endpoint only reads what the sampler cached.
                 state
                     .dependency_diagnostics
-                    .sample(&state.db, &state.redis_pool)
+                    .sample(&state.db, state.redis_pool.as_ref().expect("redis pool"))
                     .await;
                 let (status, payload) = status_request(health.clone()).await;
                 assert_eq!(status, StatusCode::OK);
@@ -1977,7 +1758,7 @@ mod tests {
                     evaluator.push(dependency_report(postgres, redis, deletion_catalog));
                     state
                         .dependency_diagnostics
-                        .sample(&state.db, &state.redis_pool)
+                        .sample(&state.db, state.redis_pool.as_ref().expect("redis pool"))
                         .await;
                     let (status, degraded) = status_request(health.clone()).await;
                     assert_eq!(status, StatusCode::OK);
@@ -2393,92 +2174,6 @@ mod tests {
         nip_fi_state(buzz_auth::NipFiMode::Off).await
     }
 
-    #[tokio::test]
-    async fn git_policy_guards_preserve_unmatched_routes() {
-        use axum::{body::to_bytes, extract::ConnectInfo, http::Request};
-        use std::net::SocketAddr;
-        use tower::ServiceExt;
-
-        let app = build_router(nip_fi_off_state().await);
-        let localhost: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let remote: SocketAddr = "192.0.2.1:12345".parse().unwrap();
-        // Exercise the merged production router, including its default fallback.
-        for peer in [None, Some(remote), Some(localhost)] {
-            for method in ["GET", "POST"] {
-                for path in ["/operator/communities/nip-fi-upgrade", "/unknown-route"] {
-                    let mut req = Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .header("content-type", "application/json")
-                        .header("content-length", 1024 * 1024 + 1)
-                        .body(Body::from(vec![b' '; 1024 * 1024 + 1]))
-                        .unwrap();
-                    if let Some(peer) = peer {
-                        req.extensions_mut().insert(ConnectInfo(peer));
-                    }
-                    let res = app.clone().oneshot(req).await.unwrap();
-                    let status = res.status();
-                    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-                    assert_eq!(
-                        status,
-                        StatusCode::NOT_FOUND,
-                        "{method} {path}, peer={peer:?}, body={body:?}"
-                    );
-                }
-            }
-        }
-        for (peer, size, expected) in [
-            (None, 2, StatusCode::FORBIDDEN),
-            (Some(remote), 1024 * 1024 + 1, StatusCode::FORBIDDEN),
-            (
-                Some(localhost),
-                1024 * 1024 + 1,
-                StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-            // A small JSON object reaches the real handler's JSON extractor.
-            (Some(localhost), 2, StatusCode::UNPROCESSABLE_ENTITY),
-        ] {
-            let mut payload = b"{}".to_vec();
-            payload.resize(size, b' ');
-            let mut req = Request::builder()
-                .method("POST")
-                .uri("/internal/git/policy")
-                .header("content-type", "application/json")
-                .header("content-length", size)
-                .body(Body::from(payload))
-                .unwrap();
-            if let Some(peer) = peer {
-                req.extensions_mut().insert(ConnectInfo(peer));
-            }
-            let res = app.clone().oneshot(req).await.unwrap();
-            let status = res.status();
-            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-            assert_eq!(
-                status, expected,
-                "peer={peer:?}, size={size}, body={body:?}"
-            );
-            if expected == StatusCode::FORBIDDEN {
-                assert_eq!(&body[..], b"internal endpoint: localhost only");
-            }
-        }
-        // The path's method fallback remains protected, too.
-        for (peer, expected) in [
-            (None, StatusCode::FORBIDDEN),
-            (Some(remote), StatusCode::FORBIDDEN),
-            (Some(localhost), StatusCode::METHOD_NOT_ALLOWED),
-        ] {
-            let mut req = Request::builder()
-                .uri("/internal/git/policy")
-                .body(Body::empty())
-                .unwrap();
-            if let Some(peer) = peer {
-                req.extensions_mut().insert(ConnectInfo(peer));
-            }
-            let res = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(res.status(), expected, "GET policy, peer={peer:?}");
-        }
-    }
-
     async fn nip_fi_state(mode: buzz_auth::NipFiMode) -> Arc<AppState> {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::IssuerRegistry;
@@ -2512,7 +2207,9 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2526,7 +2223,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (mut state, _audit_shutdown) = AppState::new(
+        let (state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -2538,7 +2235,6 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
-        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -2876,9 +2572,6 @@ mod tests {
         );
     }
 
-    #[path = "policy_sweep_postgres_tests.rs"]
-    mod policy_sweep;
-
     // ── F6: document fallback (postgres-only) ───────────────────────────────────
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
@@ -3114,16 +2807,17 @@ mod tests {
                 );
                 // Real Redis so admission reaches the handler, not the
                 // fail-closed rate limiter.
-                let redis = buzz_pubsub::redis_connection(
-                    &std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+                let redis = deadpool_redis::Config::from_url(
+                    std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
                 )
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .unwrap();
                 state.admission_rate_limiter = Arc::new(
                     buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis.clone()),
                 );
                 state.nip98_replay =
                     Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis.clone()));
-                state.redis_pool = redis;
+                state.redis_pool = Some(redis);
                 state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(key)))));
                 states.push(Arc::new(state));
             }
@@ -3280,7 +2974,7 @@ mod tests {
             }
         }
 
-        pub(super) async fn real_db_state() -> Option<Arc<AppState>> {
+        async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
 
@@ -3289,7 +2983,9 @@ mod tests {
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config.database_url = db_url;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3872,7 +3568,9 @@ mod tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3971,7 +3669,9 @@ mod tests {
 
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3986,7 +3686,7 @@ mod tests {
             ));
             let media_storage =
                 buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (mut state, _audit_shutdown) = AppState::new(
+            let (state, _audit_shutdown) = AppState::new(
                 config,
                 db,
                 redis_pool,
@@ -3998,7 +3698,6 @@ mod tests {
                 nostr::Keys::generate(),
                 media_storage,
             );
-            state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
             Arc::new(state)
         }
 
@@ -4373,7 +4072,9 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4446,7 +4147,6 @@ mod tests {
         );
         state.nip_fi_deny_map = Some(deny_map);
 
-        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -4749,26 +4449,6 @@ mod tests {
         }
     }
 
-    // The guard records its refusal once, as `absent`: no handler runs to
-    // prove a key. Mutation: dropping the guard's `record_denial` → RED.
-    #[tokio::test(flavor = "current_thread")]
-    async fn enforce_guard_denial_is_recorded_once() {
-        use crate::nip_fi_shadow::tests::enforce_records;
-        let (state, _verifier) =
-            guard_state_with(Err(buzz_auth::VerifierError::InvalidSignatureOrClaims)).await;
-        let (_resp, lines, counts) = enforce_records(nip_fi_gate_response(
-            state,
-            GUARD_PROTECTED_PATH,
-            Some("Nostr-Federated-Identity"),
-            Some("Bearer a.b.c"),
-        ))
-        .await;
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("pubkey=\"absent\""), "{lines:?}");
-        assert_eq!(counts.len(), 1, "{counts:?}");
-        assert_eq!(counts[0][..3], ["http", "assertion", "rejected"]);
-    }
-
     // Pins ruling: in enforce, an unmapped Host is 503 at the router guard
     // (protected HTTP) and at the upgrade (root and audio WS) — with or
     // without an assertion, and before any verification.
@@ -4794,12 +4474,6 @@ mod tests {
                     token,
                 )
                 .await;
-                assert!(
-                    resp.extensions()
-                        .get::<crate::nip_fi_core::UnresolvedHost>()
-                        .is_some(),
-                    "unmapped-host denial must be marked for the trace classifier: {path} token={token:?}"
-                );
                 assert_eq!(
                     status_and_body(resp).await,
                     (
@@ -4811,60 +4485,6 @@ mod tests {
                 assert_eq!(verifier.calls(), 0, "{path} token={token:?}");
             }
         }
-    }
-
-    // Pins: a 503 from a mapped Host (here the verifier's key source is
-    // unavailable) is not marked as an unresolved Host, so the trace layer
-    // still logs it as a server failure.
-    // Mutation: marking every guard denial hides this dependency outage.
-    #[tokio::test]
-    async fn nip_fi_mapped_host_dependency_503_is_not_marked_unresolved() {
-        let (state, _verifier) =
-            guard_state_with(Err(buzz_auth::VerifierError::KeySourceUnavailable)).await;
-        let resp = nip_fi_gate_response(
-            state,
-            GUARD_PROTECTED_PATH,
-            Some("Nostr-Federated-Identity"),
-            Some("Bearer a.b.c"),
-        )
-        .await;
-        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert!(resp
-            .extensions()
-            .get::<crate::nip_fi_core::UnresolvedHost>()
-            .is_none());
-        assert!(matches!(
-            RelayResponseClassifier.classify_response(&resp),
-            ClassifiedResponse::Ready(Err(_))
-        ));
-    }
-
-    // Pins: the trace classifier treats a marked unresolved-Host denial as
-    // success and keeps tower-http's rule (5xx fails) for everything else.
-    // Mutation: dropping the extension check logs every scanner probe of an
-    // unserved Host as an `on_failure` error.
-    #[test]
-    fn relay_response_classifier_skips_only_unresolved_host_denials() {
-        use buzz_auth::DenialClass;
-        let classify = |resp: &axum::response::Response| {
-            matches!(
-                RelayResponseClassifier.classify_response(resp),
-                ClassifiedResponse::Ready(Ok(()))
-            )
-        };
-        let mut marked = http_denial(DenialClass::AuthorizationUnavailable);
-        marked
-            .extensions_mut()
-            .insert(crate::nip_fi_core::UnresolvedHost);
-        assert!(classify(&marked));
-        assert!(!classify(&http_denial(
-            DenialClass::AuthorizationUnavailable
-        )));
-        assert!(!classify(
-            &StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        ));
-        assert!(classify(&StatusCode::OK.into_response()));
-        assert!(classify(&http_denial(DenialClass::MissingEvidence)));
     }
 
     // Pins: Off mode never consults the community map. With the production
