@@ -4050,18 +4050,11 @@ mod tests {
         async fn ephemeral_gates_fill_caches_on_miss() {
             let (state, tenant, user) = unrestricted_fixture().await;
             ok_frame(&state, &tenant, &user, typing_event(&user)).await;
-            assert_eq!(
-                state
-                    .community_active
-                    .entry(&tenant.community())
-                    .map(|(active, _)| active),
-                Some(true)
-            );
+            assert_eq!(state.community_active.get(&tenant.community()), Some(true));
             assert_eq!(
                 state
                     .restriction_cache
-                    .entry(&(tenant.community(), user.public_key().to_bytes().to_vec()))
-                    .map(|(state, _)| state),
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -4107,9 +4100,7 @@ mod tests {
                     .checked_sub(std::time::Duration::from_secs(secs))
                     .expect("instant in the past")
             };
-            state
-                .restriction_cache
-                .seed_read_at(key.clone(), banned.clone(), aged(9));
+            state.seed_restriction(key.clone(), banned.clone());
             let frame =
                 ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
             assert!(
@@ -4117,7 +4108,7 @@ mod tests {
                 "a 9 s old cached ban must still refuse a stored write; got {frame}"
             );
 
-            state.restriction_cache.seed_read_at(key, banned, aged(10));
+            state.seed_restriction(key, banned);
             let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
                 frame.contains(",true,"),

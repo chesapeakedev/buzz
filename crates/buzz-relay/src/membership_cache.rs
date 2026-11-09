@@ -25,7 +25,7 @@ pub(crate) const MAX_MEMBERSHIPS: usize = 16_384;
 const BULK_USERS: usize = 64;
 
 /// Oversized users retain authoritative point checks, never a truncated set.
-enum Memberships {
+pub(crate) enum Memberships {
     Ids(Box<[Uuid]>),
     PointChecks,
 }
@@ -64,7 +64,7 @@ pub(crate) struct Members {
 /// The snapshot is immutable. Replacing this value through Moka updates its
 /// weight; the shared gate coordinates loads without holding their payload.
 #[derive(Clone)]
-struct Entry {
+pub(crate) struct Entry {
     gate: Arc<Mutex<()>>,
     snapshot: Option<Arc<Snapshot>>,
 }
@@ -96,7 +96,7 @@ impl Entry {
         u32::try_from(payload.saturating_add(overhead)).unwrap_or(u32::MAX)
     }
 
-    fn fresh(&self) -> Option<&Memberships> {
+    pub(crate) fn fresh(&self) -> Option<&Memberships> {
         self.snapshot
             .as_deref()
             .filter(|s| s.read_at.elapsed() < MAX_AGE)
@@ -109,7 +109,7 @@ impl Entry {
 /// original request, but can only publish while its gate is still current.
 /// No database work or async waiting happens under the publication lock.
 pub(crate) struct MembershipCache {
-    entries: moka::sync::Cache<Key, Entry>,
+    pub(crate) entries: moka::sync::Cache<Key, Entry>,
     publication: PublicationMutex<()>,
     wait: Duration,
 }
@@ -341,8 +341,23 @@ impl MembershipCache {
         }
     }
 
-    /// Seed one membership in a test's synthetic snapshot.
-    #[cfg(test)]
+    /// Compatibility point-cache read used by older relay call sites.
+    pub(crate) fn get(&self, key: &(CommunityId, Uuid, Vec<u8>)) -> Option<bool> {
+        self.cached_member(key)
+    }
+
+    /// Compatibility point-cache insertion used by older relay call sites.
+    pub(crate) fn insert(&self, key: (CommunityId, Uuid, Vec<u8>), member: bool) {
+        self.seed_member(key, member);
+    }
+
+    /// Invalidate every membership snapshot.
+    pub(crate) fn invalidate_all(&self) {
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        self.entries.invalidate_all();
+    }
+
+    /// Seed one membership in a synthetic snapshot.
     pub(crate) fn seed_member(&self, key: (CommunityId, Uuid, Vec<u8>), member: bool) {
         let (community, channel, pubkey) = key;
         let key = (community, pubkey);
@@ -371,7 +386,6 @@ impl MembershipCache {
         );
     }
 
-    #[cfg(test)]
     pub(crate) fn cached_member(&self, key: &(CommunityId, Uuid, Vec<u8>)) -> Option<bool> {
         Self::answer(&self.entries.get(&(key.0, key.2.clone()))?, key.1).flatten()
     }

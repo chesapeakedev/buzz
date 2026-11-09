@@ -28,7 +28,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_document, nip11_response, relay_info_handler};
+use crate::nip11::{nip11_response, relay_info_handler};
 use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
@@ -817,7 +817,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return axum::Json(nip11_document(&state, raw_host).await).into_response();
+        return nip11_response(&state, raw_host).await;
     }
 
     // NIP-FI assertion gate at WebSocket upgrade.
@@ -1597,7 +1597,7 @@ mod tests {
         let state = readiness_state(evaluator).await;
         state
             .dependency_diagnostics
-            .sample(&state.db, &state.redis_pool)
+            .sample(&state.db, &state.redis_command)
             .await;
 
         let (status, payload) = status_request(build_health_router(state)).await;
@@ -1652,7 +1652,7 @@ mod tests {
         // Once the sampler has a report, and only then, the endpoint serves it.
         state
             .dependency_diagnostics
-            .sample(&state.db, &state.redis_pool)
+            .sample(&state.db, &state.redis_command)
             .await;
         let (status, payload) = status_request(health).await;
 
@@ -1907,7 +1907,7 @@ mod tests {
                 // endpoint only reads what the sampler cached.
                 state
                     .dependency_diagnostics
-                    .sample(&state.db, &state.redis_pool)
+                    .sample(&state.db, &state.redis_command)
                     .await;
                 let (status, payload) = status_request(health.clone()).await;
                 assert_eq!(status, StatusCode::OK);
@@ -1977,7 +1977,7 @@ mod tests {
                     evaluator.push(dependency_report(postgres, redis, deletion_catalog));
                     state
                         .dependency_diagnostics
-                        .sample(&state.db, &state.redis_pool)
+                        .sample(&state.db, &state.redis_command)
                         .await;
                     let (status, degraded) = status_request(health.clone()).await;
                     assert_eq!(status, StatusCode::OK);

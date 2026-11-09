@@ -1376,7 +1376,7 @@ pub struct AppState {
     /// Membership cache: (community_id, channel_id, pubkey_bytes) → is_member.
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
-    pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
+    pub membership_cache: Arc<crate::membership_cache::MembershipCache>,
     /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
     /// channels the pubkey is an active member of. Short TTL (10s) —
     /// invalidated on membership changes and community-wide channel changes.
@@ -1778,13 +1778,9 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(60))
                     .build(),
             ),
-            membership_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .support_invalidation_closures()
-                    .build(),
-            ),
+            membership_cache: Arc::new(crate::membership_cache::MembershipCache::new(
+                std::time::Duration::from_secs(1),
+            )),
             member_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -2049,6 +2045,11 @@ impl AppState {
         }
     }
 
+    /// Whether all required NIP-FI admission dependencies are available.
+    pub fn nip_fi_required_admission_ready(&self) -> bool {
+        crate::nip_fi_policy::required_dependencies_ready(self)
+    }
+
     /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
     /// Errors are not cached.
     pub async fn is_serving_active_cached(
@@ -2131,8 +2132,7 @@ impl AppState {
         channel_id: Uuid,
         pubkey: &[u8],
     ) {
-        self.membership_cache
-            .invalidate(&(community_id, channel_id, pubkey.to_vec()));
+        self.membership_cache.invalidate(community_id, pubkey);
         self.member_channels_cache
             .invalidate(&(community_id, pubkey.to_vec()));
     }
@@ -2191,18 +2191,7 @@ impl AppState {
 
     /// Local-only channel-deleted drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_channel_deleted_local(&self, community_id: CommunityId) {
-        if let Err(error) =
-            self.membership_cache
-                .invalidate_entries_if(move |(entry_community, _, _), _| {
-                    *entry_community == community_id
-                })
-        {
-            tracing::error!(
-                ?error,
-                "community-scoped membership invalidation unavailable; falling back to full invalidation"
-            );
-            self.membership_cache.invalidate_all();
-        }
+        self.membership_cache.invalidate_community(community_id);
         self.invalidate_all_accessible_channels_local(community_id);
         if let Err(error) = self
             .channel_visibility_cache
@@ -3844,6 +3833,7 @@ pub(crate) mod tests {
             terminal_ctrl_tx,
             cancel: cancel.clone(),
             backpressure_count: Arc::clone(&bp),
+            refusal_budget: Default::default(),
             grace_limit: 3,
             nip_fi_assertion: None,
             session_deadline: None,

@@ -1494,7 +1494,7 @@ mod postgres_tests {
             .await
             .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
-                state.restriction_cache.entry(&key).map(|(state, _)| state),
+                state.restriction_cache.get(&key),
                 None,
                 "kind {} must drop the cached row",
                 event.kind.as_u16()

@@ -4002,7 +4002,9 @@ mod postgres_tests {
     /// client retry-loop against an authorization decision.
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
-        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned(
+            super::super::auth::BanSource::Own,
+        ));
         assert!(matches!(
             mapped,
             IngestError::Ban {
@@ -7579,7 +7581,7 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let crate::api::relay_members::MembershipRefusal::Api((status, body)) =
+            let crate::api::relay_members::MembershipRefusal::Api(_, (status, body)) =
                 crate::api::relay_members::enforce_relay_membership(
                     &state,
                     &tenant,

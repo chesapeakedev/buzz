@@ -24,6 +24,12 @@ pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayInfo {
+    /// Opt-in host-bound signed compact membership discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_snapshot: Option<serde_json::Value>,
+    /// Opt-in host-bound public membership discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_public: Option<serde_json::Value>,
     /// Human-readable relay name.
     pub name: String,
     /// Human-readable relay description.
@@ -283,6 +289,8 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            membership_snapshot: None,
+            membership_public: None,
             buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
@@ -323,12 +331,12 @@ impl RelayInfo {
 pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
     headers: axum::http::HeaderMap,
-) -> axum::response::Json<RelayInfo> {
+) -> axum::response::Response {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    axum::response::Json(nip11_document(&state, raw_host).await)
+    nip11_response(&state, raw_host).await
 }
 
 /// Return the NIP-11 document for the host-bound fallback route.
@@ -336,7 +344,15 @@ pub(crate) async fn nip11_response(
     state: &std::sync::Arc<crate::state::AppState>,
     raw_host: &str,
 ) -> axum::response::Response {
-    axum::response::Json(nip11_document(state, raw_host).await).into_response()
+    let mut response = match nip11_document(state, raw_host).await {
+        Ok(document) => axum::Json(document).into_response(),
+        Err(response) => response,
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 fn push_descriptor(
@@ -387,7 +403,20 @@ fn push_descriptor(
 /// stays a pre-derived scalar: [`nip11_facts`] (config + keypair) plus the
 /// host-scoped workspace icon. Optional provider capabilities are passed as
 /// config-derived scalar identifiers; no provider credential enters NIP-11.
-pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
+#[allow(clippy::result_large_err)]
+pub(crate) async fn nip11_document(
+    state: &crate::state::AppState,
+    raw_host: &str,
+) -> Result<RelayInfo, axum::response::Response> {
+    crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+                .into_response()
+        })?;
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
@@ -408,6 +437,26 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     }
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if state.config.membership_snapshot_enabled {
+            info.membership_snapshot = Some(serde_json::json!({
+                "version": 1,
+                "community_id": tenant.community().as_uuid(),
+                "pubkey": state.relay_keypair.public_key().to_hex(),
+                "kind": buzz_core::kind::KIND_MEMBERSHIP_SNAPSHOT,
+                "max_channels": buzz_db::membership_snapshot::MAX_CHANNELS,
+                "max_response_bytes": buzz_db::membership_snapshot::MAX_RESPONSE_BYTES,
+            }));
+        }
+        if state.config.membership_public_enabled {
+            info.membership_public = Some(serde_json::json!({
+                "version": 1,
+                "community_id": tenant.community().as_uuid(),
+                "pubkey": state.relay_keypair.public_key().to_hex(),
+                "kind": buzz_core::kind::KIND_MEMBERSHIP_PUBLIC,
+                "max_channels": buzz_db::membership_snapshot::MAX_CHANNELS,
+                "max_response_bytes": buzz_db::membership_snapshot::MAX_RESPONSE_BYTES,
+            }));
+        }
         if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;
@@ -452,7 +501,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
             .push("buzz-push-v1".to_string());
         info.push = Some(push);
     }
-    info
+    Ok(info)
 }
 
 /// Fetches the workspace icon for the community bound to `raw_host`, as the
@@ -557,8 +606,12 @@ mod tests {
             config.nip_fi.mode = mode;
             state.config = std::sync::Arc::new(config);
             docs.push(
-                serde_json::to_string(&super::nip11_document(&state, "relay.example").await)
-                    .unwrap(),
+                serde_json::to_string(
+                    &super::nip11_document(&state, "relay.example")
+                        .await
+                        .unwrap(),
+                )
+                .unwrap(),
             );
         }
         assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");

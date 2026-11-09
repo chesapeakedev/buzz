@@ -2777,8 +2777,8 @@ mod postgres_tests {
         // other pod's); another community's stay.
         // Mutation: drop `invalidate_restrictions` from the handler → RED.
         let [lifted, elsewhere] = cached_keys;
-        assert!(state.restriction_cache.entry(&lifted).is_none());
-        assert!(state.restriction_cache.entry(&elsewhere).is_some());
+        assert!(state.restriction_cache.get(&lifted).is_none());
+        assert!(state.restriction_cache.get(&elsewhere).is_some());
 
         // Ban must be cleared in the target community.
         let ban = db
@@ -2920,8 +2920,8 @@ mod postgres_tests {
         // other pod's); another community's stay.
         // Mutation: drop `invalidate_restrictions` from the handler → RED.
         let [lifted, elsewhere] = cached_keys;
-        assert!(state.restriction_cache.entry(&lifted).is_none());
-        assert!(state.restriction_cache.entry(&elsewhere).is_some());
+        assert!(state.restriction_cache.get(&lifted).is_none());
+        assert!(state.restriction_cache.get(&elsewhere).is_some());
 
         // Timeout must be cleared in the target community.
         let restriction = db
@@ -12662,7 +12662,7 @@ mod postgres_tests {
         let cached = |target: [u8; 32]| {
             state
                 .restriction_cache
-                .entry(&(community, target.to_vec()))
+                .get(&(community, target.to_vec()))
                 .is_some()
         };
         let seed = |target: [u8; 32]| {

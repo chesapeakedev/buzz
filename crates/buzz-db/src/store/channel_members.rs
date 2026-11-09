@@ -2220,6 +2220,29 @@ pub async fn get_member_role(
 }
 
 impl Db {
+    /// Complete a pending default-channel admission when its generation is
+    /// still current. The relay uses the token to fence recovery workers.
+    #[datastore_span(name = "put_pending_default_member", system = "postgresql")]
+    pub async fn put_pending_default_member(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        pubkey: &[u8],
+        pending: Uuid,
+    ) -> Result<Option<MemberRecord>> {
+        let current: Option<Uuid> = sqlx::query_scalar(
+            "SELECT auto_join_pending FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::encode(pubkey))
+        .fetch_optional(&self.pool)
+        .await?;
+        if current != Some(pending) {
+            return Ok(None);
+        }
+        put_first_member(&self.pool, community, channel, pubkey).await
+    }
+
     /// Capture the active roster while holding the membership-writer lock.
     #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
     pub async fn lock_member_snapshot(

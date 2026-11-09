@@ -5971,7 +5971,7 @@ pub(crate) mod terminal_close_delivery_tests {
         .await;
         state
             .community_active
-            .seed(buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()), true);
+            .insert(buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()), true);
         let address = serve_outer(state, None).await;
 
         let mut client = connect(address).await;
