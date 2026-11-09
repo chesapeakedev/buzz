@@ -365,6 +365,7 @@ impl SqliteStore {
         match row {
             Some(row) => Ok(RestrictionState {
                 banned: row.try_get::<i64, _>("banned")? != 0,
+                own_banned: row.try_get::<i64, _>("banned")? != 0,
                 muted_until: parse_optional_timestamp(row.try_get("muted_until")?, "muted_until")?,
             }),
             None => Ok(RestrictionState::default()),

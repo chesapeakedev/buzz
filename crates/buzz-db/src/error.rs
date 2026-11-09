@@ -5,6 +5,12 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// Media authorization could not reserve capacity within its bounded wait.
+    #[error("media authorization capacity exceeded")]
+    MediaAuthorizationCapacity,
+    /// A complete membership snapshot exceeds its bounded resource budget.
+    #[error("membership snapshot exceeds channel or byte limit")]
+    MembershipSnapshotTooLarge,
     /// An embedded read bulkhead could not admit work before its deadline.
     #[error("embedded read temporarily unavailable: {0}")]
     ReadUnavailable(String),
@@ -45,6 +51,10 @@ pub enum DbError {
     /// The caller lacks permission for the requested operation.
     #[error("access denied: {0}")]
     AccessDenied(String),
+
+    /// The requested community policy requires at least one issuer binding.
+    #[error("at least one NIP-FI issuer binding is required")]
+    NipFiBindingRequired,
 
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
@@ -114,7 +124,39 @@ pub enum DbError {
     LastOperator,
 }
 
+/// Return a stable, non-sensitive classification for a SQLx error.
+pub fn sqlx_error_kind(e: &sqlx::Error) -> String {
+    let kind = match e {
+        sqlx::Error::Database(db) => {
+            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
+        }
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::Tls(_) => "tls",
+        sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
+        sqlx::Error::Encode(_) => "encode",
+        _ => "other",
+    };
+    kind.to_owned()
+}
+
 impl DbError {
+    /// Return a stable, non-sensitive classification for this error.
+    pub fn kind(&self) -> String {
+        match self {
+            Self::Sqlx(error) => sqlx_error_kind(error),
+            Self::Serde(_) => "serde".to_owned(),
+            Self::InvalidData(_) => "invalid_data".to_owned(),
+            Self::NotFound(_) | Self::ChannelNotFound(_) | Self::MemberNotFound(_) => {
+                "not_found".to_owned()
+            }
+            Self::AccessDenied(_) => "access_denied".to_owned(),
+            _ => "other".to_owned(),
+        }
+    }
     /// Whether Postgres cancelled the statement (SQLSTATE 57014:
     /// `statement_timeout` or an explicit cancel).
     ///

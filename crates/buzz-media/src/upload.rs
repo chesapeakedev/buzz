@@ -9,7 +9,7 @@ use crate::auth::verify_upload_hash_only;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
 use crate::storage::{ctx_sidecar_key, BlobMeta, BlobStorage};
-use crate::thumbnail::generate_image_metadata_sync;
+use crate::thumbnail::{generate_image_metadata_sync, THUMBS};
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
@@ -529,9 +529,12 @@ async fn prepare_image_metadata(
 
     meta.uploaded_at = input.uploaded_at;
 
-    if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
-        storage.put(&thumb_key, tb, "image/jpeg").await?;
+    if let Some(thumbs) = thumb_bytes {
+        for (thumb, bytes) in THUMBS.into_iter().zip(thumbs) {
+            storage
+                .put(&thumb.key(&input.sha256), &bytes, thumb.mime)
+                .await?;
+        }
     }
 
     Ok(meta)

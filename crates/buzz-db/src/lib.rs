@@ -118,6 +118,110 @@ pub use reminder::DueReminder;
 pub use sqlite::git_pointers::{
     cas_swap_pointer, get_pointer_metadata, GitPointerRow, PointerCasOutcome,
 };
+
+// Read-at compatibility adapters used by relay caches. The embedded backend
+// has no replica session, so its authoritative read completes at the adapter's
+// timestamp; PostgreSQL callers retain the same backend-neutral contract.
+impl Db {
+    /// Creates a community with its owner and optional issuer bindings.
+    ///
+    /// The embedded backend currently derives NIP-FI enforcement from the
+    /// relay policy layer; the boolean is accepted here to keep the relay's
+    /// upstream provisioning seam backend-neutral.
+    pub async fn create_community_with_owner_and_nip_fi_policy(
+        &self,
+        host: &str,
+        owner: &str,
+        issuers: &[String],
+        _requires_nip_fi: bool,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
+        self.create_community_with_owner_and_nip_fi_issuers(host, owner, issuers, relay_keypair)
+            .await
+    }
+
+    /// Looks up a community and records the authoritative read timestamp.
+    pub async fn lookup_community_by_host_read_at(
+        &self,
+        host: &str,
+    ) -> Result<ReadAt<Option<CommunityRecord>>> {
+        let value = self.lookup_community_by_host(host).await?;
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Reads moderation state with the backend-neutral read timestamp contract.
+    pub async fn moderation_restriction_state_read_at(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<ReadAt<moderation::RestrictionState>> {
+        let value = self.moderation_restriction_state(community, pubkey).await?;
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Reads listed open channels with the backend-neutral read timestamp contract.
+    pub async fn get_listed_open_channel_ids_read_at(
+        &self,
+        community: CommunityId,
+    ) -> Result<ReadAt<Vec<uuid::Uuid>>> {
+        let value = self.get_listed_open_channel_ids(community).await?;
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Reads community activity with the backend-neutral read timestamp contract.
+    pub async fn is_community_active_read_at(
+        &self,
+        community: CommunityId,
+    ) -> Result<ReadAt<bool>> {
+        let value = self.is_community_active(community).await?;
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Reads a member's accessible channels with the backend-neutral timestamp.
+    pub async fn get_active_membership_ids_read_at(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        _limit: u32,
+    ) -> Result<ReadAt<Vec<uuid::Uuid>>> {
+        let value = self.get_accessible_channel_ids(community, pubkey).await?;
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Reads accessible channels for multiple members with read provenance.
+    pub async fn get_active_membership_ids_bulk_read_at(
+        &self,
+        community: CommunityId,
+        pubkeys: &[Vec<u8>],
+        _limit: u32,
+    ) -> Result<ReadAt<channel_members::PubkeyChannels>> {
+        let mut value = Vec::new();
+        for pubkey in pubkeys {
+            for channel in self.get_accessible_channel_ids(community, pubkey).await? {
+                value.push((pubkey.clone(), channel));
+            }
+        }
+        Ok(ReadAt {
+            value,
+            read_at: std::time::Instant::now(),
+        })
+    }
+}
 pub use sqlite::media_objects::SqliteBlobMetadata;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
 

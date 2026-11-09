@@ -1,5 +1,6 @@
 //! NIP-11 relay information document.
 
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -328,6 +329,14 @@ pub async fn relay_info_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     axum::response::Json(nip11_document(&state, raw_host).await)
+}
+
+/// Return the NIP-11 document for the host-bound fallback route.
+pub(crate) async fn nip11_response(
+    state: &std::sync::Arc<crate::state::AppState>,
+    raw_host: &str,
+) -> axum::response::Response {
+    axum::response::Json(nip11_document(state, raw_host).await).into_response()
 }
 
 fn push_descriptor(

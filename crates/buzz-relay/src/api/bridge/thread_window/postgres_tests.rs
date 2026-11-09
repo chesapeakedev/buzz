@@ -35,7 +35,7 @@ impl Fixture {
         state.db = production_db(buzz_db::DbConfig::default()).await;
         Arc::make_mut(&mut state.config).require_auth_token = true;
         state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
-            state.redis_pool.clone().expect("redis pool"),
+            state.redis_command.clone(),
         ));
         let state = Arc::new(state);
         let host = format!("tw-{}.local", Uuid::new_v4());

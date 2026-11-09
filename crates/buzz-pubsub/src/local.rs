@@ -201,6 +201,7 @@ impl Coordination for LocalCoordination {
             community_id: ctx.community(),
             topic,
             event: event.clone(),
+            received_at: tokio::time::Instant::now(),
         };
         Ok(Self::subscriber_count(self.event_tx.send(event)))
     }

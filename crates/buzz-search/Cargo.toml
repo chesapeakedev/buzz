@@ -9,6 +9,7 @@ description = "Backend-neutral full-text search for Buzz, scoped by community"
 
 [dependencies]
 buzz-core   = { workspace = true }
+buzz-db     = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
 sqlx        = { workspace = true }
 uuid        = { workspace = true }

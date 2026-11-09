@@ -98,7 +98,7 @@ async fn setup() -> (Arc<AppState>, String, buzz_core::CommunityId, Keys) {
     let mut state = (*fixture).clone();
     Arc::make_mut(&mut state.config).membership_snapshot_enabled = true;
     state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
-        state.redis_pool.clone(),
+        state.redis_command.clone(),
     ));
     (Arc::new(state), host, community, Keys::generate())
 }

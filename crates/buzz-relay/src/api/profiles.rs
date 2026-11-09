@@ -107,7 +107,7 @@ async fn search_inner(
         .map(|_| state.relay_keypair.public_key().to_bytes());
     let hits = state
         .search
-        .search_profile_names(tenant.community(), &query, verified_by, page, limit)
+        .search_profile_names(tenant.community(), &query, page, limit)
         .await
         .map_err(|e| search_read_error("profile search error", &e).into_response())?
         .hits;

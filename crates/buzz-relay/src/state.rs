@@ -66,6 +66,14 @@ pub(crate) enum CommunityDisconnectReason {
 }
 
 impl CommunityDisconnectReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CommunityArchived => "community_archived",
+            Self::CommunityDeleted => "community_deleted",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::AccessRevoked => "access_revoked",
+        }
+    }
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
             Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
@@ -123,6 +131,8 @@ pub(crate) struct CommunityConnectionControl {
     nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
     /// A shadow upgrade would-deny's line, owned by the connection task.
     nip_fi_line: Arc<std::sync::OnceLock<std::sync::Weak<crate::nip_fi_shadow::PendingLine>>>,
+    nip_fi_enforce: Arc<std::sync::OnceLock<crate::nip_fi_shadow::EnforceSession>>,
+    client_ip: Option<std::net::IpAddr>,
 }
 
 impl CommunityConnectionControl {
@@ -137,7 +147,40 @@ impl CommunityConnectionControl {
             owner: Arc::default(),
             nip_fi_shadow: Arc::default(),
             nip_fi_line: Arc::default(),
+            nip_fi_enforce: Arc::default(),
+            client_ip: None,
         }
+    }
+
+    pub(crate) fn with_client_ip(self, client_ip: Option<std::net::IpAddr>) -> Self {
+        Self { client_ip, ..self }
+    }
+
+    pub(crate) fn client_ip(&self) -> Option<std::net::IpAddr> {
+        self.client_ip
+    }
+
+    pub(crate) fn attach_nip_fi_enforce(&self, session: crate::nip_fi_shadow::EnforceSession) {
+        let _ = self.nip_fi_enforce.set(session);
+    }
+
+    pub(crate) fn nip_fi_enforce(&self) -> Option<&crate::nip_fi_shadow::EnforceSession> {
+        self.nip_fi_enforce.get()
+    }
+
+    pub(crate) fn deny_nip_fi_enforce(&self, deny: crate::nip_fi_shadow::WouldDeny) {
+        if let Some(session) = self.nip_fi_enforce() {
+            session.deny(deny);
+        }
+    }
+
+    pub(crate) fn expire_authorization(
+        &self,
+        frame_tx: &mpsc::Sender<WsMessage>,
+        route: crate::nip_fi_session::NipFiWsRoute,
+    ) {
+        self.publish_authorization_denied(route, Some(frame_tx));
+        self.cancel.cancel();
     }
 
     /// Carries the socket's shadow session to its AUTH handler, fenced by
@@ -204,6 +247,10 @@ impl CommunityConnectionControl {
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
         self.cancel.clone()
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        !self.cancel.is_cancelled()
     }
 
     pub(crate) fn disconnect_reason(&self) -> watch::Receiver<Option<CommunityDisconnectReason>> {
@@ -364,6 +411,7 @@ struct ConnEntry {
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
+    live_fenced: bool,
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -760,6 +808,7 @@ impl ConnectionManager {
                 admitted: AtomicBool::new(false),
                 grace_limit,
                 community_control,
+                live_fenced: false,
             },
         );
         // Insert-then-check pairs with drain_all's store-then-iterate: either
@@ -1171,9 +1220,23 @@ impl ConnectionManager {
     /// The shared `Bytes` payload is cloned into the outbound WS message without
     /// copying the frame body. Callers must only pass valid UTF-8 bytes.
     pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
+        if self
+            .connections
+            .get(&conn_id)
+            .is_some_and(|entry| entry.live_fenced)
+        {
+            return true;
+        }
         let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
             .expect("relay fan-out frames are serialized UTF-8 JSON");
         self.try_send_ws_message(conn_id, WsMessage::Text(text))
+    }
+
+    /// Fence live fan-out while a connection is being closed for a lost event.
+    pub(crate) fn fence_live_delivery(&self, conn_id: Uuid) {
+        if let Some(mut entry) = self.connections.get_mut(&conn_id) {
+            entry.live_fenced = true;
+        }
     }
 
     fn try_send_ws_message(&self, conn_id: Uuid, msg: WsMessage) -> bool {
@@ -1235,6 +1298,9 @@ pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Dura
 /// Upper bound on one live thread-summary refresh (DB read, Redis publish,
 /// local fan-out). A hung refresh is abandoned so its root keeps emitting.
 pub const THREAD_SUMMARY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Maximum age of a cached host-to-community mapping.
+pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration =
+    buzz_db::community_auth::POLICY_LEASE_MAX_AGE;
 
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
@@ -1246,6 +1312,8 @@ pub struct AppState {
     /// Optional Redis pool for distributed readiness and mesh health checks.
     /// Embedded mode deliberately has no Redis pool.
     pub redis_pool: Option<deadpool_redis::Pool>,
+    /// Shared lazy Redis command connection used by auth and rate limits.
+    pub redis_command: buzz_pubsub::RedisConnection,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
@@ -1254,6 +1322,7 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// Full-text search service.
     pub search: Arc<SearchService>,
+    pub(crate) search_slots: Arc<crate::api::bridge::search_slots::SearchSlots>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
     /// Live NIP-AR syncs this node serves.
@@ -1272,6 +1341,7 @@ pub struct AppState {
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
     pub handler_semaphore: Arc<Semaphore>,
+    pub auth_gate: buzz_db::ConcurrencyGate,
     /// Semaphore limiting concurrent git subprocess operations across
     /// the whole relay. Bounds resource use; **not** writer
     /// serialization — that's the CAS at the manifest pointer (spec
@@ -1312,6 +1382,9 @@ pub struct AppState {
     /// invalidated on membership changes and community-wide channel changes.
     #[allow(clippy::type_complexity)]
     pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    pub(crate) community_active: Arc<moka::sync::Cache<CommunityId, bool>>,
+    pub tenant_host_cache: Arc<crate::host_cache::HostCache>,
+    pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
     /// Listed open channel IDs per community, the half of every reader's
     /// accessible set that does not depend on the reader. Invalidated with
     /// the community's accessible channels, and used only for
@@ -1422,6 +1495,7 @@ pub struct AppState {
     #[allow(clippy::type_complexity)]
     pub restriction_cache:
         Arc<moka::sync::Cache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>>,
+    pub(crate) nip_fi_policy: Arc<dyn crate::nip_fi_policy::PolicySource>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -1488,6 +1562,41 @@ pub struct AppState {
     pub(crate) nip_fi_shadow_sessions: Arc<crate::nip_fi_shadow_session::ShadowSessions>,
 }
 
+/// Accept both the fork's pooled Redis constructor and upstream's shared
+/// command-connection constructor while the backend boundary is converged.
+pub trait RedisStateInput {
+    fn command(&self, redis_url: &str) -> buzz_pubsub::RedisConnection;
+    fn pool(&self) -> Option<deadpool_redis::Pool>;
+}
+
+impl RedisStateInput for buzz_pubsub::RedisConnection {
+    fn command(&self, _redis_url: &str) -> buzz_pubsub::RedisConnection {
+        self.clone()
+    }
+
+    fn pool(&self) -> Option<deadpool_redis::Pool> {
+        None
+    }
+}
+
+impl RedisStateInput for deadpool_redis::Pool {
+    fn command(&self, redis_url: &str) -> buzz_pubsub::RedisConnection {
+        buzz_pubsub::redis_connection(redis_url).expect("configured Redis URL must be valid")
+    }
+
+    fn pool(&self) -> Option<deadpool_redis::Pool> {
+        Some(self.clone())
+    }
+}
+
+#[allow(dead_code)]
+const _: () = {
+    fn assert_send_sync<T: Send + Sync>() {}
+    fn check() {
+        assert_send_sync::<AppState>();
+    }
+};
+
 impl AppState {
     /// The NIP-FI community source admission resolves against.
     pub(crate) fn nip_fi_communities(&self) -> crate::nip_fi_core::Communities<'_> {
@@ -1506,10 +1615,10 @@ impl AppState {
     /// `audit_shutdown.drain().await` during graceful shutdown so queued
     /// audit entries are flushed before the process exits.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<R: RedisStateInput>(
         config: Config,
         db: Db,
-        redis_pool: deadpool_redis::Pool,
+        redis: R,
         audit: impl Into<Option<AuditService>>,
         pubsub: Arc<dyn Coordination>,
         auth: AuthService,
@@ -1529,15 +1638,17 @@ impl AppState {
             )
             .expect("media storage was already constructed with this S3 config"),
         );
+        let redis_command = redis.command(&config.redis_url);
+        let redis_pool = redis.pool();
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
-            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+            Arc::new(RedisNip98ReplayGuard::new(redis_command.clone()));
         let admission_rate_limiter: Arc<dyn RateLimiter> = Arc::new(
-            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool.clone()),
+            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_command),
         );
         Self::new_with_backends(
             config,
             db,
-            Some(redis_pool),
+            redis_pool,
             audit,
             pubsub,
             auth,
@@ -1570,6 +1681,8 @@ impl AppState {
         admission_rate_limiter: Arc<dyn RateLimiter>,
     ) -> (Self, AuditShutdownHandle) {
         let max_connections = config.max_connections;
+        let redis_command = buzz_pubsub::redis_connection(&config.redis_url)
+            .expect("configured Redis URL must be valid");
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
 
@@ -1622,22 +1735,27 @@ impl AppState {
             )
             .expect("git pack cache path must be available"),
         );
-        let nip_fi_command_replay: Arc<dyn CommandReplayGuard> = match redis_pool.clone() {
-            Some(pool) => crate::api::nip_fi::command_replay_guard(pool, config.nip_fi.mode),
+        let nip_fi_command_replay: Arc<dyn CommandReplayGuard> = match redis_pool.as_ref() {
+            Some(_) => {
+                crate::api::nip_fi::command_replay_guard(redis_command.clone(), config.nip_fi.mode)
+            }
             None => Arc::new(AllowCommandReplayGuard),
         };
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let audit_enabled = audit_arc.is_some();
+        let nip_fi_policy: Arc<dyn crate::nip_fi_policy::PolicySource> = Arc::new(db.clone());
         // Build NIP-FI components before moving config into the state Arc.
         let (nip_fi_verifier, nip_fi_jwks_source) = build_nip_fi_components(&config);
         let state = Self {
             config: Arc::new(config),
             db,
             redis_pool,
+            redis_command,
             audit: audit_arc,
             pubsub,
             auth: Arc::new(auth),
             search: search_arc,
+            search_slots: Arc::default(),
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             artifact_syncs: Arc::default(),
             conn_manager: Arc::new(ConnectionManager::new()),
@@ -1647,6 +1765,7 @@ impl AppState {
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
+            auth_gate: buzz_db::ConcurrencyGate::unbounded(),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
@@ -1673,6 +1792,17 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
+            community_active: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
+                    .build(),
+            ),
+            tenant_host_cache: Arc::new(crate::host_cache::HostCache::new()),
+            tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
+                10_000,
+                std::time::Duration::from_secs(1),
+            )),
             // Readers use an entry only for `OPEN_CHANNELS_MAX_AGE`; the TTL
             // just reclaims memory and keeps expired entries around long
             // enough to count their misses as `expired` rather than `absent`.
@@ -1745,6 +1875,7 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(30))
                     .build(),
             ),
+            nip_fi_policy,
             // Default to NoopTracer: production builds pay zero cost.
             // Conformance tests overwrite this with a JsonlTracer after
             // construction (see test helpers in
@@ -1847,6 +1978,75 @@ impl AppState {
         let result = self.db.is_member(community_id, channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
+    }
+
+    /// Check a batch of pubkeys through the same membership cache seam used by
+    /// event fan-out. Failed lookups remain explicitly unverified.
+    pub(crate) async fn members_cached(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkeys: impl IntoIterator<Item = Vec<u8>>,
+    ) -> crate::membership_cache::Members {
+        let mut result = crate::membership_cache::Members::default();
+        let pubkeys: Vec<Vec<u8>> = pubkeys.into_iter().collect();
+        for pubkey in pubkeys {
+            match self
+                .is_member_cached(community_id, channel_id, &pubkey)
+                .await
+            {
+                Ok(true) => {
+                    result.members.insert(pubkey);
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    result.unverified.insert(pubkey);
+                }
+            }
+        }
+        result
+    }
+
+    /// Cached active-state lookup used by connection admission and the
+    /// ephemeral write fence.
+    pub async fn is_community_active_cached(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool, buzz_db::DbError> {
+        if let Some(value) = self.community_active.get(&community_id) {
+            return Ok(value);
+        }
+        let value = self.db.is_community_active(community_id).await?;
+        self.community_active.insert(community_id, value);
+        Ok(value)
+    }
+
+    /// Drop host and active-community cache entries after a policy change.
+    pub fn invalidate_community_host(&self, tenant: &TenantContext) {
+        self.tenant_host_cache.invalidate(tenant.host());
+        self.community_active.invalidate(&tenant.community());
+        self.spawn_cache_invalidation(
+            tenant,
+            CacheInvalidation::CommunityHost {
+                host: tenant.host().to_owned(),
+            },
+        );
+    }
+
+    /// Drop all cached restriction decisions for a community.
+    pub fn invalidate_restrictions(&self, tenant: &TenantContext) {
+        self.invalidate_restrictions_local(tenant.community());
+        self.spawn_cache_invalidation(tenant, CacheInvalidation::Restrictions);
+    }
+
+    fn invalidate_restrictions_local(&self, community_id: CommunityId) {
+        if let Err(error) = self
+            .restriction_cache
+            .invalidate_entries_if(move |(c, _), _| *c == community_id)
+        {
+            tracing::warn!(?error, "restriction cache predicate invalidation failed");
+            self.restriction_cache.invalidate_all();
+        }
     }
 
     /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
@@ -2030,6 +2230,10 @@ impl AppState {
         invalidation: CacheInvalidation,
     ) {
         match invalidation {
+            CacheInvalidation::CommunityHost { host } => {
+                self.tenant_host_cache.invalidate(&host);
+                self.community_active.invalidate(&community_id);
+            }
             CacheInvalidation::Membership { channel_id, pubkey } => {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
@@ -2041,6 +2245,9 @@ impl AppState {
             }
             CacheInvalidation::ChannelDeleted => {
                 self.invalidate_channel_deleted_local(community_id);
+            }
+            CacheInvalidation::Restrictions => {
+                self.invalidate_restrictions_local(community_id);
             }
         }
     }

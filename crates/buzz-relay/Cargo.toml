@@ -27,6 +27,7 @@ buzz-deletion = { workspace = true }
 buzz-auth = { workspace = true }
 jsonwebtoken = { workspace = true }
 buzz-pubsub = { workspace = true }
+deadpool-redis = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
 buzz-relay-mesh = { workspace = true }

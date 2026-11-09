@@ -1172,6 +1172,75 @@ async fn publish_live_thread_summary(
 /// about a type it does not know, such as a system channel.
 /// The p tag addresses the target pubkey; the h tag carries the channel UUID as metadata.
 /// Stored with channel_id = None so global subscribers receive it via slow-path fan-out.
+#[cfg(test)]
+pub(crate) mod notice_barrier {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::{mpsc, oneshot};
+    use uuid::Uuid;
+
+    pub(crate) type Parked = (Uuid, oneshot::Sender<()>);
+    type Waiters = Mutex<HashMap<Vec<u8>, mpsc::UnboundedSender<Parked>>>;
+
+    fn waiters() -> &'static Waiters {
+        static WAITERS: OnceLock<Waiters> = OnceLock::new();
+        WAITERS.get_or_init(Default::default)
+    }
+
+    pub(crate) struct Barrier {
+        recipient: Vec<u8>,
+        parked: mpsc::UnboundedReceiver<Parked>,
+    }
+
+    impl Barrier {
+        pub(crate) async fn next(&mut self) -> Option<Parked> {
+            self.parked.recv().await
+        }
+
+        pub(crate) fn pin_created_at(&self, created_at: u64) {
+            pins()
+                .lock()
+                .unwrap()
+                .insert(self.recipient.clone(), created_at);
+        }
+    }
+
+    impl Drop for Barrier {
+        fn drop(&mut self) {
+            waiters().lock().unwrap().remove(&self.recipient);
+            pins().lock().unwrap().remove(&self.recipient);
+        }
+    }
+
+    pub(crate) fn install(recipient: &[u8]) -> Barrier {
+        let (tx, parked) = mpsc::unbounded_channel();
+        waiters().lock().unwrap().insert(recipient.to_vec(), tx);
+        Barrier {
+            recipient: recipient.to_vec(),
+            parked,
+        }
+    }
+
+    fn pins() -> &'static Mutex<HashMap<Vec<u8>, u64>> {
+        static PINS: OnceLock<Mutex<HashMap<Vec<u8>, u64>>> = OnceLock::new();
+        PINS.get_or_init(Default::default)
+    }
+
+    pub(super) fn pinned_created_at(recipient: &[u8]) -> Option<u64> {
+        pins().lock().unwrap().get(recipient).copied()
+    }
+
+    pub(super) async fn reached(channel_id: Uuid, recipient: &[u8]) {
+        let waiter = waiters().lock().unwrap().get(recipient).cloned();
+        if let Some(waiter) = waiter {
+            let (release, released) = oneshot::channel();
+            if waiter.send((channel_id, release)).is_ok() {
+                let _ = released.await;
+            }
+        }
+    }
+}
+
 pub async fn emit_membership_notification(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -1201,6 +1270,38 @@ pub async fn emit_membership_notification(
         target_pubkey,
         actor_pubkey,
         notification_kind,
+        &[],
+    )
+    .await
+}
+
+/// Emit a membership notice with cause-specific tags.
+pub(crate) async fn emit_membership_notification_tagged(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+    extra_tags: &[Tag],
+) -> anyhow::Result<()> {
+    let Some(channel_type) = state
+        .db
+        .channel_type_of(tenant.community(), channel_id)
+        .await?
+    else {
+        warn!(%channel_id, "membership notice skipped: channel not found");
+        return Ok(());
+    };
+    emit_typed_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        &channel_type,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+        extra_tags,
     )
     .await
 }
@@ -1215,6 +1316,7 @@ async fn emit_typed_membership_notification(
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
     notification_kind: u32,
+    extra_tags: &[Tag],
 ) -> anyhow::Result<()> {
     if state.db.backend_kind() == buzz_db::DatabaseBackendKind::Sqlite {
         return Ok(());
@@ -1247,8 +1349,18 @@ async fn emit_typed_membership_notification(
 
     let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, channel_type])
         .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
-    let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
+    #[cfg(test)]
+    notice_barrier::reached(channel_id, target_pubkey).await;
+
+    let builder = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
+        .tags(extra_tags.iter().cloned());
+    #[cfg(test)]
+    let builder = match notice_barrier::pinned_created_at(target_pubkey) {
+        Some(at) => builder.custom_created_at(nostr::Timestamp::from(at)),
+        None => builder,
+    };
+    let event = builder
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -2057,6 +2169,7 @@ pub(crate) async fn persist_put_user(
                 &target.pubkey,
                 &actor_bytes,
                 KIND_MEMBER_ADDED_NOTIFICATION,
+                &[],
             )
             .await
             {

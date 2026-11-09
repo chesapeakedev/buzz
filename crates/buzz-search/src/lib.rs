@@ -35,6 +35,13 @@ use std::time::Duration;
 
 use sqlx::{PgPool, SqlitePool};
 
+/// PostgreSQL pool options with the bounded search statement timeout hook.
+pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
+    sqlx::postgres::PgPoolOptions::new().after_connect(|conn, _meta| {
+        Box::pin(buzz_db::event::tighten_session_read_statement_timeout(conn))
+    })
+}
+
 /// Backend-specific search resources.
 #[derive(Debug, Clone)]
 enum SearchBackend {

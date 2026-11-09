@@ -580,10 +580,7 @@ impl DependencyDiagnostics {
 /// already slow. The first tick fires immediately, so the not-yet-sampled
 /// window is one evaluation long.
 pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
-    let Some(redis_pool) = state.redis_pool.clone() else {
-        cancel.cancelled().await;
-        return;
-    };
+    let redis_pool = state.redis_command.clone();
     run_dependency_sampler_for_diagnostics(
         Arc::clone(&state.dependency_diagnostics),
         state.db.clone(),

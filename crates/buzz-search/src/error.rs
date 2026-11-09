@@ -33,7 +33,10 @@ impl SearchError {
     /// A fixed description of this error for log lines: never the message,
     /// which can repeat the search text.
     pub fn kind(&self) -> String {
-        let SearchError::Db(e) = self;
-        buzz_db::error::sqlx_error_kind(e)
+        match self {
+            SearchError::Db(e) => buzz_db::error::sqlx_error_kind(e),
+            SearchError::ReadUnavailable(_) => "read_unavailable".to_owned(),
+            SearchError::Unsupported => "unsupported".to_owned(),
+        }
     }
 }

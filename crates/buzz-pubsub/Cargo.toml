@@ -24,6 +24,7 @@ nostr = { workspace = true }
 futures-util = { workspace = true }
 async-trait = "0.1"
 moka = { workspace = true }
+arc-swap = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

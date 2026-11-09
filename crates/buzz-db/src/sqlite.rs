@@ -49,8 +49,6 @@ mod contracts_reminders;
 #[cfg(test)]
 mod contracts_threads;
 #[cfg(test)]
-mod contracts_usage;
-#[cfg(test)]
 mod contracts_workflow_coordination;
 #[cfg(test)]
 mod contracts_workflows;
@@ -70,7 +68,6 @@ mod reactions;
 mod relay_invite;
 mod security_windows;
 mod threads;
-mod usage;
 mod users;
 mod workflows;
 
@@ -114,7 +111,6 @@ pub struct SqliteStore {
     search_pool: SqlitePool,
     channel_cache: Option<moka::future::Cache<ChannelWindowCacheKey, crate::thread::ChannelWindow>>,
     writer: Arc<Mutex<()>>,
-    usage_leader: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -196,7 +192,6 @@ impl SqliteStore {
             search_pool,
             channel_cache,
             writer: Arc::new(Mutex::new(())),
-            usage_leader: Arc::new(Mutex::new(())),
         })
     }
 
@@ -226,11 +221,6 @@ impl SqliteStore {
     /// Clone the single writer gate for another SQLite backend adapter.
     pub fn adapter_writer_gate(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.writer)
-    }
-
-    /// Clone the process-local usage-metrics leadership gate.
-    pub fn adapter_usage_leader_gate(&self) -> Arc<Mutex<()>> {
-        Arc::clone(&self.usage_leader)
     }
 
     /// Acquire the process-local gate that serializes SQLite mutations.

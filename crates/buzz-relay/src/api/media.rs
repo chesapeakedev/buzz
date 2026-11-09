@@ -88,7 +88,7 @@ enum UploadRouteMode {
 ///
 /// Non-Blossom errors (`blossom_denial_kind()` returns `None`) always fall
 /// through to `MediaError::into_response()` regardless of mode.
-pub(crate) struct MediaDenial(MediaError, BlossomStrictness);
+pub(crate) struct MediaDenial(pub MediaError, pub BlossomStrictness);
 
 impl IntoResponse for MediaDenial {
     fn into_response(self) -> Response {
@@ -341,7 +341,8 @@ pub(crate) async fn upload_blob(
     })
     .await;
     let headers_clone = headers.clone();
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
+    let slot = crate::access::AccessSlot::default();
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
         // Pre-body check: freshness, cardinality, and server tag. The x-tag
         // hash binding is checked after body completion.
@@ -813,6 +814,7 @@ pub(crate) async fn get_blob(
     let strictness = blossom_strictness_from_state(&state);
     let tenant_host = tenant.host().to_owned();
     let headers_clone = req_headers.clone();
+    let slot = crate::access::AccessSlot::default();
     // NIP-FI admission with Blossom extraction as the NIP-98 closure.
     // In Enforce mode: extraction failure → NIP-FI denial bytes (MissingEvidence/
     // EvidenceRejected).  In Off mode: MediaError propagates unchanged [FI-INV-15].
@@ -827,7 +829,7 @@ pub(crate) async fn get_blob(
         .map(drop)
     })
     .await;
-    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
+    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, &slot, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     })
@@ -1127,13 +1129,14 @@ pub(crate) async fn head_blob(
     let strictness = blossom_strictness_from_state(&state);
     let tenant_host = tenant.host().to_owned();
     let headers_clone = headers.clone();
+    let slot = crate::access::AccessSlot::default();
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
     })
     .await;
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     })

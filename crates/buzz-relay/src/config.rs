@@ -258,6 +258,8 @@ pub struct Config {
     pub max_frame_bytes: usize,
     /// Number of consecutive buffer-full events tolerated before cancelling a slow client.
     pub slow_client_grace_limit: u8,
+    /// Optional trusted request header used for client-IP observability.
+    pub client_ip_header: Option<axum::http::HeaderName>,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
     /// Whether REST API requests must present a valid token. Independent of
@@ -303,6 +305,10 @@ pub struct Config {
     /// When false (default), the check is a no-op and all authenticated callers
     /// are permitted regardless of auth method (API token, NIP-42).
     pub require_relay_membership: bool,
+    /// Opt-in compact membership projection endpoint.
+    pub membership_snapshot_enabled: bool,
+    /// Opt-in public membership discovery.
+    pub membership_public_enabled: bool,
 
     /// Whether this deployment can serve huddle (voice) audio.
     ///
@@ -390,6 +396,8 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Channel media authorization rollout policy.
+    pub media_read_mode: crate::api::media_access::MediaReadMode,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -484,6 +492,8 @@ pub struct Config {
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+    /// Permit changing community FI policy.
+    pub nip_fi_changes: bool,
 
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
@@ -1681,6 +1691,7 @@ impl Config {
             send_buffer_size,
             max_frame_bytes,
             slow_client_grace_limit,
+            client_ip_header: None,
             auth,
             require_auth_token,
             buzz_v1_enabled,
@@ -1695,6 +1706,10 @@ impl Config {
             partition_manager_advance_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
+            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
+                .is_ok_and(|v| v == "true"),
+            membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
+                .is_ok_and(|v| v == "true"),
             artifact_incremental_enabled,
             huddle_audio_available,
             mesh,
@@ -1706,6 +1721,10 @@ impl Config {
             allow_nip_oa_auth,
             klipy,
             media,
+            media_read_mode: std::env::var("BUZZ_MEDIA_READ_MODE")
+                .unwrap_or_else(|_| "off".to_owned())
+                .parse()
+                .map_err(ConfigError::InvalidValue)?,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
@@ -1731,6 +1750,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_changes: parse_bool("BUZZ_NIP_FI_CHANGES", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })

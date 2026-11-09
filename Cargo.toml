@@ -103,6 +103,7 @@ anyhow    = "1"
 # Utilities
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
+httpdate = "1"
 
 # JWT / JWS verification (NIP-FI federated identity assertions)
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
@@ -193,9 +194,10 @@ strip = true
 # allowlist for the auth token). Revert to crates.io once #449 lands upstream.
 [patch.crates-io]
 aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }
-sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
-sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
-sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
-sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
-sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
-sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }
+sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-mysql = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }

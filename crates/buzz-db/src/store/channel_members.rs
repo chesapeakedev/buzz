@@ -7,6 +7,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+/// Bulk membership rows keyed by pubkey, used by relay membership caches.
+pub type PubkeyChannels = Vec<(Vec<u8>, Uuid)>;
+
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
 use crate::{AdmittedTx, Db};
@@ -518,6 +521,7 @@ impl LockedMemberSnapshot {
         crate::store::event_follow_up::after_admitted_insert(
             &mut self.tx,
             event.id.as_bytes().as_slice(),
+            created_at,
             kind,
             Some(channel_id),
         )
@@ -1448,6 +1452,46 @@ async fn get_members_with_operation(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter().map(row_to_member_record).collect()
+}
+
+/// Read active members on an already-admitted connection.
+pub(crate) async fn select_active_members(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<MemberRecord>> {
+    select_active_members_filtered(conn, community_id, channel_id, None).await
+}
+
+/// Read active members whose role is one of `roles`.
+pub(crate) async fn select_active_members_in_roles(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: &[MemberRole],
+) -> Result<Vec<MemberRecord>> {
+    let roles: Vec<&str> = roles.iter().map(MemberRole::as_str).collect();
+    select_active_members_filtered(conn, community_id, channel_id, Some(&roles)).await
+}
+
+async fn select_active_members_filtered(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: Option<&[&str]>,
+) -> Result<Vec<MemberRecord>> {
+    let rows = sqlx::query(
+        "SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at \
+         FROM channel_members cm JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL \
+           AND ($3::text[] IS NULL OR cm.role::text = ANY($3)) ORDER BY cm.joined_at ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(roles)
+    .fetch_all(conn)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()
 }

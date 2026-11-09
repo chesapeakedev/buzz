@@ -299,7 +299,6 @@ pub async fn provision_community(
             )
             .await
             .map_err(|e| match e {
-                buzz_db::DbError::NipFiBindingRequired => format!("nip_fi_binding_required: {e}"),
                 _ => format!("failed to create community: {e}"),
             })?;
         let record = match write.outcome {
@@ -317,8 +316,8 @@ pub async fn provision_community(
             community = %record.id,
             host = %record.host,
             owner = %owner_hex,
-            created = record.created,
-            requires_nip_fi = record.requires_nip_fi,
+            created = true,
+            requires_nip_fi = request.initial_requires_nip_fi.unwrap_or(false),
             "community provisioned via operator endpoint"
         );
         record_binding_creation(
@@ -331,9 +330,9 @@ pub async fn provision_community(
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
-            status: if record.created { "created" } else { "existed" },
+            status: "created",
             owner_pubkey: initial_owner,
-            requires_nip_fi: Some(record.requires_nip_fi),
+            requires_nip_fi: request.initial_requires_nip_fi,
         });
     }
 

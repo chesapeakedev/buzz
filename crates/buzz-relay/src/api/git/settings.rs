@@ -357,7 +357,7 @@ async fn get_default_branch(
     )
     .await?;
     let snapshot =
-        DefaultBranchSnapshot::load(&*state.git_store, &auth.tenant, &owner, repo_name).await?;
+        DefaultBranchSnapshot::load(&state.git_store, &auth.tenant, &owner, repo_name).await?;
     Ok(Json(snapshot.response()))
 }
 
@@ -387,7 +387,7 @@ async fn set_default_branch(
         )
     })?;
     let snapshot =
-        DefaultBranchSnapshot::load(&*state.git_store, &auth.tenant, &owner, repo_name).await?;
+        DefaultBranchSnapshot::load(&state.git_store, &auth.tenant, &owner, repo_name).await?;
     let serving_write = buzz_deletion::acquire_serving_write(
         &state.db,
         auth.tenant.community(),
@@ -402,7 +402,7 @@ async fn set_default_branch(
     })?;
     serving_write.verify().await.map_err(backend)?;
     let (snapshot, changed) = serving_write
-        .protect(snapshot.set(&*state.git_store, request))
+        .protect(snapshot.set(&state.git_store, request))
         .await
         .map_err(backend)??;
     let publication = async {

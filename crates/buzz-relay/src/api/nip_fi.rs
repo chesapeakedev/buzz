@@ -3619,10 +3619,8 @@ mod route_integration_tests {
             config.nip_fi.mode = mode;
             config.nip_fi.registry.insert(test_issuer_policy());
             let mut state = build_test_app_state(1000, config).await;
-            state.nip_fi_command_replay = command_replay_guard(
-                state.redis_pool.clone().expect("redis pool"),
-                state.config.nip_fi.mode,
-            );
+            state.nip_fi_command_replay =
+                command_replay_guard(state.redis_command.clone(), state.config.nip_fi.mode);
             Arc::new(state)
         }
 
@@ -3933,10 +3931,8 @@ mod route_integration_tests {
                 &[TEST_ISS],
             );
             let mut state = build_test_app_state(1000, config).await;
-            state.nip_fi_command_replay = command_replay_guard(
-                state.redis_pool.clone().expect("redis pool"),
-                state.config.nip_fi.mode,
-            );
+            state.nip_fi_command_replay =
+                command_replay_guard(state.redis_command.clone(), state.config.nip_fi.mode);
             let key_source = Arc::new(
                 ProductionJwksSource::new(
                     vec![test_jwks_config()],

@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Errors that can occur in pub/sub, presence, and typing operations.
 #[derive(Debug, Error)]
 pub enum PubSubError {
+    /// A Redis pool could not provide a connection.
+    #[error("Redis pool error: {0}")]
+    Pool(#[from] deadpool_redis::PoolError),
     /// A Redis command failed.
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),

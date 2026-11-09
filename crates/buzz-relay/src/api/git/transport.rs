@@ -1059,13 +1059,8 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(
-            state.git_store.as_ref(),
-            &auth.tenant,
-            &params.owner,
-            &params.repo,
-        )
-        .await
+        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
+            .await
         {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
@@ -1110,7 +1105,7 @@ async fn info_refs_subprocess(
     let _permit = acquire_git_permit(state, "info_refs")?;
 
     let repo = match hydrate_for_read(
-        state.git_store.as_ref(),
+        &state.git_store,
         tenant,
         &params.owner,
         &params.repo,
@@ -1317,7 +1312,7 @@ pub async fn upload_pack(
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
-        state.git_store.as_ref(),
+        &state.git_store,
         &auth.tenant,
         &params.owner,
         &params.repo,
@@ -1408,7 +1403,7 @@ pub async fn receive_pack(
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
     let (repo, parent_state) = hydrate_for_write(
-        state.git_store.as_ref(),
+        &state.git_store,
         &auth.tenant,
         &params.owner,
         &params.repo,
@@ -2173,7 +2168,7 @@ async fn finalize_push_inner(
     // between hydrate and CAS. Observe serving-lease loss throughout the
     // potentially long upload/CAS operation, not only at its boundaries.
     let publish = cas_publish(
-        state.git_store.as_ref(),
+        &state.git_store,
         &ctx.tenant,
         ctx.repo_handle.path(),
         &ctx.owner,
@@ -2694,7 +2689,7 @@ mod track_c_tests {
     ) -> PushContext {
         let tenant = TenantContext::resolved(community, host);
         let (hydrated, parent_state) = hydrate_for_write(
-            state.git_store.as_ref(),
+            &state.git_store,
             &tenant,
             &owner,
             &repo,

@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 use crate::{relay_members, Db, DbError, Result};
 
+pub(super) const SERVING_HOST_QUERY: &str = "SELECT id, host, requires_nip_fi, policy_generation
+    FROM communities WHERE lower(host) = lower($1)
+    AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'";
+
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunityRecord {
@@ -35,6 +39,10 @@ pub struct CreatedCommunityRecord {
     pub id: CommunityId,
     /// Normalized host stored for the community.
     pub host: String,
+    /// Whether this operation inserted the community row.
+    pub created: bool,
+    /// Whether NIP-FI admission is required for the community.
+    pub requires_nip_fi: bool,
 }
 
 /// Result of atomically creating a community with its initial owner.
@@ -688,6 +696,8 @@ impl Db {
             let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
                 id: CommunityId::from_uuid(id),
                 host,
+                created: true,
+                requires_nip_fi: !nip_fi_issuers.is_empty(),
             });
             relay_members::commit_membership_write(tx, record, true, relay_keypair).await
         } else {
@@ -717,6 +727,8 @@ impl Db {
             let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
                 id: CommunityId::from_uuid(existing.try_get("id")?),
                 host: existing.try_get("host")?,
+                created: false,
+                requires_nip_fi: false,
             });
             tx.commit().await?;
             Ok(MembershipWrite::unchanged(record))

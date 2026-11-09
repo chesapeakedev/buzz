@@ -20,10 +20,15 @@
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
 pub mod conn_control;
+/// Shared Redis command connection used by the distributed compatibility modules.
+pub mod connection;
 /// Backend-neutral relay coordination interface.
 pub mod coordination;
 /// SQLite-backed durable replay and fixed-window security adapters.
 pub mod embedded_security;
+pub use connection::{
+    redis_connection, RedisConnection, REDIS_CONNECT_TIMEOUT, REDIS_RESPONSE_TIMEOUT,
+};
 pub use coordination::Coordination;
 /// Error types for pub/sub operations.
 pub mod error;
@@ -76,6 +81,8 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
+    /// When this node read the event from Redis.
+    pub received_at: tokio::time::Instant,
 }
 
 /// Health of this node's Redis event subscription link.
@@ -123,6 +130,7 @@ impl PubSubConfig {
 /// Redis-backed coordination adapter for a Buzz relay instance.
 pub struct RedisCoordination {
     pool: deadpool_redis::Pool,
+    command: RedisConnection,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
     /// Delay before unsubscribing after the last local interest is released.
@@ -146,7 +154,8 @@ pub type PubSubManager = RedisCoordination;
 
 impl RedisCoordination {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
-    pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
+    pub async fn new<P: PubSubPoolInput>(redis_url: &str, pool: P) -> Result<Self, PubSubError> {
+        let pool = pool.into_pool(redis_url)?;
         Self::with_config(PubSubConfig::new(redis_url), pool).await
     }
 
@@ -155,6 +164,7 @@ impl RedisCoordination {
         config: PubSubConfig,
         pool: deadpool_redis::Pool,
     ) -> Result<Self, PubSubError> {
+        let command = redis_connection(&config.redis_url)?;
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
@@ -163,6 +173,7 @@ impl RedisCoordination {
 
         Ok(Self {
             pool,
+            command,
             redis_url: config.redis_url,
             unsubscribe_debounce: config.unsubscribe_debounce,
             desired_topics: Arc::new(Mutex::new(HashMap::new())),
@@ -427,7 +438,7 @@ impl RedisCoordination {
         topic: EventTopic,
         event: &nostr::Event,
     ) -> Result<i64, PubSubError> {
-        publisher::publish_event(&self.pool, ctx, topic, event).await
+        publisher::publish_event(&self.command, ctx, topic, event).await
     }
 
     /// Set presence with 180s TTL. Call on connect and every 60s heartbeat.
@@ -437,7 +448,7 @@ impl RedisCoordination {
         pubkey: &PublicKey,
         status: &str,
     ) -> Result<(), PubSubError> {
-        presence::set_presence(&self.pool, ctx, pubkey, status).await
+        presence::set_presence(&self.command, ctx, pubkey, status).await
     }
 
     /// Remove presence for `pubkey`. Call on clean disconnect.
@@ -446,7 +457,7 @@ impl RedisCoordination {
         ctx: &TenantContext,
         pubkey: &PublicKey,
     ) -> Result<(), PubSubError> {
-        presence::clear_presence(&self.pool, ctx, pubkey).await
+        presence::clear_presence(&self.command, ctx, pubkey).await
     }
 
     /// Set one status with the 180s TTL for each of `pubkeys`, in one round trip.
@@ -456,7 +467,7 @@ impl RedisCoordination {
         pubkeys: &[PublicKey],
         status: &str,
     ) -> Result<(), PubSubError> {
-        presence::set_presence_many(&self.pool, ctx, pubkeys, status).await
+        presence::set_presence_many(&self.command, ctx, pubkeys, status).await
     }
 
     /// Remove presence for each of `pubkeys`.
@@ -465,7 +476,7 @@ impl RedisCoordination {
         ctx: &TenantContext,
         pubkeys: &[PublicKey],
     ) -> Result<(), PubSubError> {
-        presence::clear_presence_many(&self.pool, ctx, pubkeys).await
+        presence::clear_presence_many(&self.command, ctx, pubkeys).await
     }
 
     /// Returns the current presence status for `pubkey`, or `None` if not set.
@@ -474,7 +485,7 @@ impl RedisCoordination {
         ctx: &TenantContext,
         pubkey: &PublicKey,
     ) -> Result<Option<String>, PubSubError> {
-        presence::get_presence(&self.pool, ctx, pubkey).await
+        presence::get_presence(&self.command, ctx, pubkey).await
     }
 
     /// Returns presence statuses for multiple pubkeys as a `pubkey_hex → status` map.
@@ -483,7 +494,26 @@ impl RedisCoordination {
         ctx: &TenantContext,
         pubkeys: &[PublicKey],
     ) -> Result<HashMap<String, String>, PubSubError> {
-        presence::get_presence_bulk(&self.pool, ctx, pubkeys).await
+        presence::get_presence_bulk(&self.command, ctx, pubkeys).await
+    }
+}
+
+/// Compatibility input accepted by the historical and current constructors.
+pub trait PubSubPoolInput {
+    fn into_pool(self, redis_url: &str) -> Result<deadpool_redis::Pool, PubSubError>;
+}
+
+impl PubSubPoolInput for deadpool_redis::Pool {
+    fn into_pool(self, _redis_url: &str) -> Result<deadpool_redis::Pool, PubSubError> {
+        Ok(self)
+    }
+}
+
+impl PubSubPoolInput for RedisConnection {
+    fn into_pool(self, redis_url: &str) -> Result<deadpool_redis::Pool, PubSubError> {
+        deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .map_err(|error| PubSubError::InvalidConfiguration(error.to_string()))
     }
 }
 

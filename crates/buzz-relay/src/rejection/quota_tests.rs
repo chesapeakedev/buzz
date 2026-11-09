@@ -24,11 +24,13 @@ async fn state_with_limits(messages: u64, agent_messages: u64, ws: u64) -> AppSt
         ..RateLimitConfig::default()
     };
     state.auth = Arc::new(AuthService::new(auth));
-    let pool = deadpool_redis::Config::from_url(url)
+    let pool = deadpool_redis::Config::from_url(url.clone())
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .unwrap();
     state.redis_pool = Some(pool.clone());
-    state.admission_rate_limiter = Arc::new(RedisRateLimiter::new(pool));
+    let command = buzz_pubsub::redis_connection(&url).expect("redis command connection");
+    state.redis_command = command.clone();
+    state.admission_rate_limiter = Arc::new(RedisRateLimiter::new(command));
     state
 }
 

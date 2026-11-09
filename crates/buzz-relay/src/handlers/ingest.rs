@@ -517,7 +517,7 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => IngestError::ban(
+        RelayAdminError::Banned(_) => IngestError::ban(
             BanRefusal::Banned,
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ),
@@ -7672,7 +7672,7 @@ mod postgres_tests {
         .map_err(|refusal| {
             let status = refusal.status();
             let body = match refusal {
-                crate::api::relay_members::MembershipRefusal::Api((_, body)) => {
+                crate::api::relay_members::MembershipRefusal::Api(_, (_, body)) => {
                     body.0["error"].as_str().unwrap_or("").to_owned()
                 }
                 crate::api::relay_members::MembershipRefusal::NipFi(class) => {

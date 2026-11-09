@@ -16,13 +16,28 @@ validation, and publication path.
 
 ## Current baseline
 
-- Current upstream base commit: `009dc103f61582dbed5dcd84697365518a5fcf71`
+- Current upstream base commit: `c502e53e6`
 - Upstream branch: `block/buzz` `main`
 - Fork branch: `chesapeakedev/buzz` `main`
 
 Update the commit above in every upstream-sync publication record.
 
-The latest validated sync target is `009dc103f61582dbed5dcd84697365518a5fcf71`.
+The latest validated sync target is `c502e53e6`.
+
+## 2026-11-09 sync
+
+This sync reconciles the fork with upstream's route-reader, reader-operation,
+event-follow-up, membership-selector, community-host, and media-authorization
+API reorganizations. The fork's PostgreSQL usage-query subsystem was removed to
+match upstream. That subsystem was telemetry only: it produced legacy database
+usage and per-community usage series. SQLite event persistence, membership,
+authorization, search, media, Git, and embedded coordination remain intact;
+the old `BUZZ_USAGE_METRICS_PER_COMMUNITY` database-series behavior does not.
+
+The relay now uses upstream's in-memory and storage usage metrics, while the
+fork retains its backend-neutral and SQLite startup paths. Redis construction
+accepts both the fork's pooled form and upstream's shared command connection
+so existing distributed tests and embedded callers remain compatible.
 
 ## 2026-11-02 sync attempt
 

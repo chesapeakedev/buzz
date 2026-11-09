@@ -1037,7 +1037,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         &tenant,
                         &state,
                         &pubkey.to_hex(),
-                        Some(&gate),
+                        Some(&pubkey.to_bytes()),
                     )
                     .await;
                     if auto_join {

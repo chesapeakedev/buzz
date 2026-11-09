@@ -143,7 +143,12 @@ impl SqliteStore {
             let host = row.try_get("host")?;
             transaction.commit().await?;
             return Ok(CreateCommunityWithOwnerResult::Created(
-                CreatedCommunityRecord { id, host },
+                CreatedCommunityRecord {
+                    id,
+                    host,
+                    created: false,
+                    requires_nip_fi: false,
+                },
             ));
         }
 
@@ -182,6 +187,8 @@ impl SqliteStore {
             CreatedCommunityRecord {
                 id: CommunityId::from_uuid(id),
                 host: normalized_host.to_owned(),
+                created: true,
+                requires_nip_fi: false,
             },
         ))
     }
