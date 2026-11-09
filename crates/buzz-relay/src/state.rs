@@ -1969,15 +1969,27 @@ impl AppState {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool, buzz_db::DbError> {
-        let key = (community_id, channel_id, pubkey.to_vec());
-        if let Some(cached) = self.membership_cache.get(&key) {
-            metrics::counter!("buzz_membership_cache_hits_total").increment(1);
-            return Ok(cached);
-        }
-        metrics::counter!("buzz_membership_cache_misses_total").increment(1);
-        let result = self.db.is_member(community_id, channel_id, pubkey).await?;
-        self.membership_cache.insert(key, result);
-        Ok(result)
+        self.membership_cache
+            .contains(
+                (community_id, pubkey.to_vec()),
+                channel_id,
+                async {
+                    // Database futures are large in debug builds. Allocate
+                    // only on a miss, without inflating every caller's stack.
+                    Box::pin(self.db.get_active_membership_ids_read_at(
+                        community_id,
+                        pubkey,
+                        (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                    ))
+                    .await
+                },
+                async {
+                    // Keep the fallback query out of every caller's future
+                    // layout, and allocate it only when a point check is needed.
+                    Box::pin(self.db.is_member(community_id, channel_id, pubkey)).await
+                },
+            )
+            .await
     }
 
     /// Check a batch of pubkeys through the same membership cache seam used by
@@ -1988,23 +2000,30 @@ impl AppState {
         channel_id: Uuid,
         pubkeys: impl IntoIterator<Item = Vec<u8>>,
     ) -> crate::membership_cache::Members {
-        let mut result = crate::membership_cache::Members::default();
-        let pubkeys: Vec<Vec<u8>> = pubkeys.into_iter().collect();
-        for pubkey in pubkeys {
-            match self
-                .is_member_cached(community_id, channel_id, &pubkey)
-                .await
-            {
-                Ok(true) => {
-                    result.members.insert(pubkey);
-                }
-                Ok(false) => {}
-                Err(_) => {
-                    result.unverified.insert(pubkey);
-                }
-            }
-        }
-        result
+        self.membership_cache
+            .members(
+                community_id,
+                channel_id,
+                pubkeys,
+                |pubkeys| async move {
+                    Box::pin(self.db.get_active_membership_ids_bulk_read_at(
+                        community_id,
+                        &pubkeys,
+                        (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                    ))
+                    .await
+                },
+                |pubkeys| async move {
+                    let pairs = Box::pin(self.db.membership_pairs(
+                        community_id,
+                        &[channel_id],
+                        &pubkeys,
+                    ))
+                    .await?;
+                    Ok(pairs.into_iter().map(|(_, pubkey)| pubkey).collect())
+                },
+            )
+            .await
     }
 
     /// Cached active-state lookup used by connection admission and the
@@ -4047,7 +4066,7 @@ pub(crate) mod tests {
         for community in [community_a, community_b] {
             state
                 .membership_cache
-                .insert((community, channel_id, pubkey.clone()), true);
+                .seed_member((community, channel_id, pubkey.clone()), true);
             state.seed_accessible_channels(community, pubkey.clone(), vec![channel_id]);
             state
                 .channel_visibility_cache
@@ -4059,7 +4078,7 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .membership_cache
-                .get(&(community_a, channel_id, pubkey.clone())),
+                .cached_member(&(community_a, channel_id, pubkey.clone())),
             None
         );
         assert_eq!(
@@ -4078,7 +4097,7 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .membership_cache
-                .get(&(community_b, channel_id, pubkey.clone())),
+                .cached_member(&(community_b, channel_id, pubkey.clone())),
             Some(true)
         );
         assert_eq!(

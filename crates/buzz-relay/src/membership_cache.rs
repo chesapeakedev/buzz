@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! One active-membership snapshot per community and user, shared by all of
 //! their channel checks. Discovery lists have different channel-type rules.
 
@@ -342,23 +341,8 @@ impl MembershipCache {
         }
     }
 
-    /// Compatibility point-cache read used by older relay call sites.
-    pub(crate) fn get(&self, key: &(CommunityId, Uuid, Vec<u8>)) -> Option<bool> {
-        self.cached_member(key)
-    }
-
-    /// Compatibility point-cache insertion used by older relay call sites.
-    pub(crate) fn insert(&self, key: (CommunityId, Uuid, Vec<u8>), member: bool) {
-        self.seed_member(key, member);
-    }
-
-    /// Invalidate every membership snapshot.
-    pub(crate) fn invalidate_all(&self) {
-        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
-        self.entries.invalidate_all();
-    }
-
     /// Seed one membership in a synthetic snapshot.
+    #[cfg(test)]
     pub(crate) fn seed_member(&self, key: (CommunityId, Uuid, Vec<u8>), member: bool) {
         let (community, channel, pubkey) = key;
         let key = (community, pubkey);
@@ -387,6 +371,7 @@ impl MembershipCache {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn cached_member(&self, key: &(CommunityId, Uuid, Vec<u8>)) -> Option<bool> {
         Self::answer(&self.entries.get(&(key.0, key.2.clone()))?, key.1).flatten()
     }
