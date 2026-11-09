@@ -86,7 +86,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
     config.require_relay_membership = true;
     config.buzz_v1_enabled = true;
     state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
-        state.redis_pool.clone().expect("redis pool"),
+        state.redis_command.clone(),
     ));
     let state = Arc::new(state);
     let host = format!("bff-{}.local", uuid::Uuid::new_v4());

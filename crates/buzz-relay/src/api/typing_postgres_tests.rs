@@ -241,7 +241,7 @@ async fn persistent_post_ban_gate_uses_cached_restriction_row() {
 #[ignore = "requires Postgres and Redis"]
 async fn typing_uses_cached_serving_state() {
     let f = Fixture::new().await;
-    f.state.community_active.seed(f.community, false);
+    f.state.community_active.insert(f.community, false);
     let (status, body) = f
         .post(&f.member, &f.typing(&f.member, Some(f.channel)))
         .await;

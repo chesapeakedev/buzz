@@ -143,7 +143,7 @@ pub async fn get_presence_bulk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::make_test_pool;
+    use crate::test_util::make_test_connection;
     use buzz_core::{CommunityId, TenantContext};
     use nostr::Keys;
     use uuid::Uuid;
@@ -207,7 +207,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_set_and_get() {
-        let pool = make_test_pool();
+        let pool = make_test_connection();
         let pubkey = make_pubkey();
         let ctx = ctx(0xaaaa, "a.example");
 
@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_bulk() {
-        let pool = make_test_pool();
+        let pool = make_test_connection();
         let pk1 = make_pubkey();
         let pk2 = make_pubkey();
         let pk3 = make_pubkey();
@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_many_sets_with_ttl_and_clears() {
-        let pool = make_test_pool();
+        let pool = make_test_connection();
         let pk1 = make_pubkey();
         let pk2 = make_pubkey();
         let untouched = make_pubkey();
@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_ttl() {
-        let pool = make_test_pool();
+        let pool = make_test_connection();
         let pubkey = make_pubkey();
         let ctx = ctx(0xaaaa, "a.example");
 

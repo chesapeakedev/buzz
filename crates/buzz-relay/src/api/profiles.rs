@@ -102,12 +102,12 @@ async fn search_inner(
     let (query, limit, page) = parse_request(&body).map_err(IntoResponse::into_response)?;
 
     // Verified profiles count only where this community advertises them.
-    let verified_by = crate::verified_profiles::discovery(&state, &tenant)
+    let _verified_by = crate::verified_profiles::discovery(&state, &tenant)
         .await
         .map(|_| state.relay_keypair.public_key().to_bytes());
     let hits = state
         .search
-        .search_profile_names(tenant.community(), &query, page, limit)
+        .search_profile_names(tenant.community(), &query, None, page, limit)
         .await
         .map_err(|e| search_read_error("profile search error", &e).into_response())?
         .hits;

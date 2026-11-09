@@ -3123,7 +3123,7 @@ mod tests {
                 );
                 state.nip98_replay =
                     Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis.clone()));
-                state.redis_pool = redis;
+                state.redis_command = redis;
                 state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(key)))));
                 states.push(Arc::new(state));
             }

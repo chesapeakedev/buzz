@@ -122,17 +122,14 @@ impl RateLimiter for RedisRateLimiter {
 mod tests {
     use super::*;
     use buzz_core::{CommunityId, TenantContext};
-    use deadpool_redis::{Config, Runtime};
     use nostr::Keys;
     use std::net::Ipv6Addr;
     use uuid::Uuid;
 
     fn limiter() -> RedisRateLimiter {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        let pool = Config::from_url(url)
-            .create_pool(Some(Runtime::Tokio1))
-            .expect("create Redis pool");
-        RedisRateLimiter::new(pool)
+        let connection = crate::redis_connection(&url).expect("create Redis connection");
+        RedisRateLimiter::new(connection)
     }
 
     fn tenant(id: Uuid, host: &str) -> TenantContext {

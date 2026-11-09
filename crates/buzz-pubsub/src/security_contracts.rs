@@ -107,11 +107,9 @@ async fn sqlite_security_contract() {
 #[ignore = "requires Redis"]
 async fn redis_security_contract() {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-    let pool = deadpool_redis::Config::from_url(url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .expect("Redis pool");
-    let replay = crate::RedisNip98ReplayGuard::new(pool.clone());
-    let rate = crate::rate_limiter::RedisRateLimiter::new(pool);
+    let connection = crate::redis_connection(&url).expect("Redis connection");
+    let replay = crate::RedisNip98ReplayGuard::new(connection.clone());
+    let rate = crate::rate_limiter::RedisRateLimiter::new(connection);
     run_replay_contract(&replay).await;
     run_rate_contract(&rate).await;
 }

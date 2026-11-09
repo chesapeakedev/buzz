@@ -500,6 +500,7 @@ impl RedisCoordination {
 
 /// Compatibility input accepted by the historical and current constructors.
 pub trait PubSubPoolInput {
+    /// Convert the compatibility input into the pool used by pub/sub workers.
     fn into_pool(self, redis_url: &str) -> Result<deadpool_redis::Pool, PubSubError>;
 }
 
@@ -519,10 +520,17 @@ impl PubSubPoolInput for RedisConnection {
 
 #[cfg(test)]
 pub(crate) mod test_util {
+    use super::RedisConnection;
+
     pub fn make_test_pool() -> deadpool_redis::Pool {
         let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Failed to create Redis pool")
+    }
+
+    pub fn make_test_connection() -> RedisConnection {
+        super::redis_connection("redis://127.0.0.1:6379")
+            .expect("Failed to create Redis connection")
     }
 }
 
@@ -626,7 +634,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_set_and_get() {
-        let pool = make_test_pool();
+        let pool = crate::test_util::make_test_connection();
         let pubkey = Keys::generate().public_key();
         let ctx = ctx(0xaaaa, "a.example");
 
@@ -639,7 +647,7 @@ mod tests {
         let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert_eq!(status.as_deref(), Some("online"));
 
-        let mut conn = pool.get().await.unwrap();
+        let mut conn = pool.clone();
         let ttl: i64 = redis::cmd("TTL")
             .arg(presence::presence_key(&ctx, &pubkey))
             .query_async(&mut conn)

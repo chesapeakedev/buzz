@@ -2039,7 +2039,7 @@ impl AppState {
         self.spawn_cache_invalidation(tenant, CacheInvalidation::Restrictions);
     }
 
-    fn invalidate_restrictions_local(&self, community_id: CommunityId) {
+    pub(crate) fn invalidate_restrictions_local(&self, community_id: CommunityId) {
         if let Err(error) = self
             .restriction_cache
             .invalidate_entries_if(move |(c, _), _| *c == community_id)
@@ -2086,6 +2086,16 @@ impl AppState {
             .await?;
         self.restriction_cache.insert(key, result.clone());
         Ok(result)
+    }
+
+    /// Seeds a restriction cache entry for test fixtures without a database read.
+    #[cfg(test)]
+    pub(crate) fn seed_restriction(
+        &self,
+        key: (CommunityId, Vec<u8>),
+        value: buzz_db::moderation::RestrictionState,
+    ) {
+        self.restriction_cache.insert(key, value);
     }
 
     /// Best-effort drop of a pubkey's cached restriction row after a signed

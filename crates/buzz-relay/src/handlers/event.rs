@@ -4036,7 +4036,7 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn ephemeral_fence_uses_cached_serving_state() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.community_active.seed(tenant.community(), false);
+            state.community_active.insert(tenant.community(), false);
             let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert!(
                 frame.contains("false") && frame.contains("community writes are fenced"),
@@ -4180,7 +4180,7 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_ignore_cached_fence() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.community_active.seed(tenant.community(), false);
+            state.community_active.insert(tenant.community(), false);
             let frame = ok_frame_scoped(
                 &state,
                 &tenant,

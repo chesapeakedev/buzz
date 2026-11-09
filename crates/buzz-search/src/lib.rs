@@ -19,6 +19,9 @@
 //! `community_id = $ctx` as the first predicate. A query bound to community A
 //! cannot return events stored under community B, by construction.
 
+/// Server-side cancellation for abandoned PostgreSQL searches.
+#[allow(dead_code)]
+pub mod cancel;
 /// Search error types.
 pub mod error;
 /// Search query execution.
@@ -201,6 +204,7 @@ impl SearchService {
         &self,
         community: CommunityId,
         q: &str,
+        _verified_by: Option<[u8; 32]>,
         page: u32,
         per_page: u32,
     ) -> Result<SearchResult, SearchError> {

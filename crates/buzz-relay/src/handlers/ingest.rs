@@ -7675,7 +7675,7 @@ mod postgres_tests {
                 crate::api::relay_members::MembershipRefusal::Api(_, (_, body)) => {
                     body.0["error"].as_str().unwrap_or("").to_owned()
                 }
-                crate::api::relay_members::MembershipRefusal::NipFi(class) => {
+                crate::api::relay_members::MembershipRefusal::NipFi(_, class) => {
                     class.http_body().to_owned()
                 }
             };
