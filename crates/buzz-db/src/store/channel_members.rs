@@ -2487,6 +2487,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<String>> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.channel_type_of(community_id, channel_id).await;
+        }
         channel_type_of(&self.pool, community_id, channel_id).await
     }
 

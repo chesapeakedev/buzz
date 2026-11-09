@@ -873,6 +873,21 @@ impl SqliteStore {
             })
             .collect()
     }
+
+    /// Return a channel's type, including deleted channels.
+    pub async fn channel_type_of(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT channel_type FROM channels WHERE community_id = ? AND id = ?",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(&self.channel_pool)
+        .await?)
+    }
 }
 
 impl SqliteStore {
