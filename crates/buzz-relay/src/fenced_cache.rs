@@ -171,12 +171,6 @@ where
             .get(key)
             .map(|entry| (entry.value, entry.read_at))
     }
-
-    /// The shared-read gates, so tests can hold or count a key's gate.
-    #[cfg(test)]
-    pub(crate) fn reads(&self) -> &SharedReads<K> {
-        &self.reads
-    }
 }
 
 #[cfg(test)]
