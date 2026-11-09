@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Test-only barriers for NIP-FI B2 witness tests.
 //!
 //! Each function is a named production hook that is inert in production

@@ -615,6 +615,7 @@ pub(crate) enum AuthMethod {
     /// Enterprise identity assertion (NIP-FI).
     NipFi,
     /// Blossom upload authorization (kind 24242).
+    #[allow(dead_code)]
     Blossom,
     /// Dev-mode `X-Pubkey` header: a claimed key that nothing signed.
     XPubkey,

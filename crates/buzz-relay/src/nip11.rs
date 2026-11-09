@@ -24,6 +24,9 @@ pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayInfo {
+    /// Whether this host's community requires NIP-FI evidence.
+    #[serde(default)]
+    pub requires_nip_fi: bool,
     /// Opt-in host-bound signed compact membership discovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub membership_snapshot: Option<serde_json::Value>,
@@ -287,6 +290,7 @@ impl RelayInfo {
         Self {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
+            requires_nip_fi: false,
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
             membership_snapshot: None,
@@ -408,15 +412,29 @@ pub(crate) async fn nip11_document(
     state: &crate::state::AppState,
     raw_host: &str,
 ) -> Result<RelayInfo, axum::response::Response> {
-    crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .map_err(|_| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response()
-        })?;
+    let policy = if state.config.nip_fi.mode.is_off() {
+        crate::tenant::bind_community(&state.db, raw_host)
+            .await
+            .map_err(|_| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "relay: no community is configured for this host",
+                )
+                    .into_response()
+            })?;
+        false
+    } else {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Ok(host) = axum::http::HeaderValue::from_str(raw_host) {
+            headers.insert(axum::http::header::HOST, host);
+        }
+        crate::nip_fi_policy::resolve(state, &headers)
+            .await
+            .map(|policy| policy.required)
+            // Discovery remains available before a host's policy cache is
+            // warmed; an unresolved policy cannot be advertised as required.
+            .unwrap_or(false)
+    };
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
@@ -433,6 +451,7 @@ pub(crate) async fn nip11_document(
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    info.requires_nip_fi = policy;
     if state.config.artifact_incremental_enabled {
         info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     }

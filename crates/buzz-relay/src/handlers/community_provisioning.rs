@@ -298,9 +298,7 @@ pub async fn provision_community(
                 &state.relay_keypair,
             )
             .await
-            .map_err(|e| match e {
-                _ => format!("failed to create community: {e}"),
-            })?;
+            .map_err(|e| format!("failed to create community: {e}"))?;
         let record = match write.outcome {
             buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
             buzz_db::CreateCommunityWithOwnerResult::HostExists => {

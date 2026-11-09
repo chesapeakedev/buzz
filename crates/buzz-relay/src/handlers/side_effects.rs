@@ -1241,6 +1241,7 @@ pub(crate) mod notice_barrier {
     }
 }
 
+#[allow(missing_docs)]
 pub async fn emit_membership_notification(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -1308,6 +1309,7 @@ pub(crate) async fn emit_membership_notification_tagged(
 
 /// [`emit_membership_notification`] for a caller that already read the
 /// channel's type, such as a kind:9000 notifying several people.
+#[allow(clippy::too_many_arguments)]
 async fn emit_typed_membership_notification(
     tenant: &TenantContext,
     state: &Arc<AppState>,

@@ -4095,11 +4095,6 @@ mod tests {
                 "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            let aged = |secs| {
-                std::time::Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(secs))
-                    .expect("instant in the past")
-            };
             state.seed_restriction(key.clone(), banned.clone());
             let frame =
                 ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;

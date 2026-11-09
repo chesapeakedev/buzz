@@ -6,7 +6,9 @@
 pub(crate) mod access;
 mod admission;
 mod build_info;
+#[cfg(test)]
 mod community_active;
+#[cfg(test)]
 mod fenced_cache;
 mod host_cache;
 mod rejection;

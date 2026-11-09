@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
@@ -7,11 +6,8 @@ use tracing_subscriber::{fmt, prelude::*};
 fn log_filter<S>(rust_log: Option<&str>) -> telemetry::DirectiveFilter<S> {
     telemetry::directive_filter(rust_log.unwrap_or("buzz_relay=info"))
 }
-use uuid::Uuid;
-
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
-use buzz_core::CommunityId;
 use buzz_db::{
     partition::{PartitionAudit, PARTITION_MANAGER_MONTHS_AHEAD},
     DatabaseBackendKind, Db, DbConfig,
@@ -854,9 +850,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         } else {
             Arc::new(buzz_relay::api::git::store::DisabledGitStorage)
         };
-        let redis_pool = redis_pool
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("distributed profile did not create Redis resources"))?;
         (
             Arc::new(media),
             git,
@@ -2589,7 +2582,6 @@ async fn run_storage_sweep_tick(state: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
 

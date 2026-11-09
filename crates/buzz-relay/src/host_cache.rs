@@ -136,21 +136,6 @@ impl HostCache {
         *epoch = epoch.wrapping_add(1);
         self.entries.invalidate_all();
     }
-
-    pub(crate) fn invalidate_community(&self, community: CommunityId) {
-        let mut epoch = self.lock();
-        *epoch = epoch.wrapping_add(1);
-        if let Err(error) = self
-            .entries
-            .invalidate_entries_if(move |_, entry| entry.community == community)
-        {
-            tracing::error!(
-                ?error,
-                "host cache invalidation unavailable; dropping all entries"
-            );
-            self.entries.invalidate_all();
-        }
-    }
 }
 
 #[cfg(test)]

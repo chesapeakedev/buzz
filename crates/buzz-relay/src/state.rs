@@ -1341,6 +1341,7 @@ pub struct AppState {
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
     pub handler_semaphore: Arc<Semaphore>,
+    /// Admission gate for authenticated connections.
     pub auth_gate: buzz_db::ConcurrencyGate,
     /// Semaphore limiting concurrent git subprocess operations across
     /// the whole relay. Bounds resource use; **not** writer
@@ -1376,13 +1377,14 @@ pub struct AppState {
     /// Membership cache: (community_id, channel_id, pubkey_bytes) → is_member.
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
-    pub membership_cache: Arc<crate::membership_cache::MembershipCache>,
+    pub(crate) membership_cache: Arc<crate::membership_cache::MembershipCache>,
     /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
     /// channels the pubkey is an active member of. Short TTL (10s) —
     /// invalidated on membership changes and community-wide channel changes.
     #[allow(clippy::type_complexity)]
     pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
     pub(crate) community_active: Arc<moka::sync::Cache<CommunityId, bool>>,
+    /// Host-to-community resolution cache.
     pub tenant_host_cache: Arc<crate::host_cache::HostCache>,
     pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
     /// Listed open channel IDs per community, the half of every reader's
@@ -1565,7 +1567,9 @@ pub struct AppState {
 /// Accept both the fork's pooled Redis constructor and upstream's shared
 /// command-connection constructor while the backend boundary is converged.
 pub trait RedisStateInput {
+    /// Build the shared Redis command connection.
     fn command(&self, redis_url: &str) -> buzz_pubsub::RedisConnection;
+    /// Return the legacy pool when the caller supplied one.
     fn pool(&self) -> Option<deadpool_redis::Pool>;
 }
 
@@ -2129,7 +2133,7 @@ impl AppState {
     pub(crate) fn invalidate_membership_local(
         &self,
         community_id: CommunityId,
-        channel_id: Uuid,
+        _channel_id: Uuid,
         pubkey: &[u8],
     ) {
         self.membership_cache.invalidate(community_id, pubkey);

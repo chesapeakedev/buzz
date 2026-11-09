@@ -2402,6 +2402,7 @@ pub(crate) async fn enforce_write_restriction(
 /// the WebSocket ephemeral and observer paths. Those run per typing pulse and
 /// observer frame; persistent ingest keeps the uncached read. The verdict is
 /// still taken at `now`, so a cached timeout lifts on time.
+#[allow(dead_code)]
 pub(crate) async fn enforce_cached_write_restriction(
     state: &AppState,
     tenant: &TenantContext,

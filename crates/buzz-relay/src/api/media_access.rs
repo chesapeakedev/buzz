@@ -38,6 +38,7 @@ impl MediaReadMode {
 
 /// Authorize the parent hash before any blob/thumbnail/range information.
 /// The tenant sidecar is a cheap first gate before the new DB lookup.
+#[allow(dead_code)]
 pub(super) async fn enforce_read(
     state: &AppState,
     tenant: &TenantContext,

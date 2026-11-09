@@ -317,6 +317,7 @@ impl EnforceSession {
 
     /// A deny-set revocation: a pending session is refused by the deny set;
     /// an admitted one records its `revoked` end.
+    #[allow(dead_code)]
     pub(crate) fn revoke(&self) {
         self.deny(DENY_SET.by(self.asserted));
         self.end("revoked");

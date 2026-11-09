@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! One active-membership snapshot per community and user, shared by all of
 //! their channel checks. Discovery lists have different channel-type rules.
 
