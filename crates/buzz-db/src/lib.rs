@@ -196,7 +196,14 @@ impl Db {
         pubkey: &[u8],
         _limit: u32,
     ) -> Result<ReadAt<Vec<uuid::Uuid>>> {
-        let value = self.get_accessible_channel_ids(community, pubkey).await?;
+        let value = if let Some(sqlite) = &self.sqlite {
+            // Accessible channels include open channels for non-members. This
+            // seam is used by membership authorization and must contain only
+            // active memberships on every backend.
+            sqlite.get_member_channel_ids(community, pubkey).await?
+        } else {
+            self.get_accessible_channel_ids(community, pubkey).await?
+        };
         Ok(ReadAt {
             value,
             read_at: std::time::Instant::now(),
@@ -212,7 +219,12 @@ impl Db {
     ) -> Result<ReadAt<channel_members::PubkeyChannels>> {
         let mut value = Vec::new();
         for pubkey in pubkeys {
-            for channel in self.get_accessible_channel_ids(community, pubkey).await? {
+            let channels = if let Some(sqlite) = &self.sqlite {
+                sqlite.get_member_channel_ids(community, pubkey).await?
+            } else {
+                self.get_accessible_channel_ids(community, pubkey).await?
+            };
+            for channel in channels {
                 value.push((pubkey.clone(), channel));
             }
         }
