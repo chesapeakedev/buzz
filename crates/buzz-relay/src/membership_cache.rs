@@ -324,7 +324,10 @@ impl MembershipCache {
 
     pub(crate) fn invalidate(&self, community: CommunityId, pubkey: &[u8]) {
         let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
-        self.entries.invalidate(&(community, pubkey.to_vec()));
+        // Exact-key invalidation must remove the entry synchronously. The
+        // cache owns an Arc to the snapshot, and a deferred `invalidate`
+        // leaves that Arc alive across the caller's maintenance pass.
+        self.entries.remove(&(community, pubkey.to_vec()));
     }
 
     pub(crate) fn invalidate_community(&self, community: CommunityId) {
