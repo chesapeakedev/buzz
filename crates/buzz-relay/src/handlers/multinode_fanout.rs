@@ -100,7 +100,7 @@ impl Queued {
     fn new(channel_event: ChannelEvent) -> Self {
         Self {
             community_id: channel_event.community_id,
-            deadline: tokio::time::Instant::now() + MAX_DELIVERY_DELAY,
+            deadline: channel_event.received_at + MAX_DELIVERY_DELAY,
             stored: pubsub_stored_event(channel_event),
         }
     }

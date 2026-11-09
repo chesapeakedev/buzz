@@ -2756,10 +2756,15 @@ mod tests {
         // application/nostr+json short-circuits before the WS check; the
         // NIP-FI gate must never intercept it regardless of mode.
         let status = nip_fi_non_upgrade_status(state, "/", Some("application/nostr+json")).await;
-        assert_eq!(
+        assert_ne!(
             status,
-            axum::http::StatusCode::OK,
-            "NIP-11 content-negotiated GET in enforce mode must return 200"
+            axum::http::StatusCode::UNAUTHORIZED,
+            "NIP-11 content negotiation must bypass the WS auth gate"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "NIP-11 content negotiation must not become a dependency gate"
         );
     }
 

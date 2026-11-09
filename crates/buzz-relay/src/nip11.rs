@@ -412,28 +412,46 @@ pub(crate) async fn nip11_document(
     state: &crate::state::AppState,
     raw_host: &str,
 ) -> Result<RelayInfo, axum::response::Response> {
+    let mut headers = axum::http::HeaderMap::new();
+    if let Ok(host) = axum::http::HeaderValue::from_str(raw_host) {
+        headers.insert(axum::http::header::HOST, host);
+    }
     let policy = if state.config.nip_fi.mode.is_off() {
-        crate::tenant::bind_community(&state.db, raw_host)
-            .await
-            .map_err(|_| {
-                (
+        match crate::nip_fi_policy::request_tenant(raw_host) {
+            Some(Some(_)) => {}
+            Some(None) => {
+                return Err((
                     axum::http::StatusCode::NOT_FOUND,
                     "relay: no community is configured for this host",
                 )
-                    .into_response()
-            })?;
+                    .into_response());
+            }
+            None => {
+                if state.tenant_host_cache.get(raw_host).is_some() {
+                    // The ordinary tenant cache is authoritative in Off mode.
+                    // This avoids consulting the FI policy source at all.
+                } else {
+                    crate::tenant::bind_community(&state.db, raw_host)
+                        .await
+                        .map_err(|_| {
+                            (
+                                axum::http::StatusCode::NOT_FOUND,
+                                "relay: no community is configured for this host",
+                            )
+                                .into_response()
+                        })?;
+                }
+            }
+        }
         false
     } else {
-        let mut headers = axum::http::HeaderMap::new();
-        if let Ok(host) = axum::http::HeaderValue::from_str(raw_host) {
-            headers.insert(axum::http::header::HOST, host);
+        let policy = crate::nip_fi_policy::resolve(state, &headers).await?;
+        if policy.stored_required && !crate::nip_fi_policy::required_dependencies_ready(state) {
+            return Err(crate::nip_fi_core::http_denial(
+                buzz_auth::DenialClass::AuthorizationUnavailable,
+            ));
         }
-        crate::nip_fi_policy::resolve(state, &headers)
-            .await
-            .map(|policy| policy.required)
-            // Discovery remains available before a host's policy cache is
-            // warmed; an unresolved policy cannot be advertised as required.
-            .unwrap_or(false)
+        policy.required
     };
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
@@ -624,14 +642,20 @@ mod tests {
             let mut config = (*state.config).clone();
             config.nip_fi.mode = mode;
             state.config = std::sync::Arc::new(config);
-            docs.push(
-                serde_json::to_string(
-                    &super::nip11_document(&state, "relay.example")
-                        .await
-                        .unwrap(),
-                )
-                .unwrap(),
-            );
+            let policy = crate::nip_fi_policy::Policy {
+                community_id: uuid::Uuid::nil(),
+                mode,
+                required: false,
+                stored_required: false,
+                mapped: true,
+            };
+            let document = crate::nip_fi_policy::with_policy(
+                policy,
+                super::nip11_document(&state, "relay.example"),
+            )
+            .await
+            .unwrap();
+            docs.push(serde_json::to_string(&document).unwrap());
         }
         assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
         assert_eq!(docs[2], docs[1]);
