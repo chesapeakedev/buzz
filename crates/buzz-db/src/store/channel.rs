@@ -2103,6 +2103,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<ChannelRecord> {
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_channel(community_id, channel_id).await;
+        }
         get_channel(&self.pool, community_id, channel_id).await
     }
 
